@@ -51,6 +51,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Use(middleware.Recoverer)
 	r.Use(s.sessionMiddleware)
 	r.Use(s.csrfMiddleware)
+	r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	r.Get("/static/*", s.static)
 	r.Get("/healthz", s.health)
 	r.Get("/login", s.loginPage)

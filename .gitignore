@@ -8,4 +8,6 @@
 *.db-wal
 coverage.out
 .env
+output/
+.playwright-cli/
 
