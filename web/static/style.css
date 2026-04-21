@@ -59,11 +59,38 @@ a:hover {
   color: var(--primary-hover);
 }
 
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 3px solid rgba(15, 118, 110, 0.28);
+  outline-offset: 2px;
+}
+
 button,
 input,
 textarea,
 select {
   font: inherit;
+}
+
+.skip-link {
+  position: fixed;
+  left: var(--space-4);
+  top: var(--space-4);
+  z-index: 100;
+  transform: translateY(-160%);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px 12px;
+  box-shadow: var(--shadow);
+  font-weight: 750;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
 }
 
 .app-shell {
@@ -133,7 +160,7 @@ select {
 }
 
 .nav-group {
-  margin: var(--space-4) var(--space-2) var(--space-1);
+  margin: var(--space-5) var(--space-2) var(--space-1);
   color: var(--sidebar-muted);
   font-size: 11px;
   text-transform: uppercase;
@@ -141,17 +168,35 @@ select {
   font-weight: 700;
 }
 
+.nav-group:first-child {
+  margin-top: 0;
+}
+
 .side-nav a {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 40px;
   color: var(--sidebar-ink);
-  padding: 9px 10px;
+  padding: 9px 10px 9px 14px;
   border-radius: var(--radius-sm);
   font-weight: 650;
 }
 
 .side-nav a:hover,
 .side-nav a.active {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.1);
   color: #ffffff;
+}
+
+.side-nav a.active::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  width: 3px;
+  height: 20px;
+  border-radius: 999px;
+  background: #5eead4;
 }
 
 .workspace {
@@ -185,6 +230,22 @@ select {
 .topbar-kicker {
   color: var(--muted);
   font-size: 12px;
+}
+
+.account-area {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.account-name {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .content {
@@ -526,6 +587,13 @@ tr:last-child td {
   font-weight: 750;
 }
 
+.tabs a:hover,
+.tabs a.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-hover);
+}
+
 .empty-state {
   display: grid;
   place-items: center;
@@ -610,6 +678,7 @@ tr:last-child td {
 
   .nav-group {
     grid-column: 1 / -1;
+    margin-top: var(--space-3);
   }
 
   .content {
@@ -641,13 +710,19 @@ tr:last-child td {
   }
 
   .side-nav a {
-    padding: 8px;
+    min-height: 42px;
+    padding: 9px 10px 9px 14px;
   }
 
   .topbar {
     align-items: flex-start;
     flex-direction: column;
     height: auto;
+  }
+
+  .account-area {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .toolbar-form,

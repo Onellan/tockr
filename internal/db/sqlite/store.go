@@ -191,7 +191,6 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var users []domain.User
 	for rows.Next() {
 		var u domain.User
@@ -205,10 +204,23 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 			t := parseTime(last.String)
 			u.LastLoginAt = &t
 		}
-		u.Roles, _ = s.userRoles(ctx, u.ID)
 		users = append(users, u)
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range users {
+		roles, err := s.userRoles(ctx, users[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		users[i].Roles = roles
+	}
+	return users, nil
 }
 
 func (s *Store) CreateUser(ctx context.Context, u domain.User, password string, roles []domain.Role) error {

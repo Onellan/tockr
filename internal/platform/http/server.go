@@ -74,7 +74,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/timesheets", s.saveTimesheet)
 		r.Post("/timesheets/start", s.startTimer)
 		r.Post("/timesheets/stop", s.stopTimer)
-		r.Get("/reports", s.reports)
+		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
 		r.Get("/invoices", s.requirePermission(auth.PermManageInvoices, s.invoices))
 		r.Post("/invoices", s.requirePermission(auth.PermManageInvoices, s.createInvoice))
 		r.Get("/webhooks", s.requirePermission(auth.PermManageWebhooks, s.webhooks))
@@ -91,9 +91,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/timesheets", s.apiTimesheets)
 		r.Post("/timer/start", s.startTimer)
 		r.Post("/timer/stop", s.stopTimer)
-		r.Get("/invoices/{id}/download", s.apiInvoiceDownload)
-		r.Patch("/invoices/{id}/meta", s.apiInvoiceMeta)
-		r.Get("/webhooks", s.apiWebhooks)
+		r.Get("/invoices/{id}/download", s.requirePermission(auth.PermManageInvoices, s.apiInvoiceDownload))
+		r.Patch("/invoices/{id}/meta", s.requirePermission(auth.PermManageInvoices, s.apiInvoiceMeta))
+		r.Get("/webhooks", s.requirePermission(auth.PermManageWebhooks, s.apiWebhooks))
 	})
 	s.router = r
 	return s
@@ -171,7 +171,11 @@ func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 	for _, c := range items {
 		rows = append(rows, []string{fmt.Sprint(c.ID), c.Name, c.Company, c.Email, c.Currency, boolText(c.Visible), boolText(c.Billable)})
 	}
-	s.render(w, r, templates.EntityList[domain.Customer]("Customers", s.nav(r), []string{"ID", "Name", "Company", "Email", "Currency", "Visible", "Billable"}, rows, templates.CustomerForm(s.nav(r), nil)))
+	var form templ.Component
+	if s.hasPermission(r, auth.PermManageMaster) {
+		form = templates.CustomerForm(s.nav(r), nil)
+	}
+	s.render(w, r, templates.EntityList[domain.Customer]("Customers", s.nav(r), []string{"ID", "Name", "Company", "Email", "Currency", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +203,11 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	for _, p := range items {
 		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Billable)})
 	}
-	s.render(w, r, templates.EntityList[domain.Project]("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Billable"}, rows, templates.ProjectForm(s.nav(r))))
+	var form templ.Component
+	if s.hasPermission(r, auth.PermManageMaster) {
+		form = templates.ProjectForm(s.nav(r))
+	}
+	s.render(w, r, templates.EntityList[domain.Project]("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +236,11 @@ func (s *Server) activities(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, []string{fmt.Sprint(a.ID), project, a.Name, a.Number, boolText(a.Visible), boolText(a.Billable)})
 	}
-	s.render(w, r, templates.EntityList[domain.Activity]("Activities", s.nav(r), []string{"ID", "Project", "Name", "Number", "Visible", "Billable"}, rows, templates.ActivityForm(s.nav(r))))
+	var form templ.Component
+	if s.hasPermission(r, auth.PermManageMaster) {
+		form = templates.ActivityForm(s.nav(r))
+	}
+	s.render(w, r, templates.EntityList[domain.Activity]("Activities", s.nav(r), []string{"ID", "Project", "Name", "Number", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveActivity(w http.ResponseWriter, r *http.Request) {
@@ -622,12 +634,16 @@ func (s *Server) requireLoginMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) requirePermission(permission string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !auth.HasPermission(s.state(r).User, permission) {
+		if !s.hasPermission(r, permission) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next(w, r)
 	}
+}
+
+func (s *Server) hasPermission(r *http.Request, permission string) bool {
+	return auth.HasPermission(s.state(r).User, permission)
 }
 
 func (s *Server) state(r *http.Request) *requestState {
@@ -643,7 +659,21 @@ func (s *Server) nav(r *http.Request) *templates.NavUser {
 	if state.User == nil || state.Session == nil {
 		return nil
 	}
-	return &templates.NavUser{DisplayName: state.User.DisplayName, CSRF: state.Session.CSRFToken, IsAdmin: auth.HasPermission(state.User, auth.PermAdmin)}
+	permissions := map[string]bool{}
+	for _, permission := range []string{
+		auth.PermAdmin,
+		auth.PermManageUsers,
+		auth.PermManageMaster,
+		auth.PermManageRates,
+		auth.PermTrackTime,
+		auth.PermViewReports,
+		auth.PermManageInvoices,
+		auth.PermUseAPI,
+		auth.PermManageWebhooks,
+	} {
+		permissions[permission] = auth.HasPermission(state.User, permission)
+	}
+	return &templates.NavUser{DisplayName: state.User.DisplayName, CSRF: state.Session.CSRFToken, CurrentPath: r.URL.Path, Permissions: permissions}
 }
 
 func (s *Server) cookie(sessionID string) *http.Cookie {

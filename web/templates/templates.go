@@ -5,41 +5,45 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/a-h/templ"
 
+	"tockr/internal/auth"
 	"tockr/internal/domain"
 )
 
 type NavUser struct {
 	DisplayName string
 	CSRF        string
-	IsAdmin     bool
+	CurrentPath string
+	Permissions map[string]bool
 }
 
 type navItem struct {
-	Label string
-	Path  string
-	Group string
+	Label      string
+	Path       string
+	Group      string
+	Permission string
 }
 
 var primaryNav = []navItem{
-	{"Dashboard", "/", "Work"},
-	{"Timesheets", "/timesheets", "Work"},
-	{"Customers", "/customers", "Manage"},
-	{"Projects", "/projects", "Manage"},
-	{"Activities", "/activities", "Manage"},
-	{"Tags", "/tags", "Manage"},
-	{"Reports", "/reports", "Analyze"},
-	{"Invoices", "/invoices", "Analyze"},
+	{"Dashboard", "/", "Work", ""},
+	{"Timesheets", "/timesheets", "Work", auth.PermTrackTime},
+	{"Customers", "/customers", "Manage", ""},
+	{"Projects", "/projects", "Manage", ""},
+	{"Activities", "/activities", "Manage", ""},
+	{"Tags", "/tags", "Manage", auth.PermTrackTime},
+	{"Reports", "/reports", "Analyze", auth.PermViewReports},
+	{"Invoices", "/invoices", "Analyze", auth.PermManageInvoices},
 }
 
 var adminNav = []navItem{
-	{"Rates", "/rates", "Admin"},
-	{"Users", "/admin/users", "Admin"},
-	{"Webhooks", "/webhooks", "Admin"},
+	{"Rates", "/rates", "Admin", auth.PermManageRates},
+	{"Users", "/admin/users", "Admin", auth.PermManageUsers},
+	{"Webhooks", "/webhooks", "Admin", auth.PermManageWebhooks},
 }
 
 func Layout(title string, user *NavUser, body templ.Component) templ.Component {
@@ -53,12 +57,10 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 			_, _ = fmt.Fprint(w, `</main></body></html>`)
 			return nil
 		}
-		_, _ = fmt.Fprint(w, `<div class="app-shell"><aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><nav class="side-nav">`)
-		renderNav(w, primaryNav, "")
-		if user.IsAdmin {
-			renderNav(w, adminNav, "")
-		}
-		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><form method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="ghost-button">%s · Logout</button></form></header><main class="content">`, esc(title), esc(user.CSRF), esc(user.DisplayName))
+		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><nav class="side-nav" aria-label="Primary navigation">`)
+		renderNav(w, user, primaryNav)
+		renderNav(w, user, adminNav)
+		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area" aria-label="Account"><span class="account-name">%s</span><form method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="ghost-button" type="submit">Logout</button></form></div></header><main class="content" id="main-content" tabindex="-1">`, esc(title), esc(user.DisplayName), esc(user.CSRF))
 		if err := body.Render(ctx, w); err != nil {
 			return err
 		}
@@ -101,7 +103,7 @@ func EntityList[T any](title string, user *NavUser, headers []string, rows [][]s
 	return Layout(title, user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, title, "Directory", "Create and maintain the records used by time entries and reporting.")
 		if form != nil {
-			_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create `+esc(strings.TrimSuffix(title, "s"))+`</h2><p>Keep required fields tight and searchable.</p></div></div>`)
+			_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create `+esc(singularTitle(title))+`</h2><p>Keep required fields tight and searchable.</p></div></div>`)
 			if err := form.Render(ctx, w); err != nil {
 				return err
 			}
@@ -164,7 +166,12 @@ func Timesheets(user *NavUser, rows [][]string) templ.Component {
 func Reports(user *NavUser, group string, rows []map[string]any) templ.Component {
 	return Layout("Reports", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Reports", "Analysis", "Branch-derived activity and customer reporting, simplified for fast reads.")
-		_, _ = fmt.Fprint(w, `<div class="tabs"><a href="/reports?group=user">Users</a><a href="/reports?group=customer">Customers</a><a href="/reports?group=project">Projects</a><a href="/reports?group=activity">Activities</a></div>`)
+		_, _ = fmt.Fprint(w, `<div class="tabs" aria-label="Report groups">`)
+		reportTab(w, group, "user", "Users")
+		reportTab(w, group, "customer", "Customers")
+		reportTab(w, group, "project", "Projects")
+		reportTab(w, group, "activity", "Activities")
+		_, _ = fmt.Fprint(w, `</div>`)
 		out := [][]string{}
 		for _, row := range rows {
 			out = append(out, []string{fmt.Sprint(row["name"]), fmt.Sprint(row["count"]), duration(row["seconds"].(int64)), money(row["cents"].(int64))})
@@ -214,19 +221,51 @@ func ErrorPage(title, message string) templ.Component {
 	}))
 }
 
-func renderNav(w io.Writer, items []navItem, active string) {
+func renderNav(w io.Writer, user *NavUser, items []navItem) {
 	currentGroup := ""
 	for _, item := range items {
+		if !user.can(item.Permission) {
+			continue
+		}
 		if item.Group != currentGroup {
 			currentGroup = item.Group
 			_, _ = fmt.Fprintf(w, `<span class="nav-group">%s</span>`, esc(currentGroup))
 		}
-		class := ""
-		if item.Path == active {
-			class = ` class="active"`
+		class := ` class="nav-link"`
+		if isActivePath(user.CurrentPath, item.Path) {
+			class = ` class="nav-link active" aria-current="page"`
 		}
 		_, _ = fmt.Fprintf(w, `<a%s href="%s">%s</a>`, class, esc(item.Path), esc(item.Label))
 	}
+}
+
+func (u *NavUser) can(permission string) bool {
+	if permission == "" {
+		return true
+	}
+	return u != nil && u.Permissions[permission]
+}
+
+func isActivePath(currentPath, itemPath string) bool {
+	if currentPath == "" {
+		return false
+	}
+	cleanCurrent := path.Clean("/" + strings.TrimPrefix(currentPath, "/"))
+	cleanItem := path.Clean("/" + strings.TrimPrefix(itemPath, "/"))
+	if cleanItem == "/" {
+		return cleanCurrent == "/"
+	}
+	return cleanCurrent == cleanItem || strings.HasPrefix(cleanCurrent, cleanItem+"/")
+}
+
+func reportTab(w io.Writer, current, value, label string) {
+	class := ` class="tab-link"`
+	currentAttr := ""
+	if current == value {
+		class = ` class="tab-link active"`
+		currentAttr = ` aria-current="page"`
+	}
+	_, _ = fmt.Fprintf(w, `<a%s%s href="/reports?group=%s">%s</a>`, class, currentAttr, esc(value), esc(label))
 }
 
 func pageHeader(w io.Writer, title, eyebrow, description string) {
@@ -328,6 +367,25 @@ func defaultVal(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func singularTitle(title string) string {
+	switch title {
+	case "Activities":
+		return "Activity"
+	case "Customers":
+		return "Customer"
+	case "Projects":
+		return "Project"
+	case "Tags":
+		return "Tag"
+	case "Rates":
+		return "Rate"
+	case "Users":
+		return "User"
+	default:
+		return strings.TrimSuffix(title, "s")
+	}
 }
 
 func FormatTime(t time.Time) string {
