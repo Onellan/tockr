@@ -30,16 +30,18 @@ type Session struct {
 }
 
 type TimesheetFilter struct {
-	UserID     int64
-	CustomerID int64
-	ProjectID  int64
-	ActivityID int64
-	Begin      *time.Time
-	End        *time.Time
-	Exported   *bool
-	Billable   *bool
-	Page       int
-	Size       int
+	WorkspaceID int64
+	UserID      int64
+	CustomerID  int64
+	ProjectID   int64
+	ProjectIDs  []int64
+	ActivityID  int64
+	Begin       *time.Time
+	End         *time.Time
+	Exported    *bool
+	Billable    *bool
+	Page        int
+	Size        int
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -89,8 +91,10 @@ func (s *Store) configure(ctx context.Context) error {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, schema)
-	return err
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	return s.ensureHierarchy(ctx)
 }
 
 func (s *Store) SeedAdmin(ctx context.Context, email, password, timezone, currency string) error {
@@ -106,13 +110,16 @@ func (s *Store) SeedAdmin(ctx context.Context, email, password, timezone, curren
 		return err
 	}
 	now := utcNow()
+	var orgID, workspaceID int64 = 1, 1
+	_ = s.db.QueryRowContext(ctx, `SELECT id FROM organizations ORDER BY id LIMIT 1`).Scan(&orgID)
+	_ = s.db.QueryRowContext(ctx, `SELECT id FROM workspaces ORDER BY id LIMIT 1`).Scan(&workspaceID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
-	res, err := tx.ExecContext(ctx, `INSERT INTO users(email, username, display_name, password_hash, timezone, enabled, created_at) VALUES(?,?,?,?,?,?,?)`,
-		email, "admin", "Administrator", hash, timezone, 1, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO users(organization_id, email, username, display_name, password_hash, timezone, enabled, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		orgID, email, "admin", "Administrator", hash, timezone, 1, now)
 	if err != nil {
 		return err
 	}
@@ -125,6 +132,12 @@ func (s *Store) SeedAdmin(ctx context.Context, email, password, timezone, curren
 			return err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO organization_members(organization_id, user_id, role, created_at) VALUES(?,?,?,?)`, orgID, userID, string(domain.OrgRoleOwner), now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(?,?,?,?)`, workspaceID, userID, string(domain.WorkspaceRoleAdmin), now); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('default_currency', ?), ('future_time_policy', ?)`, currency, "end_of_day"); err != nil {
 		return err
 	}
@@ -136,6 +149,68 @@ func (s *Store) Audit(ctx context.Context, userID *int64, action, entity string,
 		userID, action, entity, entityID, detail, utcNow())
 }
 
+func (s *Store) AccessForUser(ctx context.Context, userID int64) (domain.AccessContext, error) {
+	access := domain.AccessContext{
+		UserID:            userID,
+		ManagedProjectIDs: map[int64]bool{},
+		MemberProjectIDs:  map[int64]bool{},
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT u.organization_id, COALESCE(om.role,'') FROM users u LEFT JOIN organization_members om ON om.user_id=u.id AND om.organization_id=u.organization_id WHERE u.id=?`, userID)
+	var orgRole string
+	if err := row.Scan(&access.OrganizationID, &orgRole); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return access, nil
+		}
+		return access, err
+	}
+	access.OrganizationRole = domain.OrganizationRole(orgRole)
+	var workspaceRole string
+	err := s.db.QueryRowContext(ctx, `SELECT w.id, wm.role FROM workspace_members wm JOIN workspaces w ON w.id=wm.workspace_id WHERE wm.user_id=? ORDER BY w.id LIMIT 1`, userID).
+		Scan(&access.WorkspaceID, &workspaceRole)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return access, err
+	}
+	access.WorkspaceRole = domain.WorkspaceRole(workspaceRole)
+	if access.WorkspaceID == 0 && access.IsOrgAdmin() {
+		if err := s.db.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, access.OrganizationID).Scan(&access.WorkspaceID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return access, err
+		}
+		access.WorkspaceRole = domain.WorkspaceRoleAdmin
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT project_id, role FROM project_members WHERE user_id=?`, userID)
+	if err != nil {
+		return access, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var projectID int64
+		var role string
+		if err := rows.Scan(&projectID, &role); err != nil {
+			return access, err
+		}
+		if domain.ProjectRole(role) == domain.ProjectRoleManager {
+			access.ManagedProjectIDs[projectID] = true
+		}
+		access.MemberProjectIDs[projectID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return access, err
+	}
+	groupRows, err := s.db.QueryContext(ctx, `SELECT DISTINCT pg.project_id FROM group_members gm JOIN project_groups pg ON pg.group_id=gm.group_id WHERE gm.user_id=?`, userID)
+	if err != nil {
+		return access, err
+	}
+	defer groupRows.Close()
+	for groupRows.Next() {
+		var projectID int64
+		if err := groupRows.Scan(&projectID); err != nil {
+			return access, err
+		}
+		access.MemberProjectIDs[projectID] = true
+	}
+	return access, groupRows.Err()
+}
+
 func (s *Store) FindUserByEmail(ctx context.Context, email string) (*domain.User, error) {
 	return s.scanUser(ctx, `WHERE lower(email)=lower(?)`, email)
 }
@@ -145,12 +220,12 @@ func (s *Store) FindUserByID(ctx context.Context, id int64) (*domain.User, error
 }
 
 func (s *Store) scanUser(ctx context.Context, where string, args ...any) (*domain.User, error) {
-	q := `SELECT id, email, username, display_name, password_hash, timezone, enabled, created_at, last_login_at FROM users ` + where
+	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, created_at, last_login_at FROM users ` + where
 	row := s.db.QueryRowContext(ctx, q, args...)
 	var u domain.User
 	var created string
 	var last sql.NullString
-	if err := row.Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &created, &last); err != nil {
+	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &created, &last); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -187,7 +262,7 @@ func (s *Store) userRoles(ctx context.Context, userID int64) ([]domain.Role, err
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, email, username, display_name, password_hash, timezone, enabled, created_at, last_login_at FROM users ORDER BY display_name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, created_at, last_login_at FROM users ORDER BY display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +271,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 		var u domain.User
 		var created string
 		var last sql.NullString
-		if err := rows.Scan(&u.ID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &created, &last); err != nil {
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &created, &last); err != nil {
 			return nil, err
 		}
 		u.CreatedAt = parseTime(created)
@@ -233,8 +308,15 @@ func (s *Store) CreateUser(ctx context.Context, u domain.User, password string, 
 		return err
 	}
 	defer rollback(tx)
-	res, err := tx.ExecContext(ctx, `INSERT INTO users(email, username, display_name, password_hash, timezone, enabled, created_at) VALUES(?,?,?,?,?,?,?)`,
-		u.Email, u.Username, u.DisplayName, hash, defaultString(u.Timezone, "UTC"), boolInt(u.Enabled), utcNow())
+	if u.OrganizationID == 0 {
+		_ = tx.QueryRowContext(ctx, `SELECT id FROM organizations ORDER BY id LIMIT 1`).Scan(&u.OrganizationID)
+		if u.OrganizationID == 0 {
+			u.OrganizationID = 1
+		}
+	}
+	now := utcNow()
+	res, err := tx.ExecContext(ctx, `INSERT INTO users(organization_id, email, username, display_name, password_hash, timezone, enabled, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		u.OrganizationID, u.Email, u.Username, u.DisplayName, hash, defaultString(u.Timezone, "UTC"), boolInt(u.Enabled), now)
 	if err != nil {
 		return err
 	}
@@ -247,7 +329,63 @@ func (s *Store) CreateUser(ctx context.Context, u domain.User, password string, 
 			return err
 		}
 	}
+	if orgRole := organizationRoleFromLegacy(roles); orgRole != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO organization_members(organization_id, user_id, role, created_at) VALUES(?,?,?,?)`, u.OrganizationID, id, string(orgRole), now); err != nil {
+			return err
+		}
+	}
+	var workspaceID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, u.OrganizationID).Scan(&workspaceID); err == nil && workspaceID > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(?,?,?,?)`, workspaceID, id, string(workspaceRoleFromLegacy(roles)), now); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+func (s *Store) ListGroups(ctx context.Context, workspaceID int64) ([]domain.Group, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, description, created_at FROM groups WHERE workspace_id=? ORDER BY name`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var groups []domain.Group
+	for rows.Next() {
+		var g domain.Group
+		var created string
+		if err := rows.Scan(&g.ID, &g.WorkspaceID, &g.Name, &g.Description, &created); err != nil {
+			return nil, err
+		}
+		g.CreatedAt = parseTime(created)
+		groups = append(groups, g)
+	}
+	return groups, rows.Err()
+}
+
+func (s *Store) CreateGroup(ctx context.Context, workspaceID int64, name, description string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO groups(workspace_id, name, description, created_at) VALUES(?,?,?,?)`, workspaceID, strings.TrimSpace(name), strings.TrimSpace(description), utcNow())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) AddUserToGroup(ctx context.Context, groupID, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO group_members(group_id, user_id, created_at) VALUES(?,?,?)`, groupID, userID, utcNow())
+	return err
+}
+
+func (s *Store) AddProjectMember(ctx context.Context, projectID, userID int64, role domain.ProjectRole) error {
+	if role == "" {
+		role = domain.ProjectRoleMember
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO project_members(project_id, user_id, role, created_at) VALUES(?,?,?,?) ON CONFLICT(project_id, user_id) DO UPDATE SET role=excluded.role`, projectID, userID, string(role), utcNow())
+	return err
+}
+
+func (s *Store) AddGroupToProject(ctx context.Context, projectID, groupID int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO project_groups(project_id, group_id, created_at) VALUES(?,?,?)`, projectID, groupID, utcNow())
+	return err
 }
 
 func (s *Store) TouchLogin(ctx context.Context, userID int64) error {
@@ -287,28 +425,39 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 
 func (s *Store) UpsertCustomer(ctx context.Context, c *domain.Customer) error {
 	now := utcNow()
+	if c.WorkspaceID == 0 {
+		c.WorkspaceID = 1
+	}
 	if c.ID == 0 {
-		res, err := s.db.ExecContext(ctx, `INSERT INTO customers(name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			c.Name, c.Number, c.Company, c.Contact, c.Email, defaultString(c.Currency, "USD"), defaultString(c.Timezone, "UTC"), boolInt(c.Visible), boolInt(c.Billable), c.Comment, c.LegacyJSON, now)
+		res, err := s.db.ExecContext(ctx, `INSERT INTO customers(workspace_id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			c.WorkspaceID, c.Name, c.Number, c.Company, c.Contact, c.Email, defaultString(c.Currency, "USD"), defaultString(c.Timezone, "UTC"), boolInt(c.Visible), boolInt(c.Billable), c.Comment, c.LegacyJSON, now)
 		if err != nil {
 			return err
 		}
 		c.ID, err = res.LastInsertId()
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE customers SET name=?, number=?, company=?, contact=?, email=?, currency=?, timezone=?, visible=?, billable=?, comment=?, legacy_json=? WHERE id=?`,
-		c.Name, c.Number, c.Company, c.Contact, c.Email, c.Currency, c.Timezone, boolInt(c.Visible), boolInt(c.Billable), c.Comment, c.LegacyJSON, c.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE customers SET workspace_id=?, name=?, number=?, company=?, contact=?, email=?, currency=?, timezone=?, visible=?, billable=?, comment=?, legacy_json=? WHERE id=?`,
+		c.WorkspaceID, c.Name, c.Number, c.Company, c.Contact, c.Email, c.Currency, c.Timezone, boolInt(c.Visible), boolInt(c.Billable), c.Comment, c.LegacyJSON, c.ID)
 	return err
 }
 
-func (s *Store) ListCustomers(ctx context.Context, term string, page, size int) ([]domain.Customer, domain.Page, error) {
+func (s *Store) ListCustomers(ctx context.Context, access domain.AccessContext, term string, page, size int) ([]domain.Customer, domain.Page, error) {
 	page, size = domain.NormalizePage(page, size)
-	where, args := searchWhere("name", term)
+	where, args := scopedSearchWhere("workspace_id", access.WorkspaceID, "name", term)
+	if !access.IsWorkspaceAdmin() {
+		where += ` AND EXISTS (
+			SELECT 1 FROM projects p
+			WHERE p.customer_id=customers.id AND p.workspace_id=customers.workspace_id
+			AND (p.private=0 OR p.id IN (SELECT project_id FROM project_members WHERE user_id=?) OR p.id IN (SELECT pg.project_id FROM project_groups pg JOIN group_members gm ON gm.group_id=pg.group_id WHERE gm.user_id=?))
+		)`
+		args = append(args, access.UserID, access.UserID)
+	}
 	total, err := s.count(ctx, "customers", where, args...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at FROM customers `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at FROM customers `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -317,7 +466,7 @@ func (s *Store) ListCustomers(ctx context.Context, term string, page, size int) 
 	for rows.Next() {
 		var c domain.Customer
 		var created string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Number, &c.Company, &c.Contact, &c.Email, &c.Currency, &c.Timezone, &c.Visible, &c.Billable, &c.Comment, &c.LegacyJSON, &created); err != nil {
+		if err := rows.Scan(&c.ID, &c.WorkspaceID, &c.Name, &c.Number, &c.Company, &c.Contact, &c.Email, &c.Currency, &c.Timezone, &c.Visible, &c.Billable, &c.Comment, &c.LegacyJSON, &created); err != nil {
 			return nil, domain.Page{}, err
 		}
 		c.CreatedAt = parseTime(created)
@@ -329,8 +478,8 @@ func (s *Store) ListCustomers(ctx context.Context, term string, page, size int) 
 func (s *Store) Customer(ctx context.Context, id int64) (*domain.Customer, error) {
 	var c domain.Customer
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at FROM customers WHERE id=?`, id).
-		Scan(&c.ID, &c.Name, &c.Number, &c.Company, &c.Contact, &c.Email, &c.Currency, &c.Timezone, &c.Visible, &c.Billable, &c.Comment, &c.LegacyJSON, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at FROM customers WHERE id=?`, id).
+		Scan(&c.ID, &c.WorkspaceID, &c.Name, &c.Number, &c.Company, &c.Contact, &c.Email, &c.Currency, &c.Timezone, &c.Visible, &c.Billable, &c.Comment, &c.LegacyJSON, &created)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -343,23 +492,26 @@ func (s *Store) Customer(ctx context.Context, id int64) (*domain.Customer, error
 
 func (s *Store) UpsertProject(ctx context.Context, p *domain.Project) error {
 	now := utcNow()
+	if p.WorkspaceID == 0 {
+		p.WorkspaceID = 1
+	}
 	if p.ID == 0 {
-		res, err := s.db.ExecContext(ctx, `INSERT INTO projects(customer_id, name, number, order_number, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-			p.CustomerID, p.Name, p.Number, p.OrderNo, boolInt(p.Visible), boolInt(p.Billable), p.Comment, p.LegacyJSON, now)
+		res, err := s.db.ExecContext(ctx, `INSERT INTO projects(workspace_id, customer_id, name, number, order_number, visible, private, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			p.WorkspaceID, p.CustomerID, p.Name, p.Number, p.OrderNo, boolInt(p.Visible), boolInt(p.Private), boolInt(p.Billable), p.Comment, p.LegacyJSON, now)
 		if err != nil {
 			return err
 		}
 		p.ID, err = res.LastInsertId()
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE projects SET customer_id=?, name=?, number=?, order_number=?, visible=?, billable=?, comment=?, legacy_json=? WHERE id=?`,
-		p.CustomerID, p.Name, p.Number, p.OrderNo, boolInt(p.Visible), boolInt(p.Billable), p.Comment, p.LegacyJSON, p.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE projects SET workspace_id=?, customer_id=?, name=?, number=?, order_number=?, visible=?, private=?, billable=?, comment=?, legacy_json=? WHERE id=?`,
+		p.WorkspaceID, p.CustomerID, p.Name, p.Number, p.OrderNo, boolInt(p.Visible), boolInt(p.Private), boolInt(p.Billable), p.Comment, p.LegacyJSON, p.ID)
 	return err
 }
 
-func (s *Store) ListProjects(ctx context.Context, customerID int64, term string, page, size int) ([]domain.Project, domain.Page, error) {
+func (s *Store) ListProjects(ctx context.Context, access domain.AccessContext, customerID int64, term string, page, size int) ([]domain.Project, domain.Page, error) {
 	page, size = domain.NormalizePage(page, size)
-	where, args := searchWhere("name", term)
+	where, args := scopedSearchWhere("workspace_id", access.WorkspaceID, "name", term)
 	if customerID > 0 {
 		if where == "" {
 			where = "WHERE customer_id=?"
@@ -368,11 +520,15 @@ func (s *Store) ListProjects(ctx context.Context, customerID int64, term string,
 		}
 		args = append(args, customerID)
 	}
+	if !access.IsWorkspaceAdmin() {
+		where += ` AND (private=0 OR id IN (SELECT project_id FROM project_members WHERE user_id=?) OR id IN (SELECT pg.project_id FROM project_groups pg JOIN group_members gm ON gm.group_id=pg.group_id WHERE gm.user_id=?))`
+		args = append(args, access.UserID, access.UserID)
+	}
 	total, err := s.count(ctx, "projects", where, args...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, customer_id, name, number, order_number, visible, billable, comment, legacy_json, created_at FROM projects `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, customer_id, name, number, order_number, visible, private, billable, comment, legacy_json, created_at FROM projects `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -381,7 +537,7 @@ func (s *Store) ListProjects(ctx context.Context, customerID int64, term string,
 	for rows.Next() {
 		var p domain.Project
 		var created string
-		if err := rows.Scan(&p.ID, &p.CustomerID, &p.Name, &p.Number, &p.OrderNo, &p.Visible, &p.Billable, &p.Comment, &p.LegacyJSON, &created); err != nil {
+		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.CustomerID, &p.Name, &p.Number, &p.OrderNo, &p.Visible, &p.Private, &p.Billable, &p.Comment, &p.LegacyJSON, &created); err != nil {
 			return nil, domain.Page{}, err
 		}
 		p.CreatedAt = parseTime(created)
@@ -393,8 +549,8 @@ func (s *Store) ListProjects(ctx context.Context, customerID int64, term string,
 func (s *Store) Project(ctx context.Context, id int64) (*domain.Project, error) {
 	var p domain.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, customer_id, name, number, order_number, visible, billable, comment, legacy_json, created_at FROM projects WHERE id=?`, id).
-		Scan(&p.ID, &p.CustomerID, &p.Name, &p.Number, &p.OrderNo, &p.Visible, &p.Billable, &p.Comment, &p.LegacyJSON, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, customer_id, name, number, order_number, visible, private, billable, comment, legacy_json, created_at FROM projects WHERE id=?`, id).
+		Scan(&p.ID, &p.WorkspaceID, &p.CustomerID, &p.Name, &p.Number, &p.OrderNo, &p.Visible, &p.Private, &p.Billable, &p.Comment, &p.LegacyJSON, &created)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -407,23 +563,26 @@ func (s *Store) Project(ctx context.Context, id int64) (*domain.Project, error) 
 
 func (s *Store) UpsertActivity(ctx context.Context, a *domain.Activity) error {
 	now := utcNow()
+	if a.WorkspaceID == 0 {
+		a.WorkspaceID = 1
+	}
 	if a.ID == 0 {
-		res, err := s.db.ExecContext(ctx, `INSERT INTO activities(project_id, name, number, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?)`,
-			a.ProjectID, a.Name, a.Number, boolInt(a.Visible), boolInt(a.Billable), a.Comment, a.LegacyJSON, now)
+		res, err := s.db.ExecContext(ctx, `INSERT INTO activities(workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			a.WorkspaceID, a.ProjectID, a.Name, a.Number, boolInt(a.Visible), boolInt(a.Billable), a.Comment, a.LegacyJSON, now)
 		if err != nil {
 			return err
 		}
 		a.ID, err = res.LastInsertId()
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE activities SET project_id=?, name=?, number=?, visible=?, billable=?, comment=?, legacy_json=? WHERE id=?`,
-		a.ProjectID, a.Name, a.Number, boolInt(a.Visible), boolInt(a.Billable), a.Comment, a.LegacyJSON, a.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE activities SET workspace_id=?, project_id=?, name=?, number=?, visible=?, billable=?, comment=?, legacy_json=? WHERE id=?`,
+		a.WorkspaceID, a.ProjectID, a.Name, a.Number, boolInt(a.Visible), boolInt(a.Billable), a.Comment, a.LegacyJSON, a.ID)
 	return err
 }
 
-func (s *Store) ListActivities(ctx context.Context, projectID int64, term string, page, size int) ([]domain.Activity, domain.Page, error) {
+func (s *Store) ListActivities(ctx context.Context, access domain.AccessContext, projectID int64, term string, page, size int) ([]domain.Activity, domain.Page, error) {
 	page, size = domain.NormalizePage(page, size)
-	where, args := searchWhere("name", term)
+	where, args := scopedSearchWhere("workspace_id", access.WorkspaceID, "name", term)
 	if projectID > 0 {
 		if where == "" {
 			where = "WHERE project_id=?"
@@ -432,11 +591,15 @@ func (s *Store) ListActivities(ctx context.Context, projectID int64, term string
 		}
 		args = append(args, projectID)
 	}
+	if !access.IsWorkspaceAdmin() {
+		where += ` AND (project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE private=0 AND workspace_id=?) OR project_id IN (SELECT project_id FROM project_members WHERE user_id=?) OR project_id IN (SELECT pg.project_id FROM project_groups pg JOIN group_members gm ON gm.group_id=pg.group_id WHERE gm.user_id=?))`
+		args = append(args, access.WorkspaceID, access.UserID, access.UserID)
+	}
 	total, err := s.count(ctx, "activities", where, args...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -446,7 +609,7 @@ func (s *Store) ListActivities(ctx context.Context, projectID int64, term string
 		var a domain.Activity
 		var project sql.NullInt64
 		var created string
-		if err := rows.Scan(&a.ID, &project, &a.Name, &a.Number, &a.Visible, &a.Billable, &a.Comment, &a.LegacyJSON, &created); err != nil {
+		if err := rows.Scan(&a.ID, &a.WorkspaceID, &project, &a.Name, &a.Number, &a.Visible, &a.Billable, &a.Comment, &a.LegacyJSON, &created); err != nil {
 			return nil, domain.Page{}, err
 		}
 		if project.Valid {
@@ -462,8 +625,8 @@ func (s *Store) Activity(ctx context.Context, id int64) (*domain.Activity, error
 	var a domain.Activity
 	var project sql.NullInt64
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities WHERE id=?`, id).
-		Scan(&a.ID, &project, &a.Name, &a.Number, &a.Visible, &a.Billable, &a.Comment, &a.LegacyJSON, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities WHERE id=?`, id).
+		Scan(&a.ID, &a.WorkspaceID, &project, &a.Name, &a.Number, &a.Visible, &a.Billable, &a.Comment, &a.LegacyJSON, &created)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -477,22 +640,25 @@ func (s *Store) Activity(ctx context.Context, id int64) (*domain.Activity, error
 	return &a, nil
 }
 
-func (s *Store) UpsertTag(ctx context.Context, name string) (int64, error) {
+func (s *Store) UpsertTag(ctx context.Context, workspaceID int64, name string) (int64, error) {
+	if workspaceID == 0 {
+		workspaceID = 1
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return 0, errors.New("empty tag")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO tags(name, visible) VALUES(?,1)`, name)
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO tags(workspace_id, name, visible) VALUES(?,?,1)`, workspaceID, name)
 	if err != nil {
 		return 0, err
 	}
 	var id int64
-	err = s.db.QueryRowContext(ctx, `SELECT id FROM tags WHERE name=?`, name).Scan(&id)
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM tags WHERE workspace_id=? AND name=?`, workspaceID, name).Scan(&id)
 	return id, err
 }
 
-func (s *Store) ListTags(ctx context.Context) ([]domain.Tag, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, visible FROM tags ORDER BY name`)
+func (s *Store) ListTags(ctx context.Context, workspaceID int64) ([]domain.Tag, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, visible FROM tags WHERE workspace_id=? ORDER BY name`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -500,7 +666,7 @@ func (s *Store) ListTags(ctx context.Context) ([]domain.Tag, error) {
 	var tags []domain.Tag
 	for rows.Next() {
 		var tag domain.Tag
-		if err := rows.Scan(&tag.ID, &tag.Name, &tag.Visible); err != nil {
+		if err := rows.Scan(&tag.ID, &tag.WorkspaceID, &tag.Name, &tag.Visible); err != nil {
 			return nil, err
 		}
 		tags = append(tags, tag)
@@ -509,22 +675,25 @@ func (s *Store) ListTags(ctx context.Context) ([]domain.Tag, error) {
 }
 
 func (s *Store) UpsertRate(ctx context.Context, r *domain.Rate) error {
+	if r.WorkspaceID == 0 {
+		r.WorkspaceID = 1
+	}
 	if r.ID == 0 {
-		res, err := s.db.ExecContext(ctx, `INSERT INTO rates(customer_id, project_id, activity_id, user_id, kind, amount_cents, internal_amount_cents, fixed) VALUES(?,?,?,?,?,?,?,?)`,
-			r.CustomerID, r.ProjectID, r.ActivityID, r.UserID, defaultString(r.Kind, "hourly"), r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed))
+		res, err := s.db.ExecContext(ctx, `INSERT INTO rates(workspace_id, customer_id, project_id, activity_id, user_id, kind, amount_cents, internal_amount_cents, fixed) VALUES(?,?,?,?,?,?,?,?,?)`,
+			r.WorkspaceID, r.CustomerID, r.ProjectID, r.ActivityID, r.UserID, defaultString(r.Kind, "hourly"), r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed))
 		if err != nil {
 			return err
 		}
 		r.ID, err = res.LastInsertId()
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE rates SET customer_id=?, project_id=?, activity_id=?, user_id=?, kind=?, amount_cents=?, internal_amount_cents=?, fixed=? WHERE id=?`,
-		r.CustomerID, r.ProjectID, r.ActivityID, r.UserID, r.Kind, r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed), r.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE rates SET workspace_id=?, customer_id=?, project_id=?, activity_id=?, user_id=?, kind=?, amount_cents=?, internal_amount_cents=?, fixed=? WHERE id=?`,
+		r.WorkspaceID, r.CustomerID, r.ProjectID, r.ActivityID, r.UserID, r.Kind, r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed), r.ID)
 	return err
 }
 
-func (s *Store) ListRates(ctx context.Context) ([]domain.Rate, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, customer_id, project_id, activity_id, user_id, kind, amount_cents, internal_amount_cents, fixed FROM rates ORDER BY id DESC`)
+func (s *Store) ListRates(ctx context.Context, workspaceID int64) ([]domain.Rate, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, customer_id, project_id, activity_id, user_id, kind, amount_cents, internal_amount_cents, fixed FROM rates WHERE workspace_id=? ORDER BY id DESC`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +702,7 @@ func (s *Store) ListRates(ctx context.Context) ([]domain.Rate, error) {
 	for rows.Next() {
 		var r domain.Rate
 		var customer, project, activity, user, internal sql.NullInt64
-		if err := rows.Scan(&r.ID, &customer, &project, &activity, &user, &r.Kind, &r.AmountCents, &internal, &r.Fixed); err != nil {
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &customer, &project, &activity, &user, &r.Kind, &r.AmountCents, &internal, &r.Fixed); err != nil {
 			return nil, err
 		}
 		r.CustomerID = nullableInt(customer)
@@ -546,7 +715,7 @@ func (s *Store) ListRates(ctx context.Context) ([]domain.Rate, error) {
 	return rates, rows.Err()
 }
 
-func (s *Store) ResolveRate(ctx context.Context, userID, customerID, projectID, activityID int64) (int64, *int64, error) {
+func (s *Store) ResolveRate(ctx context.Context, workspaceID, userID, customerID, projectID, activityID int64) (int64, *int64, error) {
 	candidates := []struct {
 		where string
 		args  []any
@@ -563,7 +732,8 @@ func (s *Store) ResolveRate(ctx context.Context, userID, customerID, projectID, 
 	for _, candidate := range candidates {
 		var amount int64
 		var internal sql.NullInt64
-		err := s.db.QueryRowContext(ctx, `SELECT amount_cents, internal_amount_cents FROM rates WHERE `+candidate.where+` ORDER BY id DESC LIMIT 1`, candidate.args...).Scan(&amount, &internal)
+		args := append([]any{workspaceID}, candidate.args...)
+		err := s.db.QueryRowContext(ctx, `SELECT amount_cents, internal_amount_cents FROM rates WHERE workspace_id=? AND `+candidate.where+` ORDER BY id DESC LIMIT 1`, args...).Scan(&amount, &internal)
 		if err == nil {
 			return amount, nullableInt(internal), nil
 		}
@@ -588,7 +758,10 @@ func (s *Store) StartTimer(ctx context.Context, t *domain.Timesheet, tagNames []
 	}
 	t.CreatedAt = parseTime(now)
 	t.UpdatedAt = t.CreatedAt
-	rate, internal, err := s.ResolveRate(ctx, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID)
+	if t.WorkspaceID == 0 {
+		t.WorkspaceID = 1
+	}
+	rate, internal, err := s.ResolveRate(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID)
 	if err != nil {
 		return err
 	}
@@ -604,7 +777,10 @@ func (s *Store) CreateTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 			t.DurationSeconds = 0
 		}
 	}
-	rate, internal, err := s.ResolveRate(ctx, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID)
+	if t.WorkspaceID == 0 {
+		t.WorkspaceID = 1
+	}
+	rate, internal, err := s.ResolveRate(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID)
 	if err != nil {
 		return err
 	}
@@ -624,8 +800,8 @@ func (s *Store) insertTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 	if t.EndedAt != nil {
 		ended = formatTime(*t.EndedAt)
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO timesheets(user_id, customer_id, project_id, activity_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.UserID, t.CustomerID, t.ProjectID, t.ActivityID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), boolInt(t.Exported), t.Description, now, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO timesheets(workspace_id, user_id, customer_id, project_id, activity_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), boolInt(t.Exported), t.Description, now, now)
 	if err != nil {
 		return err
 	}
@@ -638,10 +814,10 @@ func (s *Store) insertTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 		if name == "" {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO tags(name, visible) VALUES(?,1)`, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO tags(workspace_id, name, visible) VALUES(?,?,1)`, t.WorkspaceID, name); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO timesheet_tags(timesheet_id, tag_id) SELECT ?, id FROM tags WHERE name=?`, t.ID, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO timesheet_tags(timesheet_id, tag_id) SELECT ?, id FROM tags WHERE workspace_id=? AND name=?`, t.ID, t.WorkspaceID, name); err != nil {
 			return err
 		}
 	}
@@ -683,6 +859,10 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 	f.Page, f.Size = domain.NormalizePage(f.Page, f.Size)
 	where := []string{"1=1"}
 	args := []any{}
+	if f.WorkspaceID > 0 {
+		where = append(where, "workspace_id=?")
+		args = append(args, f.WorkspaceID)
+	}
 	if f.UserID > 0 {
 		where = append(where, "user_id=?")
 		args = append(args, f.UserID)
@@ -694,6 +874,14 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 	if f.ProjectID > 0 {
 		where = append(where, "project_id=?")
 		args = append(args, f.ProjectID)
+	}
+	if len(f.ProjectIDs) > 0 {
+		placeholders := make([]string, len(f.ProjectIDs))
+		for i, id := range f.ProjectIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		where = append(where, "project_id IN ("+strings.Join(placeholders, ",")+")")
 	}
 	if f.ActivityID > 0 {
 		where = append(where, "activity_id=?")
@@ -720,7 +908,7 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, customer_id, project_id, activity_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets `+whereSQL+` ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, activity_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets `+whereSQL+` ORDER BY started_at DESC LIMIT ? OFFSET ?`,
 		append(args, f.Size, (f.Page-1)*f.Size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
@@ -737,10 +925,10 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 	return items, makePage(f.Page, f.Size, total), rows.Err()
 }
 
-func (s *Store) CreateInvoice(ctx context.Context, userID, customerID int64, begin, end time.Time, taxBasisPoints int64) (*domain.Invoice, error) {
+func (s *Store) CreateInvoice(ctx context.Context, access domain.AccessContext, userID, customerID int64, begin, end time.Time, taxBasisPoints int64) (*domain.Invoice, error) {
 	billable := true
 	exported := false
-	items, _, err := s.ListTimesheets(ctx, TimesheetFilter{CustomerID: customerID, Begin: &begin, End: &end, Billable: &billable, Exported: &exported, Page: 1, Size: 100})
+	items, _, err := s.ListTimesheets(ctx, TimesheetFilter{WorkspaceID: access.WorkspaceID, CustomerID: customerID, Begin: &begin, End: &end, Billable: &billable, Exported: &exported, Page: 1, Size: 100})
 	if err != nil {
 		return nil, err
 	}
@@ -753,6 +941,7 @@ func (s *Store) CreateInvoice(ctx context.Context, userID, customerID int64, beg
 	}
 	tax := subtotal * taxBasisPoints / 10000
 	invoice := &domain.Invoice{
+		WorkspaceID:   access.WorkspaceID,
 		Number:        fmt.Sprintf("INV-%s-%04d", time.Now().UTC().Format("20060102"), time.Now().UTC().Unix()%10000),
 		CustomerID:    customerID,
 		UserID:        userID,
@@ -769,8 +958,8 @@ func (s *Store) CreateInvoice(ctx context.Context, userID, customerID int64, beg
 	}
 	defer rollback(tx)
 	invoice.Filename = strings.ToLower(invoice.Number) + ".html"
-	res, err := tx.ExecContext(ctx, `INSERT INTO invoices(number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		invoice.Number, invoice.CustomerID, invoice.UserID, invoice.Status, invoice.Currency, invoice.SubtotalCents, invoice.TaxCents, invoice.TotalCents, invoice.Filename, formatTime(invoice.CreatedAt))
+	res, err := tx.ExecContext(ctx, `INSERT INTO invoices(workspace_id, number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		invoice.WorkspaceID, invoice.Number, invoice.CustomerID, invoice.UserID, invoice.Status, invoice.Currency, invoice.SubtotalCents, invoice.TaxCents, invoice.TotalCents, invoice.Filename, formatTime(invoice.CreatedAt))
 	if err != nil {
 		return nil, err
 	}
@@ -791,19 +980,19 @@ func (s *Store) CreateInvoice(ctx context.Context, userID, customerID int64, beg
 	return invoice, tx.Commit()
 }
 
-func (s *Store) ListInvoices(ctx context.Context, customerID int64, page, size int) ([]domain.Invoice, domain.Page, error) {
+func (s *Store) ListInvoices(ctx context.Context, workspaceID, customerID int64, page, size int) ([]domain.Invoice, domain.Page, error) {
 	page, size = domain.NormalizePage(page, size)
-	where := ""
-	args := []any{}
+	where := "WHERE workspace_id=?"
+	args := []any{workspaceID}
 	if customerID > 0 {
-		where = "WHERE customer_id=?"
+		where += " AND customer_id=?"
 		args = append(args, customerID)
 	}
 	total, err := s.count(ctx, "invoices", where, args...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, payment_date, created_at FROM invoices `+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, payment_date, created_at FROM invoices `+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -820,7 +1009,7 @@ func (s *Store) ListInvoices(ctx context.Context, customerID int64, page, size i
 }
 
 func (s *Store) Invoice(ctx context.Context, id int64) (*domain.Invoice, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, payment_date, created_at FROM invoices WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, payment_date, created_at FROM invoices WHERE id=?`, id)
 	inv, err := scanInvoice(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -836,35 +1025,59 @@ func (s *Store) SetInvoiceMeta(ctx context.Context, invoiceID int64, name, value
 	return err
 }
 
-func (s *Store) ListReports(ctx context.Context, group string) ([]map[string]any, error) {
+func (s *Store) ListReports(ctx context.Context, access domain.AccessContext, group string) ([]map[string]any, error) {
+	scope := reportScope(access)
 	switch group {
 	case "customer":
-		return s.report(ctx, `SELECT c.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM customers c LEFT JOIN timesheets t ON t.customer_id=c.id GROUP BY c.id ORDER BY c.name`)
+		return s.report(ctx, `SELECT c.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM customers c LEFT JOIN timesheets t ON t.customer_id=c.id `+scope.join+` WHERE c.workspace_id=? `+scope.where+` GROUP BY c.id ORDER BY c.name`, append([]any{access.WorkspaceID}, scope.args...)...)
 	case "activity":
-		return s.report(ctx, `SELECT a.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM activities a LEFT JOIN timesheets t ON t.activity_id=a.id GROUP BY a.id ORDER BY a.name`)
+		return s.report(ctx, `SELECT a.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM activities a LEFT JOIN timesheets t ON t.activity_id=a.id `+scope.join+` WHERE a.workspace_id=? `+scope.where+` GROUP BY a.id ORDER BY a.name`, append([]any{access.WorkspaceID}, scope.args...)...)
 	case "project":
-		return s.report(ctx, `SELECT p.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM projects p LEFT JOIN timesheets t ON t.project_id=p.id GROUP BY p.id ORDER BY p.name`)
+		return s.report(ctx, `SELECT p.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM projects p LEFT JOIN timesheets t ON t.project_id=p.id `+scope.join+` WHERE p.workspace_id=? `+scope.where+` GROUP BY p.id ORDER BY p.name`, append([]any{access.WorkspaceID}, scope.args...)...)
+	case "group":
+		return s.report(ctx, `SELECT g.name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM groups g LEFT JOIN group_members gm ON gm.group_id=g.id LEFT JOIN timesheets t ON t.user_id=gm.user_id AND t.workspace_id=g.workspace_id WHERE g.workspace_id=? GROUP BY g.id ORDER BY g.name`, access.WorkspaceID)
 	default:
-		return s.report(ctx, `SELECT u.display_name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM users u LEFT JOIN timesheets t ON t.user_id=u.id GROUP BY u.id ORDER BY u.display_name`)
+		return s.report(ctx, `SELECT u.display_name, COUNT(t.id), COALESCE(SUM(t.duration_seconds),0), COALESCE(SUM(t.rate_cents*t.duration_seconds/3600),0) FROM users u LEFT JOIN timesheets t ON t.user_id=u.id `+scope.join+` WHERE (t.workspace_id=? OR t.id IS NULL) `+scope.where+` GROUP BY u.id ORDER BY u.display_name`, append([]any{access.WorkspaceID}, scope.args...)...)
 	}
 }
 
-func (s *Store) Dashboard(ctx context.Context, userID int64) (map[string]int64, error) {
+func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (map[string]int64, error) {
 	stats := map[string]int64{}
+	projectIDs := accessibleProjectIDs(access)
+	projectWhere := ""
+	projectArgs := []any{}
+	if !access.IsWorkspaceAdmin() && access.WorkspaceRole != domain.WorkspaceRoleAnalyst {
+		if len(projectIDs) > 0 {
+			placeholders := make([]string, len(projectIDs))
+			projectArgs = append(projectArgs, access.UserID)
+			for i, id := range projectIDs {
+				placeholders[i] = "?"
+				projectArgs = append(projectArgs, id)
+			}
+			projectWhere = " AND (user_id=? OR project_id IN (" + strings.Join(placeholders, ",") + "))"
+		} else {
+			projectWhere = " AND user_id=?"
+			projectArgs = append(projectArgs, access.UserID)
+		}
+	}
 	queries := map[string]string{
-		"active_timers": "SELECT COUNT(*) FROM timesheets WHERE ended_at IS NULL",
-		"today_seconds": "SELECT COALESCE(SUM(duration_seconds),0) FROM timesheets WHERE user_id=? AND started_at>=?",
-		"unexported":    "SELECT COUNT(*) FROM timesheets WHERE exported=0 AND billable=1 AND ended_at IS NOT NULL",
-		"invoices":      "SELECT COUNT(*) FROM invoices",
+		"active_timers": "SELECT COUNT(*) FROM timesheets WHERE workspace_id=? AND ended_at IS NULL" + projectWhere,
+		"today_seconds": "SELECT COALESCE(SUM(duration_seconds),0) FROM timesheets WHERE workspace_id=? AND user_id=? AND started_at>=?",
+		"unexported":    "SELECT COUNT(*) FROM timesheets WHERE workspace_id=? AND exported=0 AND billable=1 AND ended_at IS NOT NULL" + projectWhere,
+		"invoices":      "SELECT COUNT(*) FROM invoices WHERE workspace_id=?",
 	}
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	for key, query := range queries {
 		var value int64
 		var err error
 		if key == "today_seconds" {
-			err = s.db.QueryRowContext(ctx, query, userID, formatTime(today)).Scan(&value)
+			err = s.db.QueryRowContext(ctx, query, access.WorkspaceID, access.UserID, formatTime(today)).Scan(&value)
+		} else if key == "active_timers" || key == "unexported" {
+			err = s.db.QueryRowContext(ctx, query, append([]any{access.WorkspaceID}, projectArgs...)...).Scan(&value)
+		} else if key == "invoices" && !access.IsWorkspaceAdmin() {
+			value = 0
 		} else {
-			err = s.db.QueryRowContext(ctx, query).Scan(&value)
+			err = s.db.QueryRowContext(ctx, query, access.WorkspaceID).Scan(&value)
 		}
 		if err != nil {
 			return nil, err
@@ -876,8 +1089,11 @@ func (s *Store) Dashboard(ctx context.Context, userID int64) (map[string]int64, 
 
 func (s *Store) CreateWebhookEndpoint(ctx context.Context, w *domain.WebhookEndpoint) error {
 	w.CreatedAt = time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO webhook_endpoints(name, url, secret, events, enabled, created_at) VALUES(?,?,?,?,?,?)`,
-		w.Name, w.URL, w.Secret, strings.Join(w.Events, ","), boolInt(w.Enabled), formatTime(w.CreatedAt))
+	if w.WorkspaceID == 0 {
+		w.WorkspaceID = 1
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO webhook_endpoints(workspace_id, name, url, secret, events, enabled, created_at) VALUES(?,?,?,?,?,?,?)`,
+		w.WorkspaceID, w.Name, w.URL, w.Secret, strings.Join(w.Events, ","), boolInt(w.Enabled), formatTime(w.CreatedAt))
 	if err != nil {
 		return err
 	}
@@ -885,8 +1101,8 @@ func (s *Store) CreateWebhookEndpoint(ctx context.Context, w *domain.WebhookEndp
 	return err
 }
 
-func (s *Store) ListWebhookEndpoints(ctx context.Context) ([]domain.WebhookEndpoint, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, url, secret, events, enabled, created_at FROM webhook_endpoints ORDER BY name`)
+func (s *Store) ListWebhookEndpoints(ctx context.Context, workspaceID int64) ([]domain.WebhookEndpoint, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, url, secret, events, enabled, created_at FROM webhook_endpoints WHERE workspace_id=? ORDER BY name`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -895,7 +1111,7 @@ func (s *Store) ListWebhookEndpoints(ctx context.Context) ([]domain.WebhookEndpo
 	for rows.Next() {
 		var h domain.WebhookEndpoint
 		var events, created string
-		if err := rows.Scan(&h.ID, &h.Name, &h.URL, &h.Secret, &events, &h.Enabled, &created); err != nil {
+		if err := rows.Scan(&h.ID, &h.WorkspaceID, &h.Name, &h.URL, &h.Secret, &events, &h.Enabled, &created); err != nil {
 			return nil, err
 		}
 		if events != "" {
@@ -907,8 +1123,8 @@ func (s *Store) ListWebhookEndpoints(ctx context.Context) ([]domain.WebhookEndpo
 	return hooks, rows.Err()
 }
 
-func (s *Store) QueueWebhook(ctx context.Context, event string, payload []byte) error {
-	hooks, err := s.ListWebhookEndpoints(ctx)
+func (s *Store) QueueWebhook(ctx context.Context, workspaceID int64, event string, payload []byte) error {
+	hooks, err := s.ListWebhookEndpoints(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
@@ -939,8 +1155,8 @@ func (s *Store) count(ctx context.Context, table, where string, args ...any) (in
 	return total, err
 }
 
-func (s *Store) report(ctx context.Context, query string) ([]map[string]any, error) {
-	rows, err := s.db.QueryContext(ctx, query)
+func (s *Store) report(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -957,6 +1173,47 @@ func (s *Store) report(ctx context.Context, query string) ([]map[string]any, err
 	return result, rows.Err()
 }
 
+type reportScopeSQL struct {
+	join  string
+	where string
+	args  []any
+}
+
+func reportScope(access domain.AccessContext) reportScopeSQL {
+	if access.IsWorkspaceAdmin() || access.WorkspaceRole == domain.WorkspaceRoleAnalyst {
+		return reportScopeSQL{}
+	}
+	projectIDs := accessibleProjectIDs(access)
+	if len(projectIDs) == 0 {
+		return reportScopeSQL{where: " AND t.user_id=?", args: []any{access.UserID}}
+	}
+	placeholders := make([]string, len(projectIDs))
+	args := []any{access.UserID}
+	for i, id := range projectIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	return reportScopeSQL{where: " AND (t.user_id=? OR t.project_id IN (" + strings.Join(placeholders, ",") + "))", args: args}
+}
+
+func accessibleProjectIDs(access domain.AccessContext) []int64 {
+	seen := map[int64]bool{}
+	out := []int64{}
+	for id := range access.ManagedProjectIDs {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for id := range access.MemberProjectIDs {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -966,7 +1223,7 @@ func scanTimesheet(row scanner) (domain.Timesheet, error) {
 	var started, created, updated string
 	var ended sql.NullString
 	var internal sql.NullInt64
-	err := row.Scan(&t.ID, &t.UserID, &t.CustomerID, &t.ProjectID, &t.ActivityID, &started, &ended, &t.Timezone, &t.DurationSeconds, &t.BreakSeconds, &t.RateCents, &internal, &t.Billable, &t.Exported, &t.Description, &created, &updated)
+	err := row.Scan(&t.ID, &t.WorkspaceID, &t.UserID, &t.CustomerID, &t.ProjectID, &t.ActivityID, &started, &ended, &t.Timezone, &t.DurationSeconds, &t.BreakSeconds, &t.RateCents, &internal, &t.Billable, &t.Exported, &t.Description, &created, &updated)
 	if err != nil {
 		return t, err
 	}
@@ -984,7 +1241,7 @@ func scanTimesheet(row scanner) (domain.Timesheet, error) {
 func scanInvoice(row scanner) (domain.Invoice, error) {
 	var inv domain.Invoice
 	var payment, created sql.NullString
-	err := row.Scan(&inv.ID, &inv.Number, &inv.CustomerID, &inv.UserID, &inv.Status, &inv.Currency, &inv.SubtotalCents, &inv.TaxCents, &inv.TotalCents, &inv.Filename, &payment, &created)
+	err := row.Scan(&inv.ID, &inv.WorkspaceID, &inv.Number, &inv.CustomerID, &inv.UserID, &inv.Status, &inv.Currency, &inv.SubtotalCents, &inv.TaxCents, &inv.TotalCents, &inv.Filename, &payment, &created)
 	if err != nil {
 		return inv, err
 	}
@@ -1004,6 +1261,17 @@ func searchWhere(column, term string) (string, []any) {
 		return "", nil
 	}
 	return "WHERE lower(" + column + ") LIKE lower(?)", []any{"%" + term + "%"}
+}
+
+func scopedSearchWhere(scopeColumn string, scopeID int64, searchColumn, term string) (string, []any) {
+	where := "WHERE " + scopeColumn + "=?"
+	args := []any{scopeID}
+	term = strings.TrimSpace(term)
+	if term != "" {
+		where += " AND lower(" + searchColumn + ") LIKE lower(?)"
+		args = append(args, "%"+term+"%")
+	}
+	return where, args
 }
 
 func makePage(page, size, total int) domain.Page {
@@ -1030,6 +1298,30 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func organizationRoleFromLegacy(roles []domain.Role) domain.OrganizationRole {
+	for _, role := range roles {
+		if role == domain.RoleSuperAdmin {
+			return domain.OrgRoleOwner
+		}
+		if role == domain.RoleAdmin {
+			return domain.OrgRoleAdmin
+		}
+	}
+	return ""
+}
+
+func workspaceRoleFromLegacy(roles []domain.Role) domain.WorkspaceRole {
+	for _, role := range roles {
+		if role == domain.RoleSuperAdmin || role == domain.RoleAdmin {
+			return domain.WorkspaceRoleAdmin
+		}
+		if role == domain.RoleTeamLead {
+			return domain.WorkspaceRoleAnalyst
+		}
+	}
+	return domain.WorkspaceRoleMember
 }
 
 func utcNow() string {
@@ -1070,14 +1362,138 @@ func eventAllowed(events []string, event string) bool {
 	return false
 }
 
+func (s *Store) ensureHierarchy(ctx context.Context) error {
+	adds := map[string]map[string]string{
+		"users": {
+			"organization_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"customers": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"projects": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+			"private":      "INTEGER NOT NULL DEFAULT 0",
+		},
+		"activities": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"tags": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"rates": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"timesheets": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"invoices": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+		"webhook_endpoints": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+		},
+	}
+	for table, columns := range adds {
+		for column, definition := range columns {
+			if err := s.ensureColumn(ctx, table, column, definition); err != nil {
+				return err
+			}
+		}
+	}
+	now := utcNow()
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO organizations(id, name, slug, created_at) VALUES(1,'Default Organization','default',?)`, now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO workspaces(id, organization_id, name, slug, default_currency, timezone, created_at) VALUES(1,1,'Default Workspace','default','USD','UTC',?)`, now); err != nil {
+		return err
+	}
+	backfills := []string{
+		`UPDATE users SET organization_id=1 WHERE organization_id IS NULL OR organization_id=0`,
+		`UPDATE customers SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE projects SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE activities SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE tags SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE rates SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE timesheets SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE invoices SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE webhook_endpoints SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`INSERT OR IGNORE INTO organization_members(organization_id, user_id, role, created_at)
+		 SELECT 1, u.id,
+		  CASE WHEN EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.name='superadmin') THEN 'owner'
+		       WHEN EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.name='admin') THEN 'admin'
+		       ELSE 'admin' END,
+		  '` + now + `' FROM users u
+		 WHERE EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.name IN ('superadmin','admin'))`,
+		`INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at)
+		 SELECT 1, u.id,
+		  CASE WHEN EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.name IN ('superadmin','admin')) THEN 'admin'
+		       WHEN EXISTS(SELECT 1 FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=u.id AND r.name='teamlead') THEN 'analyst'
+		       ELSE 'member' END,
+		  '` + now + `' FROM users u`,
+	}
+	for _, query := range backfills {
+		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id, workspace_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_org_members_user ON organization_members(user_id, organization_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_groups_workspace_name ON groups(workspace_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id, group_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_groups_group ON project_groups(group_id, project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_customers_workspace_name ON customers(workspace_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_projects_workspace_visible ON projects(workspace_id, visible)`,
+		`CREATE INDEX IF NOT EXISTS idx_tags_workspace_name ON tags(workspace_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_timesheets_workspace_started ON timesheets(workspace_id, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_invoices_workspace_created ON invoices(workspace_id, created_at DESC)`,
+	}
+	for _, query := range indexes {
+		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+definition)
+	return err
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS roles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 INSERT OR IGNORE INTO roles(name) VALUES('user'),('teamlead'),('admin'),('superadmin');
 CREATE TABLE IF NOT EXISTS role_permissions(role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, permission TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(role_id, permission));
+CREATE TABLE IF NOT EXISTS organizations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workspaces(id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT NOT NULL, default_currency TEXT NOT NULL DEFAULT 'USD', timezone TEXT NOT NULL DEFAULT 'UTC', created_at TEXT NOT NULL, UNIQUE(organization_id, slug));
 CREATE TABLE IF NOT EXISTS users(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	organization_id INTEGER NOT NULL DEFAULT 1 REFERENCES organizations(id) ON DELETE RESTRICT,
 	email TEXT NOT NULL UNIQUE,
 	username TEXT NOT NULL UNIQUE,
 	display_name TEXT NOT NULL,
@@ -1088,11 +1504,16 @@ CREATE TABLE IF NOT EXISTS users(
 	last_login_at TEXT
 );
 CREATE TABLE IF NOT EXISTS user_roles(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, PRIMARY KEY(user_id, role_id));
+CREATE TABLE IF NOT EXISTS organization_members(organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('owner','admin')), created_at TEXT NOT NULL, PRIMARY KEY(organization_id, user_id));
+CREATE TABLE IF NOT EXISTS workspace_members(workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('admin','analyst','member')), created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, user_id));
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS teams(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS team_members(team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, lead INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(team_id, user_id));
+CREATE TABLE IF NOT EXISTS groups(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(workspace_id, name));
+CREATE TABLE IF NOT EXISTS group_members(group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL, PRIMARY KEY(group_id, user_id));
 CREATE TABLE IF NOT EXISTS customers(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
 	number TEXT NOT NULL DEFAULT '',
 	company TEXT NOT NULL DEFAULT '',
@@ -1108,11 +1529,13 @@ CREATE TABLE IF NOT EXISTS customers(
 );
 CREATE TABLE IF NOT EXISTS projects(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
 	customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
 	number TEXT NOT NULL DEFAULT '',
 	order_number TEXT NOT NULL DEFAULT '',
 	visible INTEGER NOT NULL DEFAULT 1,
+	private INTEGER NOT NULL DEFAULT 0,
 	billable INTEGER NOT NULL DEFAULT 1,
 	comment TEXT NOT NULL DEFAULT '',
 	legacy_json TEXT NOT NULL DEFAULT '',
@@ -1120,6 +1543,7 @@ CREATE TABLE IF NOT EXISTS projects(
 );
 CREATE TABLE IF NOT EXISTS activities(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
 	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
 	number TEXT NOT NULL DEFAULT '',
@@ -1132,8 +1556,11 @@ CREATE TABLE IF NOT EXISTS activities(
 CREATE TABLE IF NOT EXISTS customer_teams(customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, PRIMARY KEY(customer_id, team_id));
 CREATE TABLE IF NOT EXISTS project_teams(project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, PRIMARY KEY(project_id, team_id));
 CREATE TABLE IF NOT EXISTS activity_teams(activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE, team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, PRIMARY KEY(activity_id, team_id));
+CREATE TABLE IF NOT EXISTS project_members(project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('manager','member')), created_at TEXT NOT NULL, PRIMARY KEY(project_id, user_id));
+CREATE TABLE IF NOT EXISTS project_groups(project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE, created_at TEXT NOT NULL, PRIMARY KEY(project_id, group_id));
 CREATE TABLE IF NOT EXISTS rates(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
 	customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
 	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
 	activity_id INTEGER REFERENCES activities(id) ON DELETE CASCADE,
@@ -1143,9 +1570,10 @@ CREATE TABLE IF NOT EXISTS rates(
 	internal_amount_cents INTEGER,
 	fixed INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS tags(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, visible INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS tags(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, visible INTEGER NOT NULL DEFAULT 1, UNIQUE(workspace_id, name));
 CREATE TABLE IF NOT EXISTS timesheets(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
 	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
 	project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1166,6 +1594,7 @@ CREATE TABLE IF NOT EXISTS timesheets(
 CREATE TABLE IF NOT EXISTS timesheet_tags(timesheet_id INTEGER NOT NULL REFERENCES timesheets(id) ON DELETE CASCADE, tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE, PRIMARY KEY(timesheet_id, tag_id));
 CREATE TABLE IF NOT EXISTS invoices(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
 	number TEXT NOT NULL UNIQUE,
 	customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
 	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1180,7 +1609,7 @@ CREATE TABLE IF NOT EXISTS invoices(
 );
 CREATE TABLE IF NOT EXISTS invoice_items(id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, timesheet_id INTEGER REFERENCES timesheets(id) ON DELETE SET NULL, description TEXT NOT NULL DEFAULT '', quantity INTEGER NOT NULL, unit_cents INTEGER NOT NULL, total_cents INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS invoice_meta(invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE, name TEXT NOT NULL, value TEXT NOT NULL DEFAULT '', PRIMARY KEY(invoice_id, name));
-CREATE TABLE IF NOT EXISTS webhook_endpoints(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL DEFAULT '*', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS webhook_endpoints(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL DEFAULT '*', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS webhook_deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_id INTEGER NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE, event TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);

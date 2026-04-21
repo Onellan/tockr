@@ -12,8 +12,10 @@ SQLite is the first database. PostgreSQL can be added later by implementing the 
 
 ## Core Tables
 
-- `users`, `roles`, `user_roles`, `role_permissions`, `sessions`
-- `teams`, `team_members`, `customer_teams`, `project_teams`, `activity_teams`
+- `organizations`, `workspaces`
+- `users`, `roles`, `user_roles`, `organization_members`, `workspace_members`, `sessions`
+- `groups`, `group_members`, `project_members`, `project_groups`
+- legacy compatibility: `teams`, `team_members`, `customer_teams`, `project_teams`, `activity_teams`
 - `customers`, `projects`, `activities`
 - `rates`
 - `timesheets`, `tags`, `timesheet_tags`
@@ -21,14 +23,20 @@ SQLite is the first database. PostgreSQL can be added later by implementing the 
 - `webhook_endpoints`, `webhook_deliveries`
 - `audit_log`, `settings`, `schema_migrations`
 
+Workspace-owned records include `workspace_id`. Users include `organization_id`. Private projects use `projects.private` plus `project_members`/`project_groups` for scoped visibility.
+
 ## Key Indexes
 
 - `timesheets(user_id, started_at DESC)`
+- `timesheets(workspace_id, started_at DESC)`
 - `timesheets(project_id, started_at)`
 - `timesheets(activity_id, started_at)`
 - `timesheets(exported, billable)`
 - `projects(customer_id, visible)`
+- `projects(workspace_id, visible)`
 - `activities(project_id, visible)`
 - `invoices(customer_id, created_at DESC)`
-- unique `users.email`, `roles.name`, `tags.name`, `settings.name`
-
+- `workspace_members(user_id, workspace_id)`
+- `project_members(user_id, project_id)`
+- `group_members(user_id, group_id)`
+- unique `users.email`, `roles.name`, `tags(workspace_id, name)`, `settings.name`

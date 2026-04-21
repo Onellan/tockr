@@ -11,68 +11,159 @@ const (
 	RoleSuperAdmin Role = "superadmin"
 )
 
+type OrganizationRole string
+
+const (
+	OrgRoleOwner OrganizationRole = "owner"
+	OrgRoleAdmin OrganizationRole = "admin"
+)
+
+type WorkspaceRole string
+
+const (
+	WorkspaceRoleAdmin   WorkspaceRole = "admin"
+	WorkspaceRoleAnalyst WorkspaceRole = "analyst"
+	WorkspaceRoleMember  WorkspaceRole = "member"
+)
+
+type ProjectRole string
+
+const (
+	ProjectRoleManager ProjectRole = "manager"
+	ProjectRoleMember  ProjectRole = "member"
+)
+
+type Organization struct {
+	ID        int64
+	Name      string
+	Slug      string
+	CreatedAt time.Time
+}
+
+type Workspace struct {
+	ID              int64
+	OrganizationID  int64
+	Name            string
+	Slug            string
+	DefaultCurrency string
+	Timezone        string
+	CreatedAt       time.Time
+}
+
+type Group struct {
+	ID          int64
+	WorkspaceID int64
+	Name        string
+	Description string
+	CreatedAt   time.Time
+}
+
+type ProjectMember struct {
+	ProjectID int64
+	UserID    int64
+	Role      ProjectRole
+	CreatedAt time.Time
+}
+
+type AccessContext struct {
+	UserID            int64
+	OrganizationID    int64
+	WorkspaceID       int64
+	OrganizationRole  OrganizationRole
+	WorkspaceRole     WorkspaceRole
+	ManagedProjectIDs map[int64]bool
+	MemberProjectIDs  map[int64]bool
+}
+
+func (a AccessContext) IsOrgAdmin() bool {
+	return a.OrganizationRole == OrgRoleOwner || a.OrganizationRole == OrgRoleAdmin
+}
+
+func (a AccessContext) IsWorkspaceAdmin() bool {
+	return a.IsOrgAdmin() || a.WorkspaceRole == WorkspaceRoleAdmin
+}
+
+func (a AccessContext) CanViewWorkspaceReports() bool {
+	return a.IsWorkspaceAdmin() || a.WorkspaceRole == WorkspaceRoleAnalyst
+}
+
+func (a AccessContext) ManagesProject(projectID int64) bool {
+	return a.IsWorkspaceAdmin() || a.ManagedProjectIDs[projectID]
+}
+
+func (a AccessContext) CanAccessProject(projectID int64) bool {
+	return a.IsWorkspaceAdmin() || a.ManagedProjectIDs[projectID] || a.MemberProjectIDs[projectID]
+}
+
 type User struct {
-	ID           int64
-	Email        string
-	Username     string
-	DisplayName  string
-	PasswordHash string
-	Timezone     string
-	Enabled      bool
-	Roles        []Role
-	CreatedAt    time.Time
-	LastLoginAt  *time.Time
+	ID             int64
+	OrganizationID int64
+	Email          string
+	Username       string
+	DisplayName    string
+	PasswordHash   string
+	Timezone       string
+	Enabled        bool
+	Roles          []Role
+	CreatedAt      time.Time
+	LastLoginAt    *time.Time
 }
 
 type Customer struct {
-	ID         int64
-	Name       string
-	Number     string
-	Company    string
-	Contact    string
-	Email      string
-	Currency   string
-	Timezone   string
-	Visible    bool
-	Billable   bool
-	Comment    string
-	LegacyJSON string
-	CreatedAt  time.Time
+	ID          int64
+	WorkspaceID int64
+	Name        string
+	Number      string
+	Company     string
+	Contact     string
+	Email       string
+	Currency    string
+	Timezone    string
+	Visible     bool
+	Billable    bool
+	Comment     string
+	LegacyJSON  string
+	CreatedAt   time.Time
 }
 
 type Project struct {
-	ID         int64
-	CustomerID int64
-	Name       string
-	Number     string
-	OrderNo    string
-	Visible    bool
-	Billable   bool
-	Comment    string
-	LegacyJSON string
-	CreatedAt  time.Time
+	ID          int64
+	WorkspaceID int64
+	CustomerID  int64
+	Name        string
+	Number      string
+	OrderNo     string
+	Visible     bool
+	Private     bool
+	Billable    bool
+	Comment     string
+	LegacyJSON  string
+	CreatedAt   time.Time
 }
 
 type Activity struct {
-	ID         int64
-	ProjectID  *int64
-	Name       string
-	Number     string
-	Visible    bool
-	Billable   bool
-	Comment    string
-	LegacyJSON string
-	CreatedAt  time.Time
+	ID          int64
+	WorkspaceID int64
+	ProjectID   *int64
+	Name        string
+	Number      string
+	Visible     bool
+	Billable    bool
+	Comment     string
+	LegacyJSON  string
+	CreatedAt   time.Time
 }
 
 type Tag struct {
-	ID      int64
-	Name    string
-	Visible bool
+	ID          int64
+	WorkspaceID int64
+	Name        string
+	Visible     bool
 }
 
 type Rate struct {
 	ID                  int64
+	WorkspaceID         int64
 	CustomerID          *int64
 	ProjectID           *int64
 	ActivityID          *int64
@@ -85,6 +176,7 @@ type Rate struct {
 
 type Timesheet struct {
 	ID                int64
+	WorkspaceID       int64
 	UserID            int64
 	CustomerID        int64
 	ProjectID         int64
@@ -106,6 +198,7 @@ type Timesheet struct {
 
 type Invoice struct {
 	ID            int64
+	WorkspaceID   int64
 	Number        string
 	CustomerID    int64
 	UserID        int64
@@ -130,13 +223,14 @@ type InvoiceItem struct {
 }
 
 type WebhookEndpoint struct {
-	ID        int64
-	Name      string
-	URL       string
-	Secret    string
-	Events    []string
-	Enabled   bool
-	CreatedAt time.Time
+	ID          int64
+	WorkspaceID int64
+	Name        string
+	URL         string
+	Secret      string
+	Events      []string
+	Enabled     bool
+	CreatedAt   time.Time
 }
 
 type Page struct {

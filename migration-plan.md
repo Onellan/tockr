@@ -1,5 +1,26 @@
 # Migration Plan
 
+## Hierarchy Backfill
+
+- Create one default organization named `Default Organization`.
+- Create one default workspace named `Default Workspace`.
+- Assign all existing users to the default organization.
+- Map legacy `superadmin` users to organization owner and workspace admin.
+- Map legacy `admin` users to organization admin and workspace admin.
+- Map legacy `teamlead` users to workspace analyst/member, then promote to project manager only when legacy team/project evidence exists.
+- Map legacy `user` users to workspace member.
+- Assign all existing customers, projects, activities, tags, rates, timesheets, invoices, and webhooks to the default workspace.
+- Existing projects remain public unless a future migration can infer restricted team visibility.
+- Existing `teams` data can be migrated to `groups`; `team_members` becomes `group_members`.
+
+## Integrity Checks
+
+- Every user has `organization_id`.
+- Every user has at least one `organization_members` row.
+- Every active user has at least one `workspace_members` row.
+- Every customer/project/activity/tag/rate/timesheet/invoice/webhook row has `workspace_id`.
+- Every timesheet project belongs to the same workspace as the timesheet.
+
 ## Source
 
 The migration utility reads an existing Kimai database via a legacy DSN. The source database is read-only from Tockr's point of view.
@@ -26,4 +47,3 @@ The migration utility reads an existing Kimai database via a legacy DSN. The sou
 ## Rollback
 
 Rollback is restore-from-backup. The migration never mutates the source Kimai database.
-

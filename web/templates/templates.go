@@ -36,6 +36,7 @@ var primaryNav = []navItem{
 	{"Projects", "/projects", "Manage", ""},
 	{"Activities", "/activities", "Manage", ""},
 	{"Tags", "/tags", "Manage", auth.PermTrackTime},
+	{"Groups", "/groups", "Manage", auth.PermManageGroups},
 	{"Reports", "/reports", "Analyze", auth.PermViewReports},
 	{"Invoices", "/invoices", "Analyze", auth.PermManageInvoices},
 }
@@ -128,7 +129,7 @@ func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 
 func ProjectForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/projects"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id" required></label><label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Order<input name="order_number"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save project</button></div></form>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/projects"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id" required></label><label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Order<input name="order_number"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="private"> Private</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save project</button></div></form>`, esc(user.CSRF))
 		return nil
 	})
 }
@@ -143,6 +144,13 @@ func ActivityForm(user *NavUser) templ.Component {
 func TagForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="toolbar-form" method="post" action="/tags"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Tag name" required><button class="primary">Save tag</button></form>`, esc(user.CSRF))
+		return nil
+	})
+}
+
+func GroupForm(user *NavUser) templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/groups"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Save group</button></div></form>`, esc(user.CSRF))
 		return nil
 	})
 }
@@ -171,6 +179,7 @@ func Reports(user *NavUser, group string, rows []map[string]any) templ.Component
 		reportTab(w, group, "customer", "Customers")
 		reportTab(w, group, "project", "Projects")
 		reportTab(w, group, "activity", "Activities")
+		reportTab(w, group, "group", "Groups")
 		_, _ = fmt.Fprint(w, `</div>`)
 		out := [][]string{}
 		for _, row := range rows {
@@ -383,6 +392,8 @@ func singularTitle(title string) string {
 		return "Rate"
 	case "Users":
 		return "User"
+	case "Groups":
+		return "Group"
 	default:
 		return strings.TrimSuffix(title, "s")
 	}

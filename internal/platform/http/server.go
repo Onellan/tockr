@@ -37,6 +37,7 @@ type Server struct {
 type requestState struct {
 	User    *domain.User
 	Session *sqlite.Session
+	Access  domain.AccessContext
 }
 
 type contextKey string
@@ -68,6 +69,8 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/activities", s.requirePermission(auth.PermManageMaster, s.saveActivity))
 		r.Get("/tags", s.tags)
 		r.Post("/tags", s.requirePermission(auth.PermTrackTime, s.saveTag))
+		r.Get("/groups", s.requirePermission(auth.PermManageGroups, s.groups))
+		r.Post("/groups", s.requirePermission(auth.PermManageGroups, s.saveGroup))
 		r.Get("/rates", s.requirePermission(auth.PermManageRates, s.rates))
 		r.Post("/rates", s.requirePermission(auth.PermManageRates, s.saveRate))
 		r.Get("/timesheets", s.timesheets)
@@ -148,7 +151,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	state := s.state(r)
-	stats, err := s.store.Dashboard(r.Context(), state.User.ID)
+	stats, err := s.store.Dashboard(r.Context(), state.Access)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -162,7 +165,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
-	items, _, err := s.store.ListCustomers(r.Context(), r.URL.Query().Get("q"), page(r), size(r))
+	items, _, err := s.store.ListCustomers(r.Context(), s.access(r), r.URL.Query().Get("q"), page(r), size(r))
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -183,7 +186,7 @@ func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(w, r, err)
 		return
 	}
-	c := &domain.Customer{Name: r.FormValue("name"), Number: r.FormValue("number"), Company: r.FormValue("company"), Contact: r.FormValue("contact"), Email: r.FormValue("email"), Currency: r.FormValue("currency"), Timezone: r.FormValue("timezone"), Visible: checkbox(r, "visible"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
+	c := &domain.Customer{WorkspaceID: s.access(r).WorkspaceID, Name: r.FormValue("name"), Number: r.FormValue("number"), Company: r.FormValue("company"), Contact: r.FormValue("contact"), Email: r.FormValue("email"), Currency: r.FormValue("currency"), Timezone: r.FormValue("timezone"), Visible: checkbox(r, "visible"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertCustomer(r.Context(), c); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -194,25 +197,25 @@ func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
-	items, _, err := s.store.ListProjects(r.Context(), int64Param(r, "customer_id"), r.URL.Query().Get("q"), page(r), size(r))
+	items, _, err := s.store.ListProjects(r.Context(), s.access(r), int64Param(r, "customer_id"), r.URL.Query().Get("q"), page(r), size(r))
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	rows := [][]string{}
 	for _, p := range items {
-		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Billable)})
+		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable)})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.ProjectForm(s.nav(r))
 	}
-	s.render(w, r, templates.EntityList[domain.Project]("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Billable"}, rows, form))
+	s.render(w, r, templates.EntityList[domain.Project]("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Private", "Billable"}, rows, form))
 }
 
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	p := &domain.Project{CustomerID: formInt(r, "customer_id"), Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
+	p := &domain.Project{WorkspaceID: s.access(r).WorkspaceID, CustomerID: formInt(r, "customer_id"), Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertProject(r.Context(), p); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -223,7 +226,7 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) activities(w http.ResponseWriter, r *http.Request) {
-	items, _, err := s.store.ListActivities(r.Context(), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
+	items, _, err := s.store.ListActivities(r.Context(), s.access(r), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -249,7 +252,7 @@ func (s *Server) saveActivity(w http.ResponseWriter, r *http.Request) {
 	if value := formInt(r, "project_id"); value > 0 {
 		project = &value
 	}
-	a := &domain.Activity{ProjectID: project, Name: r.FormValue("name"), Number: r.FormValue("number"), Visible: checkbox(r, "visible"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
+	a := &domain.Activity{WorkspaceID: s.access(r).WorkspaceID, ProjectID: project, Name: r.FormValue("name"), Number: r.FormValue("number"), Visible: checkbox(r, "visible"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertActivity(r.Context(), a); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -260,7 +263,7 @@ func (s *Server) saveActivity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) tags(w http.ResponseWriter, r *http.Request) {
-	tags, err := s.store.ListTags(r.Context())
+	tags, err := s.store.ListTags(r.Context(), s.access(r).WorkspaceID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -274,7 +277,7 @@ func (s *Server) tags(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) saveTag(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	id, err := s.store.UpsertTag(r.Context(), r.FormValue("name"))
+	id, err := s.store.UpsertTag(r.Context(), s.access(r).WorkspaceID, r.FormValue("name"))
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -284,8 +287,33 @@ func (s *Server) saveTag(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/tags", http.StatusSeeOther)
 }
 
+func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.store.ListGroups(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	rows := [][]string{}
+	for _, group := range groups {
+		rows = append(rows, []string{fmt.Sprint(group.ID), group.Name, group.Description})
+	}
+	s.render(w, r, templates.EntityList[domain.Group]("Groups", s.nav(r), []string{"ID", "Name", "Description"}, rows, templates.GroupForm(s.nav(r))))
+}
+
+func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	id, err := s.store.CreateGroup(r.Context(), s.access(r).WorkspaceID, r.FormValue("name"), r.FormValue("description"))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "create", "group", &id, r.FormValue("name"))
+	http.Redirect(w, r, "/groups", http.StatusSeeOther)
+}
+
 func (s *Server) rates(w http.ResponseWriter, r *http.Request) {
-	rates, err := s.store.ListRates(r.Context())
+	rates, err := s.store.ListRates(r.Context(), s.access(r).WorkspaceID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -300,6 +328,7 @@ func (s *Server) rates(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	rate := &domain.Rate{
+		WorkspaceID:         s.access(r).WorkspaceID,
 		CustomerID:          formOptionalInt(r, "customer_id"),
 		ProjectID:           formOptionalInt(r, "project_id"),
 		ActivityID:          formOptionalInt(r, "activity_id"),
@@ -317,7 +346,10 @@ func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) timesheets(w http.ResponseWriter, r *http.Request) {
-	items, _, err := s.store.ListTimesheets(r.Context(), sqlite.TimesheetFilter{UserID: s.state(r).User.ID, Page: page(r), Size: size(r)})
+	filter := s.timesheetScope(r)
+	filter.Page = page(r)
+	filter.Size = size(r)
+	items, _, err := s.store.ListTimesheets(r.Context(), filter)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -336,14 +368,19 @@ func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(w, r, err)
 		return
 	}
-	t := &domain.Timesheet{UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: formInt(r, "project_id"), ActivityID: formInt(r, "activity_id"), StartedAt: start, EndedAt: &end, Timezone: s.cfg.DefaultTimezone, BreakSeconds: formInt(r, "break_minutes") * 60, Billable: true, Description: r.FormValue("description")}
+	projectID := formInt(r, "project_id")
+	if !s.canTrackProject(r, projectID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), StartedAt: start, EndedAt: &end, Timezone: s.cfg.DefaultTimezone, BreakSeconds: formInt(r, "break_minutes") * 60, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.CreateTimesheet(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "create", "timesheet", &t.ID, "")
-	s.queueEvent(r.Context(), "timesheet.created", t)
+	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.created", t)
 	http.Redirect(w, r, "/timesheets", http.StatusSeeOther)
 }
 
@@ -354,14 +391,19 @@ func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(w, r, err)
 		return
 	}
-	t := &domain.Timesheet{UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: formInt(r, "project_id"), ActivityID: formInt(r, "activity_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
+	projectID := formInt(r, "project_id")
+	if !s.canTrackProject(r, projectID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.StartTimer(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.badRequest(w, r, err)
 		return
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "start", "timesheet", &t.ID, "")
-	s.queueEvent(r.Context(), "timesheet.started", t)
+	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.started", t)
 	redirectOrJSON(w, r, "/")
 }
 
@@ -374,7 +416,7 @@ func (s *Server) stopTimer(w http.ResponseWriter, r *http.Request) {
 	if t != nil {
 		uid := s.state(r).User.ID
 		s.store.Audit(r.Context(), &uid, "stop", "timesheet", &t.ID, "")
-		s.queueEvent(r.Context(), "timesheet.stopped", t)
+		s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.stopped", t)
 	}
 	redirectOrJSON(w, r, "/")
 }
@@ -384,7 +426,7 @@ func (s *Server) reports(w http.ResponseWriter, r *http.Request) {
 	if group == "" {
 		group = "user"
 	}
-	rows, err := s.store.ListReports(r.Context(), group)
+	rows, err := s.store.ListReports(r.Context(), s.access(r), group)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -393,7 +435,7 @@ func (s *Server) reports(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) invoices(w http.ResponseWriter, r *http.Request) {
-	items, _, err := s.store.ListInvoices(r.Context(), int64Param(r, "customer_id"), page(r), size(r))
+	items, _, err := s.store.ListInvoices(r.Context(), s.access(r).WorkspaceID, int64Param(r, "customer_id"), page(r), size(r))
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -413,7 +455,7 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(w, r, err)
 		return
 	}
-	inv, err := s.store.CreateInvoice(r.Context(), s.state(r).User.ID, formInt(r, "customer_id"), begin, end.Add(24*time.Hour), formInt(r, "tax")*100)
+	inv, err := s.store.CreateInvoice(r.Context(), s.access(r), s.state(r).User.ID, formInt(r, "customer_id"), begin, end.Add(24*time.Hour), formInt(r, "tax")*100)
 	if err != nil {
 		s.badRequest(w, r, err)
 		return
@@ -424,12 +466,12 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "create", "invoice", &inv.ID, inv.Number)
-	s.queueEvent(r.Context(), "invoice.created", inv)
+	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "invoice.created", inv)
 	http.Redirect(w, r, "/invoices", http.StatusSeeOther)
 }
 
 func (s *Server) webhooks(w http.ResponseWriter, r *http.Request) {
-	hooks, err := s.store.ListWebhookEndpoints(r.Context())
+	hooks, err := s.store.ListWebhookEndpoints(r.Context(), s.access(r).WorkspaceID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -439,7 +481,7 @@ func (s *Server) webhooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	hook := &domain.WebhookEndpoint{Name: r.FormValue("name"), URL: r.FormValue("url"), Secret: r.FormValue("secret"), Events: splitCSV(r.FormValue("events")), Enabled: true}
+	hook := &domain.WebhookEndpoint{WorkspaceID: s.access(r).WorkspaceID, Name: r.FormValue("name"), URL: r.FormValue("url"), Secret: r.FormValue("secret"), Events: splitCSV(r.FormValue("events")), Enabled: true}
 	if err := s.store.CreateWebhookEndpoint(r.Context(), hook); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -486,27 +528,30 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiCustomers(w http.ResponseWriter, r *http.Request) {
-	items, pageInfo, err := s.store.ListCustomers(r.Context(), r.URL.Query().Get("q"), page(r), size(r))
+	items, pageInfo, err := s.store.ListCustomers(r.Context(), s.access(r), r.URL.Query().Get("q"), page(r), size(r))
 	s.writePage(w, items, pageInfo, err)
 }
 
 func (s *Server) apiProjects(w http.ResponseWriter, r *http.Request) {
-	items, pageInfo, err := s.store.ListProjects(r.Context(), int64Param(r, "customer_id"), r.URL.Query().Get("q"), page(r), size(r))
+	items, pageInfo, err := s.store.ListProjects(r.Context(), s.access(r), int64Param(r, "customer_id"), r.URL.Query().Get("q"), page(r), size(r))
 	s.writePage(w, items, pageInfo, err)
 }
 
 func (s *Server) apiActivities(w http.ResponseWriter, r *http.Request) {
-	items, pageInfo, err := s.store.ListActivities(r.Context(), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
+	items, pageInfo, err := s.store.ListActivities(r.Context(), s.access(r), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
 	s.writePage(w, items, pageInfo, err)
 }
 
 func (s *Server) apiTimesheets(w http.ResponseWriter, r *http.Request) {
-	items, pageInfo, err := s.store.ListTimesheets(r.Context(), sqlite.TimesheetFilter{UserID: s.state(r).User.ID, Page: page(r), Size: size(r)})
+	filter := s.timesheetScope(r)
+	filter.Page = page(r)
+	filter.Size = size(r)
+	items, pageInfo, err := s.store.ListTimesheets(r.Context(), filter)
 	s.writePage(w, items, pageInfo, err)
 }
 
 func (s *Server) apiWebhooks(w http.ResponseWriter, r *http.Request) {
-	hooks, err := s.store.ListWebhookEndpoints(r.Context())
+	hooks, err := s.store.ListWebhookEndpoints(r.Context(), s.access(r).WorkspaceID)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -521,6 +566,10 @@ func (s *Server) apiInvoiceDownload(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if inv.WorkspaceID != s.access(r).WorkspaceID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	path := filepath.Join(s.cfg.DataDir, "invoices", inv.Filename)
 	if _, err := os.Stat(path); err != nil {
 		http.NotFound(w, r)
@@ -532,6 +581,15 @@ func (s *Server) apiInvoiceDownload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiInvoiceMeta(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
+	inv, err := s.store.Invoice(r.Context(), id)
+	if err != nil || inv == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if inv.WorkspaceID != s.access(r).WorkspaceID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		s.badRequest(w, r, err)
 		return
@@ -557,7 +615,7 @@ func (s *Server) apiInvoiceMeta(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.queueEvent(r.Context(), "invoice.meta.updated", map[string]any{"invoice_id": id, "name": name})
+	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "invoice.meta.updated", map[string]any{"invoice_id": id, "name": name})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "invoice_id": id, "name": name})
 }
 
@@ -580,6 +638,10 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 					if err == nil && user != nil {
 						state.User = user
 						state.Session = session
+						access, err := s.store.AccessForUser(r.Context(), user.ID)
+						if err == nil {
+							state.Access = access
+						}
 					}
 				}
 			}
@@ -643,7 +705,56 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 }
 
 func (s *Server) hasPermission(r *http.Request, permission string) bool {
-	return auth.HasPermission(s.state(r).User, permission)
+	return auth.HasPermission(s.access(r), permission)
+}
+
+func (s *Server) access(r *http.Request) domain.AccessContext {
+	return s.state(r).Access
+}
+
+func (s *Server) timesheetScope(r *http.Request) sqlite.TimesheetFilter {
+	access := s.access(r)
+	filter := sqlite.TimesheetFilter{WorkspaceID: access.WorkspaceID}
+	if access.IsWorkspaceAdmin() || access.WorkspaceRole == domain.WorkspaceRoleAnalyst {
+		return filter
+	}
+	projectIDs := accessibleProjectIDs(access)
+	if len(projectIDs) > 0 {
+		filter.ProjectIDs = projectIDs
+		return filter
+	}
+	filter.UserID = access.UserID
+	return filter
+}
+
+func (s *Server) canTrackProject(r *http.Request, projectID int64) bool {
+	access := s.access(r)
+	if access.IsWorkspaceAdmin() || projectID == 0 {
+		return true
+	}
+	project, err := s.store.Project(r.Context(), projectID)
+	if err != nil || project == nil || project.WorkspaceID != access.WorkspaceID {
+		return false
+	}
+	return !project.Private || access.CanAccessProject(projectID)
+}
+
+func accessibleProjectIDs(access domain.AccessContext) []int64 {
+	seen := map[int64]bool{}
+	ids := []int64{}
+	for id := range access.ManagedProjectIDs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for id := range access.MemberProjectIDs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (s *Server) state(r *http.Request) *requestState {
@@ -662,6 +773,7 @@ func (s *Server) nav(r *http.Request) *templates.NavUser {
 	permissions := map[string]bool{}
 	for _, permission := range []string{
 		auth.PermAdmin,
+		auth.PermManageOrg,
 		auth.PermManageUsers,
 		auth.PermManageMaster,
 		auth.PermManageRates,
@@ -670,8 +782,10 @@ func (s *Server) nav(r *http.Request) *templates.NavUser {
 		auth.PermManageInvoices,
 		auth.PermUseAPI,
 		auth.PermManageWebhooks,
+		auth.PermManageGroups,
+		auth.PermManageProjects,
 	} {
-		permissions[permission] = auth.HasPermission(state.User, permission)
+		permissions[permission] = auth.HasPermission(state.Access, permission)
 	}
 	return &templates.NavUser{DisplayName: state.User.DisplayName, CSRF: state.Session.CSRFToken, CurrentPath: r.URL.Path, Permissions: permissions}
 }
@@ -723,12 +837,12 @@ func (s *Server) writeInvoiceFile(inv *domain.Invoice) error {
 	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(content), 0o644)
 }
 
-func (s *Server) queueEvent(ctx context.Context, event string, payload any) {
+func (s *Server) queueEvent(ctx context.Context, workspaceID int64, event string, payload any) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
-	if err := s.store.QueueWebhook(ctx, event, body); err != nil {
+	if err := s.store.QueueWebhook(ctx, workspaceID, event, body); err != nil {
 		s.log.Warn("queue webhook failed", "err", err)
 	}
 }

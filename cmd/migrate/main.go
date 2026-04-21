@@ -48,15 +48,15 @@ func migrate(ctx context.Context, src, dst *sql.DB) error {
 	if err := migrateUsers(ctx, src, tx); err != nil {
 		return err
 	}
-	if err := copyTable(ctx, src, tx, "kimai2_customers", `INSERT OR IGNORE INTO customers(id,name,number,company,contact,email,currency,timezone,visible,billable,comment,legacy_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if err := copyTable(ctx, src, tx, "kimai2_customers", `INSERT OR IGNORE INTO customers(id,workspace_id,name,number,company,contact,email,currency,timezone,visible,billable,comment,legacy_json,created_at) VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		[]string{"id", "name", "number", "company", "contact", "email", "currency", "timezone", "visible", "billable", "comment"}); err != nil {
 		return err
 	}
-	if err := copyTable(ctx, src, tx, "kimai2_projects", `INSERT OR IGNORE INTO projects(id,customer_id,name,number,order_number,visible,billable,comment,legacy_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if err := copyTable(ctx, src, tx, "kimai2_projects", `INSERT OR IGNORE INTO projects(id,workspace_id,customer_id,name,number,order_number,visible,billable,comment,legacy_json,created_at) VALUES(?,1,?,?,?,?,?,?,?,?,?)`,
 		[]string{"id", "customer_id", "name", "number", "order_number", "visible", "billable", "comment"}); err != nil {
 		return err
 	}
-	if err := copyTable(ctx, src, tx, "kimai2_activities", `INSERT OR IGNORE INTO activities(id,project_id,name,number,visible,billable,comment,legacy_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+	if err := copyTable(ctx, src, tx, "kimai2_activities", `INSERT OR IGNORE INTO activities(id,workspace_id,project_id,name,number,visible,billable,comment,legacy_json,created_at) VALUES(?,1,?,?,?,?,?,?,?,?)`,
 		[]string{"id", "project_id", "name", "number", "visible", "billable", "comment"}); err != nil {
 		return err
 	}
@@ -87,16 +87,42 @@ func migrateUsers(ctx context.Context, src *sql.DB, tx *sql.Tx) error {
 		if alias == "" {
 			alias = username
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO users(id,email,username,display_name,password_hash,timezone,enabled,created_at) VALUES(?,?,?,?,?,?,?,?)`, id, email, username, alias, password, timezoneValue, enabled, fallbackTime(registered)); err != nil {
+		created := fallbackTime(registered)
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO users(id,organization_id,email,username,display_name,password_hash,timezone,enabled,created_at) VALUES(?,1,?,?,?,?,?,?,?)`, id, email, username, alias, password, timezoneValue, enabled, created); err != nil {
 			return err
 		}
-		for _, role := range legacy.ParseRoles(rolesRaw) {
+		roles := legacy.ParseRoles(rolesRaw)
+		for _, role := range roles {
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO user_roles(user_id, role_id) SELECT ?, id FROM roles WHERE name=?`, id, role); err != nil {
 				return err
 			}
 		}
+		orgRole, workspaceRole := scopedRoles(roles)
+		if orgRole != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO organization_members(organization_id, user_id, role, created_at) VALUES(1,?,?,?)`, id, orgRole, created); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(1,?,?,?)`, id, workspaceRole, created); err != nil {
+			return err
+		}
 	}
 	return rows.Err()
+}
+
+func scopedRoles(roles []string) (string, string) {
+	for _, role := range roles {
+		if role == "superadmin" {
+			return "owner", "admin"
+		}
+		if role == "admin" {
+			return "admin", "admin"
+		}
+		if role == "teamlead" {
+			return "", "analyst"
+		}
+	}
+	return "", "member"
 }
 
 func copyTable(ctx context.Context, src *sql.DB, tx *sql.Tx, table, insert string, columns []string) error {

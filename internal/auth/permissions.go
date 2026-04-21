@@ -4,6 +4,7 @@ import "tockr/internal/domain"
 
 const (
 	PermAdmin          = "admin"
+	PermManageOrg      = "manage_organization"
 	PermManageUsers    = "manage_users"
 	PermManageMaster   = "manage_master_data"
 	PermManageRates    = "manage_rates"
@@ -12,44 +13,11 @@ const (
 	PermManageInvoices = "manage_invoices"
 	PermUseAPI         = "api_access"
 	PermManageWebhooks = "manage_webhooks"
+	PermManageGroups   = "manage_groups"
+	PermManageProjects = "manage_projects"
 )
 
-var rolePermissions = map[domain.Role]map[string]bool{
-	domain.RoleUser: {
-		PermTrackTime:   true,
-		PermViewReports: true,
-		PermUseAPI:      true,
-	},
-	domain.RoleTeamLead: {
-		PermTrackTime:   true,
-		PermViewReports: true,
-		PermUseAPI:      true,
-	},
-	domain.RoleAdmin: {
-		PermAdmin:          true,
-		PermManageUsers:    true,
-		PermManageMaster:   true,
-		PermManageRates:    true,
-		PermTrackTime:      true,
-		PermViewReports:    true,
-		PermManageInvoices: true,
-		PermUseAPI:         true,
-		PermManageWebhooks: true,
-	},
-	domain.RoleSuperAdmin: {
-		PermAdmin:          true,
-		PermManageUsers:    true,
-		PermManageMaster:   true,
-		PermManageRates:    true,
-		PermTrackTime:      true,
-		PermViewReports:    true,
-		PermManageInvoices: true,
-		PermUseAPI:         true,
-		PermManageWebhooks: true,
-	},
-}
-
-func HasRole(user *domain.User, role domain.Role) bool {
+func HasLegacyRole(user *domain.User, role domain.Role) bool {
 	if user == nil {
 		return false
 	}
@@ -61,14 +29,17 @@ func HasRole(user *domain.User, role domain.Role) bool {
 	return false
 }
 
-func HasPermission(user *domain.User, permission string) bool {
-	if user == nil || !user.Enabled {
+func HasPermission(access domain.AccessContext, permission string) bool {
+	switch permission {
+	case PermAdmin, PermManageOrg:
+		return access.IsOrgAdmin()
+	case PermManageUsers, PermManageMaster, PermManageRates, PermManageInvoices, PermManageWebhooks, PermManageGroups, PermManageProjects:
+		return access.IsWorkspaceAdmin()
+	case PermTrackTime, PermUseAPI:
+		return access.WorkspaceID > 0
+	case PermViewReports:
+		return access.CanViewWorkspaceReports() || len(access.ManagedProjectIDs) > 0 || access.WorkspaceID > 0
+	default:
 		return false
 	}
-	for _, role := range user.Roles {
-		if rolePermissions[role][permission] {
-			return true
-		}
-	}
-	return false
 }

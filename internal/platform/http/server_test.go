@@ -35,7 +35,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/timesheets", "/customers", "/projects", "/activities", "/tags", "/reports", "/invoices", "/rates", "/admin/users", "/webhooks"}
+	routes := []string{"/", "/timesheets", "/customers", "/projects", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/admin/users", "/webhooks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -88,11 +88,58 @@ func TestUserNavigationHidesForbiddenItems(t *testing.T) {
 		t.Fatal("normal user should not see customer create form")
 	}
 
-	for _, route := range []string{"/invoices", "/rates", "/admin/users", "/webhooks"} {
+	for _, route := range []string{"/invoices", "/rates", "/admin/users", "/webhooks", "/groups"} {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("%s returned %d, want 403", route, rec.Code)
 		}
+	}
+}
+
+func TestScopedAuthorizationHidesPrivateProjectsUntilMembership(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, domain.User{
+		Email:       "member@example.com",
+		Username:    "member",
+		DisplayName: "Member",
+		Timezone:    "UTC",
+		Enabled:     true,
+	}, "member12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	customer := &domain.Customer{WorkspaceID: 1, Name: "Scoped", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	project := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Private Project", Visible: true, Private: true, Billable: true}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "member@example.com", "member12345")
+	body := getWithCookie(app, "/projects", cookie).Body.String()
+	if strings.Contains(body, "Private Project") {
+		t.Fatal("private project leaked to unassigned member")
+	}
+	body = getWithCookie(app, "/customers", cookie).Body.String()
+	if strings.Contains(body, "Scoped") {
+		t.Fatal("customer for private-only project leaked to unassigned member")
+	}
+	user, err := store.FindUserByEmail(ctx, "member@example.com")
+	if err != nil || user == nil {
+		t.Fatal("expected member user")
+	}
+	if err := store.AddProjectMember(ctx, project.ID, user.ID, domain.ProjectRoleMember); err != nil {
+		t.Fatal(err)
+	}
+	body = getWithCookie(app, "/projects", cookie).Body.String()
+	if !strings.Contains(body, "Private Project") {
+		t.Fatal("assigned member should see private project")
+	}
+	body = getWithCookie(app, "/customers", cookie).Body.String()
+	if !strings.Contains(body, "Scoped") {
+		t.Fatal("assigned member should see customer for assigned private project")
 	}
 }
 
