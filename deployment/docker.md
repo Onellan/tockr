@@ -6,7 +6,7 @@ Build and run:
 docker compose up --build
 ```
 
-Open `http://localhost:8080`.
+Open `http://localhost:8029`.
 
 Default seed credentials from `docker-compose.yml`:
 
@@ -24,4 +24,3 @@ Terminate TLS in the proxy and forward:
 - `Host`
 
 Set `TOCKR_COOKIE_SECURE=true` when served over HTTPS.
-

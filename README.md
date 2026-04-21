@@ -21,7 +21,7 @@ Set `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` before production use.
 docker compose up --build
 ```
 
-Open `http://localhost:8080`.
+Open `http://localhost:8029`.
 
 ## Features
 
@@ -45,4 +45,3 @@ Open `http://localhost:8080`.
 - [Docker deployment](deployment/docker.md)
 - [systemd deployment](deployment/systemd.md)
 - [Raspberry Pi notes](deployment/raspberry-pi.md)
-

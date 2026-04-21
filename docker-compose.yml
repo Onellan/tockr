@@ -3,7 +3,7 @@ services:
     build: .
     image: tockr:local
     ports:
-      - "8080:8080"
+      - "8029:8080"
     environment:
       TOCKR_ADDR: ":8080"
       TOCKR_DB_PATH: "/app/data/tockr.db"
@@ -20,4 +20,3 @@ services:
 
 volumes:
   tockr-data:
-
