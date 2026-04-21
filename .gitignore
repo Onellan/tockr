@@ -1,0 +1,11 @@
+/app
+/app.exe
+/migrate
+/migrate.exe
+/data/
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+.env
+

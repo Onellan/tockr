@@ -1,0 +1,12 @@
+.git
+data
+*.db
+*.db-shm
+*.db-wal
+app
+app.exe
+migrate
+migrate.exe
+coverage.out
+.env
+

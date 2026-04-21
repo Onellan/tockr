@@ -1,0 +1,161 @@
+package domain
+
+import "time"
+
+type Role string
+
+const (
+	RoleUser       Role = "user"
+	RoleTeamLead   Role = "teamlead"
+	RoleAdmin      Role = "admin"
+	RoleSuperAdmin Role = "superadmin"
+)
+
+type User struct {
+	ID           int64
+	Email        string
+	Username     string
+	DisplayName  string
+	PasswordHash string
+	Timezone     string
+	Enabled      bool
+	Roles        []Role
+	CreatedAt    time.Time
+	LastLoginAt  *time.Time
+}
+
+type Customer struct {
+	ID         int64
+	Name       string
+	Number     string
+	Company    string
+	Contact    string
+	Email      string
+	Currency   string
+	Timezone   string
+	Visible    bool
+	Billable   bool
+	Comment    string
+	LegacyJSON string
+	CreatedAt  time.Time
+}
+
+type Project struct {
+	ID         int64
+	CustomerID int64
+	Name       string
+	Number     string
+	OrderNo    string
+	Visible    bool
+	Billable   bool
+	Comment    string
+	LegacyJSON string
+	CreatedAt  time.Time
+}
+
+type Activity struct {
+	ID         int64
+	ProjectID  *int64
+	Name       string
+	Number     string
+	Visible    bool
+	Billable   bool
+	Comment    string
+	LegacyJSON string
+	CreatedAt  time.Time
+}
+
+type Tag struct {
+	ID      int64
+	Name    string
+	Visible bool
+}
+
+type Rate struct {
+	ID                  int64
+	CustomerID          *int64
+	ProjectID           *int64
+	ActivityID          *int64
+	UserID              *int64
+	Kind                string
+	AmountCents         int64
+	InternalAmountCents *int64
+	Fixed               bool
+}
+
+type Timesheet struct {
+	ID                int64
+	UserID            int64
+	CustomerID        int64
+	ProjectID         int64
+	ActivityID        int64
+	StartedAt         time.Time
+	EndedAt           *time.Time
+	Timezone          string
+	DurationSeconds   int64
+	BreakSeconds      int64
+	RateCents         int64
+	InternalRateCents *int64
+	Billable          bool
+	Exported          bool
+	Description       string
+	Tags              []Tag
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type Invoice struct {
+	ID            int64
+	Number        string
+	CustomerID    int64
+	UserID        int64
+	Status        string
+	Currency      string
+	SubtotalCents int64
+	TaxCents      int64
+	TotalCents    int64
+	Filename      string
+	PaymentDate   *time.Time
+	CreatedAt     time.Time
+}
+
+type InvoiceItem struct {
+	ID          int64
+	InvoiceID   int64
+	TimesheetID *int64
+	Description string
+	Quantity    int64
+	UnitCents   int64
+	TotalCents  int64
+}
+
+type WebhookEndpoint struct {
+	ID        int64
+	Name      string
+	URL       string
+	Secret    string
+	Events    []string
+	Enabled   bool
+	CreatedAt time.Time
+}
+
+type Page struct {
+	Page    int
+	Size    int
+	Total   int
+	HasPrev bool
+	HasNext bool
+}
+
+func NormalizePage(page, size int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 25
+	}
+	if size > 100 {
+		size = 100
+	}
+	return page, size
+}
