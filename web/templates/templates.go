@@ -127,7 +127,7 @@ func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet, 
 		metric(w, "Today", duration(stats["today_seconds"]), "Tracked by you")
 		metric(w, "Unexported", fmt.Sprint(stats["unexported"]), "Not yet invoiced")
 		metric(w, "Invoices", fmt.Sprint(stats["invoices"]), "Created documents")
-		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Timer</h2><p>Start or stop the active work entry.</p></div></div>`)
+		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Timer <span class="tooltip-icon" data-tooltip="Starts a live timer against the selected project and activity. When you stop it, a timesheet entry is created automatically.">i</span></h2><p>Start or stop the active work entry.</p></div></div>`)
 		if active != nil {
 			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Timer is active for this user.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
 		} else {
@@ -135,7 +135,7 @@ func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet, 
 			renderWorkSelectors(w, selectors, true)
 			_, _ = fmt.Fprint(w, `<input name="description" placeholder="What are you working on?"><button class="primary">Start timer</button></form>`)
 		}
-		_, _ = fmt.Fprintf(w, `</div><div class="panel"><div class="panel-head"><div><h2>Favorites</h2><p>Start repeated work without retyping IDs.</p></div></div><form method="post" action="/favorites" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Name" required>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `</div><div class="panel"><div class="panel-head"><div><h2>Favorites <span class="tooltip-icon" data-tooltip="Save a preset combination of project, activity and task. Click Start next to any favorite to launch a timer with those settings instantly.">i</span></h2><p>Start repeated work without retyping IDs.</p></div></div><form method="post" action="/favorites" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Name" required>`, esc(user.CSRF))
 		renderWorkSelectors(w, selectors, true)
 		_, _ = fmt.Fprint(w, `<input name="description" placeholder="Description"><input name="tags" placeholder="Tags"><button class="table-action">Save</button></form><div class="summary-list">`)
 		if len(favorites) == 0 {

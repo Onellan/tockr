@@ -832,6 +832,66 @@ tr:last-child td {
   border-radius: var(--radius-sm);
 }
 
+/* Tooltip icon */
+.tooltip-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 700;
+  font-style: normal;
+  cursor: default;
+  margin-left: 5px;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.tooltip-icon::before {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--text);
+  color: var(--surface);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.5;
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
+  width: 220px;
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 20;
+}
+
+.tooltip-icon::after {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: var(--text);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 20;
+}
+
+.tooltip-icon:hover::before,
+.tooltip-icon:hover::after {
+  opacity: 1;
+}
+
 /* Contextual help components */
 .info-callout {
   background: var(--primary-soft);
