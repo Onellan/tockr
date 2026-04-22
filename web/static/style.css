@@ -378,6 +378,15 @@ p {
   border-bottom: 1px solid var(--line);
 }
 
+.favorite-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+}
+
 .summary-list div:last-child {
   border-bottom: 0;
 }

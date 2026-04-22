@@ -34,6 +34,7 @@ var primaryNav = []navItem{
 	{"Timesheets", "/timesheets", "Work", auth.PermTrackTime},
 	{"Customers", "/customers", "Manage", ""},
 	{"Projects", "/projects", "Manage", ""},
+	{"Tasks", "/tasks", "Manage", ""},
 	{"Activities", "/activities", "Manage", ""},
 	{"Tags", "/tags", "Manage", auth.PermTrackTime},
 	{"Groups", "/groups", "Manage", auth.PermManageGroups},
@@ -81,7 +82,7 @@ func Login(message string) templ.Component {
 	}))
 }
 
-func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet) templ.Component {
+func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet, favorites []domain.Favorite) templ.Component {
 	return Layout("Dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Dashboard", "Live overview", "Track current work, unexported time, and billing movement.")
 		_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
@@ -93,9 +94,16 @@ func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet) 
 		if active != nil {
 			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Timer is active for this user.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
 		} else {
-			_, _ = fmt.Fprintf(w, `<form method="post" action="/timesheets/start" class="compact-form"><input type="hidden" name="csrf" value="%s"><input name="customer_id" placeholder="Customer ID" required><input name="project_id" placeholder="Project ID" required><input name="activity_id" placeholder="Activity ID" required><input name="description" placeholder="What are you working on?"><button class="primary">Start timer</button></form>`, esc(user.CSRF))
+			_, _ = fmt.Fprintf(w, `<form method="post" action="/timesheets/start" class="compact-form"><input type="hidden" name="csrf" value="%s"><input name="customer_id" placeholder="Customer ID" required><input name="project_id" placeholder="Project ID" required><input name="activity_id" placeholder="Activity ID" required><input name="task_id" placeholder="Task ID"><input name="description" placeholder="What are you working on?"><button class="primary">Start timer</button></form>`, esc(user.CSRF))
 		}
-		_, _ = fmt.Fprint(w, `</div><div class="panel"><div class="panel-head"><div><h2>Operational focus</h2><p>Keep unexported billable time low and invoice regularly.</p></div></div><div class="summary-list"><div><span>Recommended next step</span><strong>Review timesheets</strong></div><div><span>Billing readiness</span><strong>Check invoice queue</strong></div></div></div></section>`)
+		_, _ = fmt.Fprintf(w, `</div><div class="panel"><div class="panel-head"><div><h2>Favorites</h2><p>Start repeated work without retyping IDs.</p></div></div><form method="post" action="/favorites" class="compact-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Name" required><input name="customer_id" placeholder="Customer ID" required><input name="project_id" placeholder="Project ID" required><input name="activity_id" placeholder="Activity ID" required><input name="task_id" placeholder="Task ID"><input name="description" placeholder="Description"><input name="tags" placeholder="Tags"><button class="table-action">Save</button></form><div class="summary-list">`, esc(user.CSRF))
+		if len(favorites) == 0 {
+			_, _ = fmt.Fprint(w, `<div><span>No favorites yet</span><strong>Create one from repeated work</strong></div>`)
+		}
+		for _, fav := range favorites {
+			_, _ = fmt.Fprintf(w, `<form method="post" action="/favorites/%d/start" class="favorite-row"><input type="hidden" name="csrf" value="%s"><span>%s</span><button class="table-action">Start</button></form>`, fav.ID, esc(user.CSRF), esc(fav.Name))
+		}
+		_, _ = fmt.Fprint(w, `</div></div></section>`)
 		return nil
 	}))
 }
@@ -115,6 +123,21 @@ func EntityList[T any](title string, user *NavUser, headers []string, rows [][]s
 	}))
 }
 
+func EntityListRaw(title string, user *NavUser, headers []string, rows [][]string, form templ.Component) templ.Component {
+	return Layout(title, user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, title, "Directory", "Create and maintain the records used by time entries and reporting.")
+		if form != nil {
+			_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create `+esc(singularTitle(title))+`</h2><p>Keep required fields tight and searchable.</p></div></div>`)
+			if err := form.Render(ctx, w); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprint(w, `</section>`)
+		}
+		dataTableRaw(w, headers, rows)
+		return nil
+	}))
+}
+
 func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		action := "/customers"
@@ -129,7 +152,7 @@ func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 
 func ProjectForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/projects"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id" required></label><label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Order<input name="order_number"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="private"> Private</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save project</button></div></form>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/projects"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id" required></label><label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Order<input name="order_number"></label><label>Estimate hours<input name="estimate_hours" value="0"></label><label>Budget cents<input name="budget_cents" value="0"></label><label>Alert percent<input name="budget_alert_percent" value="80"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="private"> Private</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save project</button></div></form>`, esc(user.CSRF))
 		return nil
 	})
 }
@@ -137,6 +160,13 @@ func ProjectForm(user *NavUser) templ.Component {
 func ActivityForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/activities"><input type="hidden" name="csrf" value="%s"><label>Project ID<input name="project_id"></label><label>Name<input name="name" required></label><label>Number<input name="number"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save activity</button></div></form>`, esc(user.CSRF))
+		return nil
+	})
+}
+
+func TaskForm(user *NavUser) templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/tasks"><input type="hidden" name="csrf" value="%s"><label>Project ID<input name="project_id" required></label><label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Estimate hours<input name="estimate_hours" value="0"></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save task</button></div></form>`, esc(user.CSRF))
 		return nil
 	})
 }
@@ -165,20 +195,38 @@ func RateForm(user *NavUser) templ.Component {
 func Timesheets(user *NavUser, rows [][]string) templ.Component {
 	return Layout("Timesheets", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Timesheets", "Time entries", "Record work manually or use the timer from the dashboard.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create entry</h2><p>Use customer, project, and activity IDs from the management lists.</p></div></div><form method="post" action="/timesheets" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id" required></label><label>Project ID<input name="project_id" required></label><label>Activity ID<input name="activity_id" required></label><label>Start<input type="datetime-local" name="start" required></label><label>End<input type="datetime-local" name="end" required></label><label>Break minutes<input name="break_minutes" value="0"></label><label>Tags<input name="tags" placeholder="comma,separated"></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></section>`, esc(user.CSRF))
-		dataTable(w, []string{"ID", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description"}, rows)
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create entry</h2><p>Use customer, project, activity, and optional task IDs from the management lists.</p></div></div><form method="post" action="/timesheets" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id" required></label><label>Project ID<input name="project_id" required></label><label>Activity ID<input name="activity_id" required></label><label>Task ID<input name="task_id"></label><label>Start<input type="datetime-local" name="start" required></label><label>End<input type="datetime-local" name="end" required></label><label>Break minutes<input name="break_minutes" value="0"></label><label>Tags<input name="tags" placeholder="comma,separated"></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></section>`, esc(user.CSRF))
+		dataTable(w, []string{"ID", "Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description"}, rows)
 		return nil
 	}))
 }
 
-func Reports(user *NavUser, group string, rows []map[string]any) templ.Component {
+func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, saved []domain.SavedReport) templ.Component {
 	return Layout("Reports", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		group := defaultVal(filter.Group, "user")
 		pageHeader(w, "Reports", "Analysis", "Branch-derived activity and customer reporting, simplified for fast reads.")
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Filters</h2><p>Save repeatable reporting views.</p></div></div><form method="get" action="/reports" class="toolbar-form"><select name="group">%s%s%s%s%s%s</select><input type="date" name="begin" value="%s"><input type="date" name="end" value="%s"><input name="customer_id" placeholder="Customer ID" value="%s"><input name="project_id" placeholder="Project ID" value="%s"><input name="activity_id" placeholder="Activity ID" value="%s"><input name="task_id" placeholder="Task ID" value="%s"><button class="primary">Apply</button></form><form method="post" action="/reports/saved" class="toolbar-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Saved report name" required><input type="hidden" name="group" value="%s"><input type="hidden" name="begin" value="%s"><input type="hidden" name="end" value="%s"><input type="hidden" name="customer_id" value="%s"><input type="hidden" name="project_id" value="%s"><input type="hidden" name="activity_id" value="%s"><input type="hidden" name="task_id" value="%s"><input type="hidden" name="user_id" value="%s"><input type="hidden" name="group_id" value="%s"><button class="table-action">Save report</button></form></section>`,
+			reportOption(group, "user", "Users"),
+			reportOption(group, "customer", "Customers"),
+			reportOption(group, "project", "Projects"),
+			reportOption(group, "activity", "Activities"),
+			reportOption(group, "task", "Tasks"),
+			reportOption(group, "group", "Groups"),
+			dateInput(filter.Begin), dateInput(filter.End), idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID), idValue(filter.TaskID),
+			esc(user.CSRF), esc(group), dateInput(filter.Begin), dateInput(filter.End), idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID), idValue(filter.TaskID), idValue(filter.UserID), idValue(filter.GroupID))
+		if len(saved) > 0 {
+			rows := [][]string{}
+			for _, report := range saved {
+				rows = append(rows, []string{report.Name, report.GroupBy})
+			}
+			dataTable(w, []string{"Saved report", "Group"}, rows)
+		}
 		_, _ = fmt.Fprint(w, `<div class="tabs" aria-label="Report groups">`)
 		reportTab(w, group, "user", "Users")
 		reportTab(w, group, "customer", "Customers")
 		reportTab(w, group, "project", "Projects")
 		reportTab(w, group, "activity", "Activities")
+		reportTab(w, group, "task", "Tasks")
 		reportTab(w, group, "group", "Groups")
 		_, _ = fmt.Fprint(w, `</div>`)
 		out := [][]string{}
@@ -186,6 +234,22 @@ func Reports(user *NavUser, group string, rows []map[string]any) templ.Component
 			out = append(out, []string{fmt.Sprint(row["name"]), fmt.Sprint(row["count"]), duration(row["seconds"].(int64)), money(row["cents"].(int64))})
 		}
 		dataTable(w, []string{strings.Title(group), "Entries", "Duration", "Revenue"}, out)
+		return nil
+	}))
+}
+
+func ProjectDashboard(user *NavUser, d domain.ProjectDashboard) templ.Component {
+	return Layout("Project dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, d.Project.Name, "Project dashboard", "Estimate, budget, and tracked work for this project.")
+		_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
+		metric(w, "Tracked", duration(d.TrackedSeconds), "Total project time")
+		metric(w, "Estimate used", fmt.Sprintf("%d%%", d.EstimatePercent), "Against estimate")
+		metric(w, "Billable value", money(d.BillableCents), "Tracked value")
+		metric(w, "Budget used", fmt.Sprintf("%d%%", d.BudgetPercent), "Against fixed fee")
+		_, _ = fmt.Fprint(w, `</section>`)
+		if d.Alert {
+			_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold.</div>`)
+		}
 		return nil
 	}))
 }
@@ -277,6 +341,14 @@ func reportTab(w io.Writer, current, value, label string) {
 	_, _ = fmt.Fprintf(w, `<a%s%s href="/reports?group=%s">%s</a>`, class, currentAttr, esc(value), esc(label))
 }
 
+func reportOption(current, value, label string) string {
+	selected := ""
+	if current == value {
+		selected = ` selected`
+	}
+	return fmt.Sprintf(`<option value="%s"%s>%s</option>`, esc(value), selected, esc(label))
+}
+
 func pageHeader(w io.Writer, title, eyebrow, description string) {
 	_, _ = fmt.Fprintf(w, `<header class="page-head"><div><span>%s</span><h1>%s</h1><p>%s</p></div></header>`, esc(eyebrow), esc(title), esc(description))
 }
@@ -326,6 +398,20 @@ func esc(value string) string {
 
 func money(cents int64) string {
 	return fmt.Sprintf("$%.2f", float64(cents)/100)
+}
+
+func dateInput(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return esc(value.Format("2006-01-02"))
+}
+
+func idValue(value int64) string {
+	if value == 0 {
+		return ""
+	}
+	return esc(fmt.Sprint(value))
 }
 
 func duration(seconds int64) string {

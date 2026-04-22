@@ -28,9 +28,11 @@ Open `http://localhost:8029`.
 - Login/logout with secure signed session cookies.
 - CSRF protection for mutating routes.
 - Users, customers, projects, activities, tags, rates.
+- Tasks under projects for more precise tracking.
+- Favorite/pinned timer starts for repeated work.
 - Timesheet start/stop and manual time entries.
 - Future-time policy: `allow`, `deny`, `end_of_day`, `end_of_week`.
-- Dashboard and entity reports.
+- Dashboard, project insights, entity reports, task reports, and saved report definitions.
 - Basic invoice creation, metadata API, and invoice download.
 - Compact JSON APIs with pagination.
 - Signed webhook delivery with persisted retry queue.

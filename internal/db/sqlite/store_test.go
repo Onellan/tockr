@@ -117,3 +117,88 @@ func TestHierarchyBackfillAndGroupProjectAccess(t *testing.T) {
 		t.Fatalf("group membership should grant project access: %#v", access)
 	}
 }
+
+func TestTogglInspiredPhaseOneModels(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SeedAdmin(ctx, "admin@example.com", "secret12345", "UTC", "USD"); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || user == nil {
+		t.Fatal("missing admin")
+	}
+	access, err := store.AccessForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customer := &domain.Customer{WorkspaceID: access.WorkspaceID, Name: "Acme", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	project := &domain.Project{WorkspaceID: access.WorkspaceID, CustomerID: customer.ID, Name: "Launch", Visible: true, Billable: true, EstimateSeconds: 3600, BudgetCents: 10000, BudgetAlertPercent: 50}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	task := &domain.Task{WorkspaceID: access.WorkspaceID, ProjectID: project.ID, Name: "Design", Visible: true, Billable: true, EstimateSeconds: 1800}
+	if err := store.UpsertTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	tasks, page, err := store.ListTasks(ctx, access, project.ID, "", 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(tasks) != 1 || tasks[0].Name != "Design" {
+		t.Fatalf("expected task list to include Design, got page=%#v tasks=%#v", page, tasks)
+	}
+	activity := &domain.Activity{WorkspaceID: access.WorkspaceID, ProjectID: &project.ID, Name: "Build", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, activity); err != nil {
+		t.Fatal(err)
+	}
+	favorite := &domain.Favorite{WorkspaceID: access.WorkspaceID, UserID: user.ID, Name: "Morning build", CustomerID: customer.ID, ProjectID: project.ID, ActivityID: activity.ID, TaskID: &task.ID, Tags: "focus"}
+	if err := store.CreateFavorite(ctx, favorite); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Favorite(ctx, access.WorkspaceID, user.ID, favorite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil || loaded.TaskID == nil || *loaded.TaskID != task.ID {
+		t.Fatalf("favorite should preserve task scope: %#v", loaded)
+	}
+	report := &domain.SavedReport{WorkspaceID: access.WorkspaceID, UserID: user.ID, Name: "Task summary", GroupBy: "task", FiltersJSON: `{"project_id":"1"}`}
+	if err := store.CreateSavedReport(ctx, report); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.ListSavedReports(ctx, access.WorkspaceID, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 1 || saved[0].GroupBy != "task" {
+		t.Fatalf("expected saved task report, got %#v", saved)
+	}
+	start := time.Now().UTC().Add(-2 * time.Hour)
+	end := time.Now().UTC().Add(-time.Hour)
+	entry := &domain.Timesheet{WorkspaceID: access.WorkspaceID, UserID: user.ID, CustomerID: customer.ID, ProjectID: project.ID, ActivityID: activity.ID, TaskID: &task.ID, StartedAt: start, EndedAt: &end, Billable: true, RateCents: 10000}
+	if err := store.CreateTimesheet(ctx, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ListReports(ctx, access, domain.ReportFilter{Group: "task", TaskID: task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["name"] != "Design" {
+		t.Fatalf("expected task report row, got %#v", rows)
+	}
+	dashboard, err := store.ProjectDashboard(ctx, access, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dashboard.EstimatePercent < 100 || !dashboard.Alert {
+		t.Fatalf("expected project dashboard to flag estimate threshold, got %#v", dashboard)
+	}
+}

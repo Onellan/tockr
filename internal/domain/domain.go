@@ -127,18 +127,21 @@ type Customer struct {
 }
 
 type Project struct {
-	ID          int64
-	WorkspaceID int64
-	CustomerID  int64
-	Name        string
-	Number      string
-	OrderNo     string
-	Visible     bool
-	Private     bool
-	Billable    bool
-	Comment     string
-	LegacyJSON  string
-	CreatedAt   time.Time
+	ID                 int64
+	WorkspaceID        int64
+	CustomerID         int64
+	Name               string
+	Number             string
+	OrderNo            string
+	Visible            bool
+	Private            bool
+	Billable           bool
+	EstimateSeconds    int64
+	BudgetCents        int64
+	BudgetAlertPercent int64
+	Comment            string
+	LegacyJSON         string
+	CreatedAt          time.Time
 }
 
 type Activity struct {
@@ -161,6 +164,32 @@ type Tag struct {
 	Visible     bool
 }
 
+type Task struct {
+	ID              int64
+	WorkspaceID     int64
+	ProjectID       int64
+	Name            string
+	Number          string
+	Visible         bool
+	Billable        bool
+	EstimateSeconds int64
+	CreatedAt       time.Time
+}
+
+type Favorite struct {
+	ID          int64
+	WorkspaceID int64
+	UserID      int64
+	Name        string
+	CustomerID  int64
+	ProjectID   int64
+	ActivityID  int64
+	TaskID      *int64
+	Description string
+	Tags        string
+	CreatedAt   time.Time
+}
+
 type Rate struct {
 	ID                  int64
 	WorkspaceID         int64
@@ -181,6 +210,7 @@ type Timesheet struct {
 	CustomerID        int64
 	ProjectID         int64
 	ActivityID        int64
+	TaskID            *int64
 	StartedAt         time.Time
 	EndedAt           *time.Time
 	Timezone          string
@@ -231,6 +261,40 @@ type WebhookEndpoint struct {
 	Events      []string
 	Enabled     bool
 	CreatedAt   time.Time
+}
+
+type SavedReport struct {
+	ID          int64
+	WorkspaceID int64
+	UserID      int64
+	Name        string
+	GroupBy     string
+	FiltersJSON string
+	Shared      bool
+	CreatedAt   time.Time
+}
+
+type ReportFilter struct {
+	Group      string
+	Begin      *time.Time
+	End        *time.Time
+	CustomerID int64
+	ProjectID  int64
+	ActivityID int64
+	TaskID     int64
+	UserID     int64
+	GroupID    int64
+}
+
+type ProjectDashboard struct {
+	Project         Project
+	TrackedSeconds  int64
+	BillableCents   int64
+	EstimatePercent int64
+	BudgetPercent   int64
+	OverEstimate    bool
+	OverBudget      bool
+	Alert           bool
 }
 
 type Page struct {

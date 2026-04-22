@@ -65,8 +65,11 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/customers", s.requirePermission(auth.PermManageMaster, s.saveCustomer))
 		r.Get("/projects", s.projects)
 		r.Post("/projects", s.requirePermission(auth.PermManageMaster, s.saveProject))
+		r.Get("/projects/{id}/dashboard", s.projectDashboard)
 		r.Get("/activities", s.activities)
 		r.Post("/activities", s.requirePermission(auth.PermManageMaster, s.saveActivity))
+		r.Get("/tasks", s.tasks)
+		r.Post("/tasks", s.requirePermission(auth.PermManageMaster, s.saveTask))
 		r.Get("/tags", s.tags)
 		r.Post("/tags", s.requirePermission(auth.PermTrackTime, s.saveTag))
 		r.Get("/groups", s.requirePermission(auth.PermManageGroups, s.groups))
@@ -76,8 +79,11 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/timesheets", s.timesheets)
 		r.Post("/timesheets", s.saveTimesheet)
 		r.Post("/timesheets/start", s.startTimer)
+		r.Post("/favorites", s.saveFavorite)
+		r.Post("/favorites/{id}/start", s.startFavorite)
 		r.Post("/timesheets/stop", s.stopTimer)
 		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
+		r.Post("/reports/saved", s.requirePermission(auth.PermViewReports, s.saveReport))
 		r.Get("/invoices", s.requirePermission(auth.PermManageInvoices, s.invoices))
 		r.Post("/invoices", s.requirePermission(auth.PermManageInvoices, s.createInvoice))
 		r.Get("/webhooks", s.requirePermission(auth.PermManageWebhooks, s.webhooks))
@@ -91,6 +97,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/customers", s.apiCustomers)
 		r.Get("/projects", s.apiProjects)
 		r.Get("/activities", s.apiActivities)
+		r.Get("/tasks", s.apiTasks)
 		r.Get("/timesheets", s.apiTimesheets)
 		r.Post("/timer/start", s.startTimer)
 		r.Post("/timer/stop", s.stopTimer)
@@ -161,7 +168,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Dashboard(s.nav(r), stats, active))
+	favorites, err := s.store.ListFavorites(r.Context(), state.Access.WorkspaceID, state.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Dashboard(s.nav(r), stats, active, favorites))
 }
 
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
@@ -204,18 +216,18 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := [][]string{}
 	for _, p := range items {
-		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable)})
+		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable), fmt.Sprintf(`<a class="table-action" href="/projects/%d/dashboard">Dashboard</a>`, p.ID)})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.ProjectForm(s.nav(r))
 	}
-	s.render(w, r, templates.EntityList[domain.Project]("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Private", "Billable"}, rows, form))
+	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Private", "Billable", "Insights"}, rows, form))
 }
 
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	p := &domain.Project{WorkspaceID: s.access(r).WorkspaceID, CustomerID: formInt(r, "customer_id"), Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
+	p := &domain.Project{WorkspaceID: s.access(r).WorkspaceID, CustomerID: formInt(r, "customer_id"), Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formInt(r, "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertProject(r.Context(), p); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -223,6 +235,65 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "create", "project", &p.ID, p.Name)
 	http.Redirect(w, r, "/projects", http.StatusSeeOther)
+}
+
+func (s *Server) projectDashboard(w http.ResponseWriter, r *http.Request) {
+	dashboard, err := s.store.ProjectDashboard(r.Context(), s.access(r), pathID(r))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.render(w, r, templates.ProjectDashboard(s.nav(r), dashboard))
+}
+
+func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
+	items, _, err := s.store.ListTasks(r.Context(), s.access(r), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	rows := [][]string{}
+	for _, task := range items {
+		rows = append(rows, []string{
+			fmt.Sprint(task.ID),
+			fmt.Sprint(task.ProjectID),
+			task.Name,
+			task.Number,
+			boolText(task.Visible),
+			boolText(task.Billable),
+			fmt.Sprintf("%dh", task.EstimateSeconds/3600),
+		})
+	}
+	var form templ.Component
+	if s.hasPermission(r, auth.PermManageMaster) {
+		form = templates.TaskForm(s.nav(r))
+	}
+	s.render(w, r, templates.EntityList[domain.Task]("Tasks", s.nav(r), []string{"ID", "Project", "Name", "Number", "Visible", "Billable", "Estimate"}, rows, form))
+}
+
+func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	projectID := formInt(r, "project_id")
+	if !s.canTrackProject(r, projectID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	task := &domain.Task{
+		WorkspaceID:     s.access(r).WorkspaceID,
+		ProjectID:       projectID,
+		Name:            r.FormValue("name"),
+		Number:          r.FormValue("number"),
+		Visible:         checkbox(r, "visible"),
+		Billable:        checkbox(r, "billable"),
+		EstimateSeconds: formInt(r, "estimate_hours") * 3600,
+	}
+	if err := s.store.UpsertTask(r.Context(), task); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "create", "task", &task.ID, task.Name)
+	http.Redirect(w, r, "/tasks", http.StatusSeeOther)
 }
 
 func (s *Server) activities(w http.ResponseWriter, r *http.Request) {
@@ -373,7 +444,7 @@ func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), StartedAt: start, EndedAt: &end, Timezone: s.cfg.DefaultTimezone, BreakSeconds: formInt(r, "break_minutes") * 60, Billable: true, Description: r.FormValue("description")}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, EndedAt: &end, Timezone: s.cfg.DefaultTimezone, BreakSeconds: formInt(r, "break_minutes") * 60, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.CreateTimesheet(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -396,13 +467,70 @@ func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.StartTimer(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.badRequest(w, r, err)
 		return
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "start", "timesheet", &t.ID, "")
+	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.started", t)
+	redirectOrJSON(w, r, "/")
+}
+
+func (s *Server) saveFavorite(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	projectID := formInt(r, "project_id")
+	if !s.canTrackProject(r, projectID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	favorite := &domain.Favorite{
+		WorkspaceID: s.access(r).WorkspaceID,
+		UserID:      s.state(r).User.ID,
+		Name:        strings.TrimSpace(r.FormValue("name")),
+		CustomerID:  formInt(r, "customer_id"),
+		ProjectID:   projectID,
+		ActivityID:  formInt(r, "activity_id"),
+		TaskID:      formOptionalInt(r, "task_id"),
+		Description: r.FormValue("description"),
+		Tags:        r.FormValue("tags"),
+	}
+	if favorite.Name == "" {
+		s.badRequest(w, r, errors.New("favorite name is required"))
+		return
+	}
+	if err := s.store.CreateFavorite(r.Context(), favorite); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "create", "favorite", &favorite.ID, favorite.Name)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) startFavorite(w http.ResponseWriter, r *http.Request) {
+	favorite, err := s.store.Favorite(r.Context(), s.access(r).WorkspaceID, s.state(r).User.ID, pathID(r))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if favorite == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.canTrackProject(r, favorite.ProjectID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	start := time.Now().UTC()
+	t := &domain.Timesheet{WorkspaceID: favorite.WorkspaceID, UserID: s.state(r).User.ID, CustomerID: favorite.CustomerID, ProjectID: favorite.ProjectID, ActivityID: favorite.ActivityID, TaskID: favorite.TaskID, StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: favorite.Description}
+	if err := s.store.StartTimer(r.Context(), t, splitCSV(favorite.Tags)); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "start", "favorite", &favorite.ID, favorite.Name)
 	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.started", t)
 	redirectOrJSON(w, r, "/")
 }
@@ -422,16 +550,66 @@ func (s *Server) stopTimer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reports(w http.ResponseWriter, r *http.Request) {
-	group := r.URL.Query().Get("group")
-	if group == "" {
-		group = "user"
+	filter := domain.ReportFilter{
+		Group:      defaultString(r.URL.Query().Get("group"), "user"),
+		CustomerID: int64Param(r, "customer_id"),
+		ProjectID:  int64Param(r, "project_id"),
+		ActivityID: int64Param(r, "activity_id"),
+		TaskID:     int64Param(r, "task_id"),
+		UserID:     int64Param(r, "user_id"),
+		GroupID:    int64Param(r, "group_id"),
 	}
-	rows, err := s.store.ListReports(r.Context(), s.access(r), group)
+	filter.Begin = parseDateParam(r, "begin")
+	filter.End = parseDateParam(r, "end")
+	rows, err := s.store.ListReports(r.Context(), s.access(r), filter)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Reports(s.nav(r), group, rows))
+	saved, err := s.store.ListSavedReports(r.Context(), s.access(r).WorkspaceID, s.state(r).User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Reports(s.nav(r), filter, rows, saved))
+}
+
+func (s *Server) saveReport(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	filter := map[string]string{
+		"begin":       r.FormValue("begin"),
+		"end":         r.FormValue("end"),
+		"customer_id": r.FormValue("customer_id"),
+		"project_id":  r.FormValue("project_id"),
+		"activity_id": r.FormValue("activity_id"),
+		"task_id":     r.FormValue("task_id"),
+		"user_id":     r.FormValue("user_id"),
+		"group_id":    r.FormValue("group_id"),
+	}
+	body, err := json.Marshal(filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	report := &domain.SavedReport{
+		WorkspaceID: s.access(r).WorkspaceID,
+		UserID:      s.state(r).User.ID,
+		Name:        strings.TrimSpace(r.FormValue("name")),
+		GroupBy:     defaultString(r.FormValue("group"), "user"),
+		FiltersJSON: string(body),
+		Shared:      checkbox(r, "shared"),
+	}
+	if report.Name == "" {
+		s.badRequest(w, r, errors.New("saved report name is required"))
+		return
+	}
+	if err := s.store.CreateSavedReport(r.Context(), report); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "create", "saved_report", &report.ID, report.Name)
+	http.Redirect(w, r, "/reports?group="+report.GroupBy, http.StatusSeeOther)
 }
 
 func (s *Server) invoices(w http.ResponseWriter, r *http.Request) {
@@ -539,6 +717,11 @@ func (s *Server) apiProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiActivities(w http.ResponseWriter, r *http.Request) {
 	items, pageInfo, err := s.store.ListActivities(r.Context(), s.access(r), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
+	s.writePage(w, items, pageInfo, err)
+}
+
+func (s *Server) apiTasks(w http.ResponseWriter, r *http.Request) {
+	items, pageInfo, err := s.store.ListTasks(r.Context(), s.access(r), int64Param(r, "project_id"), r.URL.Query().Get("q"), page(r), size(r))
 	s.writePage(w, items, pageInfo, err)
 }
 
@@ -729,14 +912,14 @@ func (s *Server) timesheetScope(r *http.Request) sqlite.TimesheetFilter {
 
 func (s *Server) canTrackProject(r *http.Request, projectID int64) bool {
 	access := s.access(r)
-	if access.IsWorkspaceAdmin() || projectID == 0 {
+	if projectID == 0 {
 		return true
 	}
 	project, err := s.store.Project(r.Context(), projectID)
 	if err != nil || project == nil || project.WorkspaceID != access.WorkspaceID {
 		return false
 	}
-	return !project.Private || access.CanAccessProject(projectID)
+	return access.IsWorkspaceAdmin() || !project.Private || access.CanAccessProject(projectID)
 }
 
 func accessibleProjectIDs(access domain.AccessContext) []int64 {
@@ -887,6 +1070,18 @@ func int64Param(r *http.Request, key string) int64 {
 	return value
 }
 
+func parseDateParam(r *http.Request, key string) *time.Time {
+	value := strings.TrimSpace(r.URL.Query().Get(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
 func formInt(r *http.Request, key string) int64 {
 	value, _ := strconv.ParseInt(r.FormValue(key), 10, 64)
 	return value
@@ -968,6 +1163,7 @@ func timesheetRows(items []domain.Timesheet) [][]string {
 		}
 		rows = append(rows, []string{
 			fmt.Sprint(t.ID),
+			ptrText(t.TaskID),
 			templates.FormatTime(t.StartedAt),
 			end,
 			fmt.Sprintf("%dh %02dm", t.DurationSeconds/3600, (t.DurationSeconds%3600)/60),

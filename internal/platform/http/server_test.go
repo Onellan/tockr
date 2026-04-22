@@ -35,7 +35,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/timesheets", "/customers", "/projects", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/admin/users", "/webhooks"}
+	routes := []string{"/", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/admin/users", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -74,7 +74,7 @@ func TestUserNavigationHidesForbiddenItems(t *testing.T) {
 			t.Fatalf("normal user should not see %s", forbiddenLink)
 		}
 	}
-	for _, visibleLink := range []string{`href="/"`, `href="/timesheets"`, `href="/customers"`, `href="/projects"`, `href="/activities"`, `href="/tags"`, `href="/reports"`} {
+	for _, visibleLink := range []string{`href="/"`, `href="/timesheets"`, `href="/customers"`, `href="/projects"`, `href="/tasks"`, `href="/activities"`, `href="/tags"`, `href="/reports"`} {
 		if !strings.Contains(body, visibleLink) {
 			t.Fatalf("normal user should see %s", visibleLink)
 		}
