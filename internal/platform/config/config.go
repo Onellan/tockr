@@ -27,7 +27,7 @@ type Config struct {
 
 func Load() Config {
 	return Config{
-		Addr:              getenv("TOCKR_ADDR", ":8080"),
+		Addr:              getenv("TOCKR_ADDR", ":8029"),
 		DatabasePath:      getenv("TOCKR_DB_PATH", "data/tockr.db"),
 		DataDir:           getenv("TOCKR_DATA_DIR", "data"),
 		SessionSecret:     getenv("TOCKR_SESSION_SECRET", randomSecret()),

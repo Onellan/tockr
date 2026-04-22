@@ -3,7 +3,7 @@
 Recommended:
 
 - Raspberry Pi OS 64-bit.
-- Use the native binary or Docker image.
+- Use the native binary or published Docker image. See `docs/raspberry-pi.md` for GHCR pull and Compose examples.
 - Store `/var/lib/tockr` on reliable storage.
 - Keep `TOCKR_ADDR` bound to localhost when using a reverse proxy.
 - Use SQLite WAL backups, not raw copying of a live database file.
@@ -32,4 +32,3 @@ Logs are JSON on stdout/stderr. With systemd:
 ```sh
 journalctl -u tockr -f
 ```
-

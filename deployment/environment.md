@@ -2,7 +2,7 @@
 
 | Variable | Default | Description |
 |---|---|---|
-| `TOCKR_ADDR` | `:8080` | HTTP listen address. |
+| `TOCKR_ADDR` | `:8029` | HTTP listen address for local app runs. Docker overrides this to `:8080` inside the container and publishes host port `8029`. |
 | `TOCKR_DB_PATH` | `data/tockr.db` | SQLite database path. |
 | `TOCKR_DATA_DIR` | `data` | Invoice documents and app data. |
 | `TOCKR_SESSION_SECRET` | random at startup | HMAC secret for session cookies. Must be fixed in production. |
@@ -13,4 +13,3 @@
 | `TOCKR_ADMIN_EMAIL` | `admin@example.com` | First admin email. |
 | `TOCKR_ADMIN_PASSWORD` | `admin12345` | First admin password. Change immediately. |
 | `TOCKR_WEBHOOK_MAX_RETRIES` | `5` | Maximum webhook delivery attempts. |
-

@@ -3,8 +3,11 @@ package httpserver
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +65,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Get("/healthz", s.health)
 	r.Get("/login", s.loginPage)
 	r.Post("/login", s.login)
+	r.Get("/reports/share/{token}", s.viewSharedReport)
 	r.Post("/logout", s.requireLogin(s.logout))
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireLoginMiddleware)
@@ -86,10 +90,15 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/activities", s.requirePermission(auth.PermManageMaster, s.saveActivity))
 		r.Get("/tasks", s.tasks)
 		r.Post("/tasks", s.requirePermission(auth.PermManageMaster, s.saveTask))
+		r.Post("/tasks/{id}", s.requirePermission(auth.PermManageMaster, s.saveTask))
+		r.Post("/tasks/{id}/archive", s.requirePermission(auth.PermManageMaster, s.archiveTask))
 		r.Get("/tags", s.tags)
 		r.Post("/tags", s.requirePermission(auth.PermTrackTime, s.saveTag))
 		r.Get("/groups", s.requirePermission(auth.PermManageGroups, s.groups))
 		r.Post("/groups", s.requirePermission(auth.PermManageGroups, s.saveGroup))
+		r.Get("/groups/{id}/members", s.requirePermission(auth.PermManageGroups, s.groupMembers))
+		r.Post("/groups/{id}/members", s.requirePermission(auth.PermManageGroups, s.groupMemberSave))
+		r.Post("/groups/{id}/members/remove", s.requirePermission(auth.PermManageGroups, s.groupMemberRemove))
 		r.Get("/rates", s.requirePermission(auth.PermManageRates, s.rates))
 		r.Post("/rates", s.requirePermission(auth.PermManageRates, s.saveRate))
 		r.Post("/rates/costs", s.requirePermission(auth.PermManageRates, s.saveUserCostRate))
@@ -99,13 +108,38 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/timesheets/start", s.startTimer)
 		r.Post("/favorites", s.saveFavorite)
 		r.Post("/favorites/{id}/start", s.startFavorite)
+		r.Post("/favorites/{id}", s.editFavorite)
+		r.Post("/favorites/{id}/delete", s.deleteFavorite)
 		r.Post("/timesheets/stop", s.stopTimer)
 		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
 		r.Post("/reports/saved", s.requirePermission(auth.PermViewReports, s.saveReport))
+		r.Post("/reports/saved/{id}", s.requirePermission(auth.PermViewReports, s.editSavedReport))
+		r.Post("/reports/saved/{id}/delete", s.requirePermission(auth.PermViewReports, s.deleteSavedReport))
+		r.Post("/reports/saved/{id}/share", s.requirePermission(auth.PermViewReports, s.shareSavedReport))
+		r.Get("/reports/utilization", s.requirePermission(auth.PermViewReports, s.utilization))
+		r.Get("/reports/export", s.requirePermission(auth.PermViewReports, s.exportReports))
+		r.Get("/timesheets/export", s.exportTimesheets)
+		r.Get("/admin/exchange-rates", s.requirePermission(auth.PermManageRates, s.exchangeRates))
+		r.Post("/admin/exchange-rates", s.requirePermission(auth.PermManageRates, s.saveExchangeRate))
+		r.Post("/admin/exchange-rates/{id}/delete", s.requirePermission(auth.PermManageRates, s.deleteExchangeRate))
+		r.Get("/admin/recalculate", s.requirePermission(auth.PermManageRates, s.recalculate))
+		r.Post("/admin/recalculate", s.requirePermission(auth.PermManageRates, s.applyRecalculate))
 		r.Get("/invoices", s.requirePermission(auth.PermManageInvoices, s.invoices))
 		r.Post("/invoices", s.requirePermission(auth.PermManageInvoices, s.createInvoice))
 		r.Get("/webhooks", s.requirePermission(auth.PermManageWebhooks, s.webhooks))
 		r.Post("/webhooks", s.requirePermission(auth.PermManageWebhooks, s.createWebhook))
+		r.Get("/project-templates", s.requirePermission(auth.PermManageProjects, s.projectTemplates))
+		r.Post("/project-templates", s.requirePermission(auth.PermManageProjects, s.saveProjectTemplate))
+		r.Post("/project-templates/use", s.requirePermission(auth.PermManageProjects, s.useProjectTemplate))
+		r.Get("/project-templates/{id}", s.requirePermission(auth.PermManageProjects, s.projectTemplateDetail))
+		r.Post("/project-templates/{id}", s.requirePermission(auth.PermManageProjects, s.saveProjectTemplate))
+		r.Post("/project-templates/{id}/use", s.requirePermission(auth.PermManageProjects, s.useProjectTemplate))
+		r.Get("/admin/workspaces", s.requirePermission(auth.PermManageOrg, s.workspacesAdmin))
+		r.Post("/admin/workspaces", s.requirePermission(auth.PermManageOrg, s.saveWorkspace))
+		r.Get("/admin/workspaces/{id}", s.requirePermission(auth.PermManageOrg, s.workspaceAdminDetail))
+		r.Post("/admin/workspaces/{id}", s.requirePermission(auth.PermManageOrg, s.saveWorkspace))
+		r.Post("/admin/workspaces/{id}/members", s.requirePermission(auth.PermManageOrg, s.workspaceMemberSave))
+		r.Post("/admin/workspaces/{id}/members/remove", s.requirePermission(auth.PermManageOrg, s.workspaceMemberRemove))
 		r.Get("/admin/users", s.requirePermission(auth.PermManageUsers, s.users))
 		r.Post("/admin/users", s.requirePermission(auth.PermManageUsers, s.createUser))
 	})
@@ -362,7 +396,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Dashboard(s.nav(r), stats, active, favorites))
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Dashboard(s.nav(r), stats, active, favorites, selectors))
 }
 
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
@@ -373,13 +412,13 @@ func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := [][]string{}
 	for _, c := range items {
-		rows = append(rows, []string{fmt.Sprint(c.ID), c.Name, c.Company, c.Email, c.Currency, boolText(c.Visible), boolText(c.Billable)})
+		rows = append(rows, []string{c.Name, c.Company, c.Email, c.Currency, boolText(c.Visible), boolText(c.Billable)})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.CustomerForm(s.nav(r), nil)
 	}
-	s.render(w, r, templates.EntityList[domain.Customer]("Customers", s.nav(r), []string{"ID", "Name", "Company", "Email", "Currency", "Visible", "Billable"}, rows, form))
+	s.render(w, r, templates.EntityList[domain.Customer]("Customers", s.nav(r), []string{"Name", "Company", "Email", "Currency", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
@@ -403,24 +442,34 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	rows := [][]string{}
 	for _, p := range items {
 		actions := `<a class="table-action" href="/projects/` + fmt.Sprint(p.ID) + `/dashboard">Dashboard</a>`
 		if s.access(r).ManagesProject(p.ID) {
 			actions += templates.RowActionMenu(fmt.Sprintf("project-%d-actions", p.ID), "Project actions", s.nav(r).CSRF, []templates.MenuAction{{Label: "Members", Href: fmt.Sprintf("/projects/%d/members", p.ID)}})
 		}
-		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable), `<div class="row-actions">` + actions + `</div>`})
+		rows = append(rows, []string{p.Name, labelValue(selectors.CustomerLabels, p.CustomerID), p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable), `<div class="row-actions">` + actions + `</div>`})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
-		form = templates.ProjectForm(s.nav(r))
+		form = templates.ProjectForm(s.nav(r), selectors)
 	}
-	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"ID", "Customer", "Name", "Number", "Visible", "Private", "Billable", "Insights"}, rows, form))
+	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"Name", "Customer", "Number", "Visible", "Private", "Billable", "Insights"}, rows, form))
 }
 
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	p := &domain.Project{WorkspaceID: s.access(r).WorkspaceID, CustomerID: formInt(r, "customer_id"), Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formInt(r, "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
+	customerID := formInt(r, "customer_id")
+	if !s.customerInScope(r, customerID) {
+		http.Error(w, "invalid customer", http.StatusForbidden)
+		return
+	}
+	p := &domain.Project{WorkspaceID: s.access(r).WorkspaceID, CustomerID: customerID, Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formInt(r, "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertProject(r.Context(), p); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -477,20 +526,26 @@ func (s *Server) projectMemberSave(w http.ResponseWriter, r *http.Request) {
 	if role != domain.ProjectRoleManager {
 		role = domain.ProjectRoleMember
 	}
-	userID := formInt(r, "user_id")
-	if ok, err := s.userInWorkspace(r.Context(), userID, s.access(r).WorkspaceID); err != nil {
-		s.serverError(w, r, err)
-		return
-	} else if !ok {
-		http.Error(w, "user is not in workspace", http.StatusForbidden)
+	userIDs := formIntList(r, "user_id")
+	if len(userIDs) == 0 {
+		http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
 		return
 	}
-	if err := s.store.AddProjectMember(r.Context(), project.ID, userID, role); err != nil {
-		s.serverError(w, r, err)
-		return
+	for _, userID := range userIDs {
+		if ok, err := s.userInWorkspace(r.Context(), userID, s.access(r).WorkspaceID); err != nil {
+			s.serverError(w, r, err)
+			return
+		} else if !ok {
+			http.Error(w, "user is not in workspace", http.StatusForbidden)
+			return
+		}
+		if err := s.store.AddProjectMember(r.Context(), project.ID, userID, role); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	actor := s.state(r).User.ID
-	s.store.Audit(r.Context(), &actor, "update", "project_members", &project.ID, fmt.Sprintf("user=%d role=%s", userID, role))
+	s.store.Audit(r.Context(), &actor, "update", "project_members", &project.ID, fmt.Sprintf("users=%v role=%s", userIDs, role))
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
 }
 
@@ -500,13 +555,15 @@ func (s *Server) projectMemberRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
-	userID := formInt(r, "user_id")
-	if err := s.store.RemoveProjectMember(r.Context(), project.ID, userID); err != nil {
-		s.serverError(w, r, err)
-		return
+	userIDs := formIntList(r, "user_id")
+	for _, userID := range userIDs {
+		if err := s.store.RemoveProjectMember(r.Context(), project.ID, userID); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	actor := s.state(r).User.ID
-	s.store.Audit(r.Context(), &actor, "update", "project_members", &project.ID, fmt.Sprintf("remove_user=%d", userID))
+	s.store.Audit(r.Context(), &actor, "update", "project_members", &project.ID, fmt.Sprintf("remove_users=%v", userIDs))
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
 }
 
@@ -516,13 +573,22 @@ func (s *Server) projectGroupSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
-	groupID := formInt(r, "group_id")
-	if err := s.store.AddGroupToProject(r.Context(), project.ID, groupID); err != nil {
-		s.serverError(w, r, err)
-		return
+	groupIDs := formIntList(r, "group_id")
+	for _, groupID := range groupIDs {
+		if group, err := s.store.Group(r.Context(), groupID); err != nil {
+			s.serverError(w, r, err)
+			return
+		} else if group == nil || group.WorkspaceID != s.access(r).WorkspaceID {
+			http.Error(w, "group is outside workspace", http.StatusForbidden)
+			return
+		}
+		if err := s.store.AddGroupToProject(r.Context(), project.ID, groupID); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	actor := s.state(r).User.ID
-	s.store.Audit(r.Context(), &actor, "update", "project_groups", &project.ID, fmt.Sprintf("group=%d", groupID))
+	s.store.Audit(r.Context(), &actor, "update", "project_groups", &project.ID, fmt.Sprintf("groups=%v", groupIDs))
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
 }
 
@@ -532,13 +598,15 @@ func (s *Server) projectGroupRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
-	groupID := formInt(r, "group_id")
-	if err := s.store.RemoveGroupFromProject(r.Context(), project.ID, groupID); err != nil {
-		s.serverError(w, r, err)
-		return
+	groupIDs := formIntList(r, "group_id")
+	for _, groupID := range groupIDs {
+		if err := s.store.RemoveGroupFromProject(r.Context(), project.ID, groupID); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	actor := s.state(r).User.ID
-	s.store.Audit(r.Context(), &actor, "update", "project_groups", &project.ID, fmt.Sprintf("remove_group=%d", groupID))
+	s.store.Audit(r.Context(), &actor, "update", "project_groups", &project.ID, fmt.Sprintf("remove_groups=%v", groupIDs))
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
 }
 
@@ -548,23 +616,13 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	rows := [][]string{}
-	for _, task := range items {
-		rows = append(rows, []string{
-			fmt.Sprint(task.ID),
-			fmt.Sprint(task.ProjectID),
-			task.Name,
-			task.Number,
-			boolText(task.Visible),
-			boolText(task.Billable),
-			fmt.Sprintf("%dh", task.EstimateSeconds/3600),
-		})
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
 	}
-	var form templ.Component
-	if s.hasPermission(r, auth.PermManageMaster) {
-		form = templates.TaskForm(s.nav(r))
-	}
-	s.render(w, r, templates.EntityList[domain.Task]("Tasks", s.nav(r), []string{"ID", "Project", "Name", "Number", "Visible", "Billable", "Estimate"}, rows, form))
+	canManage := s.hasPermission(r, auth.PermManageMaster)
+	s.render(w, r, templates.Tasks(s.nav(r), items, selectors, canManage))
 }
 
 func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +633,7 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task := &domain.Task{
+		ID:              pathID(r),
 		WorkspaceID:     s.access(r).WorkspaceID,
 		ProjectID:       projectID,
 		Name:            r.FormValue("name"),
@@ -588,7 +647,26 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := s.state(r).User.ID
-	s.store.Audit(r.Context(), &uid, "create", "task", &task.ID, task.Name)
+	action := "create"
+	if task.ID != 0 {
+		action = "update"
+	}
+	s.store.Audit(r.Context(), &uid, action, "task", &task.ID, task.Name)
+	http.Redirect(w, r, "/tasks", http.StatusSeeOther)
+}
+
+func (s *Server) archiveTask(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.store.ArchiveTask(r.Context(), s.access(r).WorkspaceID, id); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "archive", "task", &id, "")
 	http.Redirect(w, r, "/tasks", http.StatusSeeOther)
 }
 
@@ -598,25 +676,34 @@ func (s *Server) activities(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	rows := [][]string{}
 	for _, a := range items {
-		project := ""
+		project := "Global"
 		if a.ProjectID != nil {
-			project = fmt.Sprint(*a.ProjectID)
+			project = labelValue(selectors.ProjectLabels, *a.ProjectID)
 		}
-		rows = append(rows, []string{fmt.Sprint(a.ID), project, a.Name, a.Number, boolText(a.Visible), boolText(a.Billable)})
+		rows = append(rows, []string{a.Name, project, a.Number, boolText(a.Visible), boolText(a.Billable)})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
-		form = templates.ActivityForm(s.nav(r))
+		form = templates.ActivityForm(s.nav(r), selectors)
 	}
-	s.render(w, r, templates.EntityList[domain.Activity]("Activities", s.nav(r), []string{"ID", "Project", "Name", "Number", "Visible", "Billable"}, rows, form))
+	s.render(w, r, templates.EntityList[domain.Activity]("Activities", s.nav(r), []string{"Name", "Project", "Number", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveActivity(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	var project *int64
 	if value := formInt(r, "project_id"); value > 0 {
+		if !s.canTrackProject(r, value) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		project = &value
 	}
 	a := &domain.Activity{WorkspaceID: s.access(r).WorkspaceID, ProjectID: project, Name: r.FormValue("name"), Number: r.FormValue("number"), Visible: checkbox(r, "visible"), Billable: checkbox(r, "billable"), Comment: r.FormValue("comment")}
@@ -637,9 +724,9 @@ func (s *Server) tags(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := [][]string{}
 	for _, tag := range tags {
-		rows = append(rows, []string{fmt.Sprint(tag.ID), tag.Name, boolText(tag.Visible)})
+		rows = append(rows, []string{tag.Name, boolText(tag.Visible)})
 	}
-	s.render(w, r, templates.EntityList[domain.Tag]("Tags", s.nav(r), []string{"ID", "Name", "Visible"}, rows, templates.TagForm(s.nav(r))))
+	s.render(w, r, templates.EntityList[domain.Tag]("Tags", s.nav(r), []string{"Name", "Visible"}, rows, templates.TagForm(s.nav(r))))
 }
 
 func (s *Server) saveTag(w http.ResponseWriter, r *http.Request) {
@@ -662,9 +749,9 @@ func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := [][]string{}
 	for _, group := range groups {
-		rows = append(rows, []string{fmt.Sprint(group.ID), group.Name, group.Description})
+		rows = append(rows, []string{group.Name, group.Description, fmt.Sprintf(`<a class="table-action" href="/groups/%d/members">Members</a>`, group.ID)})
 	}
-	s.render(w, r, templates.EntityList[domain.Group]("Groups", s.nav(r), []string{"ID", "Name", "Description"}, rows, templates.GroupForm(s.nav(r))))
+	s.render(w, r, templates.EntityListRaw("Groups", s.nav(r), []string{"Name", "Description", "Action"}, rows, templates.GroupForm(s.nav(r))))
 }
 
 func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
@@ -679,6 +766,65 @@ func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/groups", http.StatusSeeOther)
 }
 
+func (s *Server) groupMembers(w http.ResponseWriter, r *http.Request) {
+	group, ok := s.currentWorkspaceGroup(w, r)
+	if !ok {
+		return
+	}
+	members, err := s.store.ListGroupMembers(r.Context(), group.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	users, err := s.store.ListWorkspaceUsers(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.GroupMembers(s.nav(r), *group, members, users))
+}
+
+func (s *Server) groupMemberSave(w http.ResponseWriter, r *http.Request) {
+	group, ok := s.currentWorkspaceGroup(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	for _, userID := range formIntList(r, "user_id") {
+		if ok, err := s.userInWorkspace(r.Context(), userID, s.access(r).WorkspaceID); err != nil {
+			s.serverError(w, r, err)
+			return
+		} else if !ok {
+			http.Error(w, "user is not in workspace", http.StatusForbidden)
+			return
+		}
+		if err := s.store.AddUserToGroup(r.Context(), group.ID, userID); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "group_members", &group.ID, "bulk_add")
+	http.Redirect(w, r, fmt.Sprintf("/groups/%d/members", group.ID), http.StatusSeeOther)
+}
+
+func (s *Server) groupMemberRemove(w http.ResponseWriter, r *http.Request) {
+	group, ok := s.currentWorkspaceGroup(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	for _, userID := range formIntList(r, "user_id") {
+		if err := s.store.RemoveUserFromGroup(r.Context(), group.ID, userID); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "group_members", &group.ID, "bulk_remove")
+	http.Redirect(w, r, fmt.Sprintf("/groups/%d/members", group.ID), http.StatusSeeOther)
+}
+
 func (s *Server) rates(w http.ResponseWriter, r *http.Request) {
 	rates, err := s.store.ListRates(r.Context(), s.access(r).WorkspaceID)
 	if err != nil {
@@ -690,11 +836,20 @@ func (s *Server) rates(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Rates(s.nav(r), rates, costs))
+	selectors, err := s.selectorData(r, true, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Rates(s.nav(r), rates, costs, selectors))
 }
 
 func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
+	if err := s.validateOptionalRateScope(r); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
 	rate := &domain.Rate{
 		WorkspaceID:         s.access(r).WorkspaceID,
 		CustomerID:          formOptionalInt(r, "customer_id"),
@@ -718,9 +873,17 @@ func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) saveUserCostRate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
+	userID := formInt(r, "user_id")
+	if ok, err := s.userInWorkspace(r.Context(), userID, s.access(r).WorkspaceID); err != nil {
+		s.serverError(w, r, err)
+		return
+	} else if !ok {
+		http.Error(w, "user is not in workspace", http.StatusForbidden)
+		return
+	}
 	rate := &domain.UserCostRate{
 		WorkspaceID:   s.access(r).WorkspaceID,
-		UserID:        formInt(r, "user_id"),
+		UserID:        userID,
 		AmountCents:   formInt(r, "amount_cents"),
 		EffectiveFrom: formDateOrEpoch(r, "effective_from"),
 		EffectiveTo:   formOptionalDate(r, "effective_to"),
@@ -745,7 +908,12 @@ func (s *Server) timesheets(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Timesheets(s.nav(r), timesheetRows(items)))
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Timesheets(s.nav(r), timesheetRows(items, selectors), selectors))
 }
 
 func (s *Server) calendar(w http.ResponseWriter, r *http.Request) {
@@ -779,8 +947,8 @@ func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := formInt(r, "project_id")
-	if !s.canTrackProject(r, projectID) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "task_id")); err != nil {
+		s.badRequest(w, r, err)
 		return
 	}
 	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, EndedAt: &end, Timezone: s.cfg.DefaultTimezone, BreakSeconds: formInt(r, "break_minutes") * 60, Billable: true, Description: r.FormValue("description")}
@@ -802,8 +970,8 @@ func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := formInt(r, "project_id")
-	if !s.canTrackProject(r, projectID) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "task_id")); err != nil {
+		s.badRequest(w, r, err)
 		return
 	}
 	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
@@ -820,8 +988,8 @@ func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveFavorite(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	projectID := formInt(r, "project_id")
-	if !s.canTrackProject(r, projectID) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "task_id")); err != nil {
+		s.badRequest(w, r, err)
 		return
 	}
 	favorite := &domain.Favorite{
@@ -910,7 +1078,12 @@ func (s *Server) reports(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Reports(s.nav(r), filter, rows, saved))
+	selectors, err := s.selectorData(r, true, true)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Reports(s.nav(r), filter, rows, saved, selectors))
 }
 
 func (s *Server) saveReport(w http.ResponseWriter, r *http.Request) {
@@ -957,7 +1130,12 @@ func (s *Server) invoices(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Invoices(s.nav(r), items))
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Invoices(s.nav(r), items, selectors))
 }
 
 func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
@@ -972,7 +1150,12 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(w, r, err)
 		return
 	}
-	inv, err := s.store.CreateInvoice(r.Context(), s.access(r), s.state(r).User.ID, formInt(r, "customer_id"), begin, end.Add(24*time.Hour), formInt(r, "tax")*100)
+	customerID := formInt(r, "customer_id")
+	if !s.customerInScope(r, customerID) {
+		http.Error(w, "invalid customer", http.StatusForbidden)
+		return
+	}
+	inv, err := s.store.CreateInvoice(r.Context(), s.access(r), s.state(r).User.ID, customerID, begin, end.Add(24*time.Hour), formInt(r, "tax")*100)
 	if err != nil {
 		s.badRequest(w, r, err)
 		return
@@ -1006,6 +1189,179 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/webhooks", http.StatusSeeOther)
 }
 
+func (s *Server) projectTemplates(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListProjectTemplates(r.Context(), s.access(r).WorkspaceID, true)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	for i := range items {
+		full, err := s.store.ProjectTemplate(r.Context(), s.access(r).WorkspaceID, items[i].ID)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		if full != nil {
+			items[i] = *full
+		}
+	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.ProjectTemplates(s.nav(r), items, selectors))
+}
+
+func (s *Server) projectTemplateDetail(w http.ResponseWriter, r *http.Request) {
+	template, err := s.store.ProjectTemplate(r.Context(), s.access(r).WorkspaceID, pathID(r))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if template == nil {
+		http.NotFound(w, r)
+		return
+	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.ProjectTemplateDetail(s.nav(r), *template, selectors))
+}
+
+func (s *Server) saveProjectTemplate(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	template := projectTemplateFromForm(r)
+	template.ID = pathID(r)
+	template.WorkspaceID = s.access(r).WorkspaceID
+	if err := s.store.UpsertProjectTemplate(r.Context(), &template); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "project_template", &template.ID, template.Name)
+	http.Redirect(w, r, fmt.Sprintf("/project-templates/%d", template.ID), http.StatusSeeOther)
+}
+
+func (s *Server) useProjectTemplate(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	templateID := pathID(r)
+	if templateID == 0 {
+		templateID = formInt(r, "template_id")
+	}
+	projectID, err := s.store.CreateProjectFromTemplate(r.Context(), s.access(r).WorkspaceID, templateID, formInt(r, "customer_id"), r.FormValue("project_name"))
+	if err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "create", "project", &projectID, fmt.Sprintf("from_template=%d", templateID))
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/dashboard", projectID), http.StatusSeeOther)
+}
+
+func (s *Server) workspacesAdmin(w http.ResponseWriter, r *http.Request) {
+	workspaces, err := s.store.ListOrganizationWorkspaces(r.Context(), s.access(r).OrganizationID, r.URL.Query().Get("q"))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.WorkspaceAdmin(s.nav(r), workspaces))
+}
+
+func (s *Server) workspaceAdminDetail(w http.ResponseWriter, r *http.Request) {
+	workspace, ok := s.organizationWorkspace(w, r)
+	if !ok {
+		return
+	}
+	members, err := s.store.ListWorkspaceMembers(r.Context(), workspace.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	users, err := s.organizationUsers(r.Context(), s.access(r).OrganizationID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.WorkspaceDetail(s.nav(r), *workspace, members, users))
+}
+
+func (s *Server) saveWorkspace(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	workspace := &domain.Workspace{
+		ID:              pathID(r),
+		OrganizationID:  s.access(r).OrganizationID,
+		Name:            r.FormValue("name"),
+		Slug:            defaultString(r.FormValue("slug"), slugify(r.FormValue("name"))),
+		Description:     r.FormValue("description"),
+		DefaultCurrency: defaultString(r.FormValue("default_currency"), "USD"),
+		Timezone:        defaultString(r.FormValue("timezone"), "UTC"),
+		Archived:        checkbox(r, "archived"),
+	}
+	if workspace.ID > 0 {
+		if existing, ok := s.organizationWorkspace(w, r); !ok {
+			return
+		} else {
+			workspace.OrganizationID = existing.OrganizationID
+		}
+	}
+	if err := s.store.UpsertWorkspace(r.Context(), workspace); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	if workspace.ID > 0 && !workspace.Archived {
+		actor := s.state(r).User.ID
+		_ = s.store.SetWorkspaceMember(r.Context(), workspace.ID, actor, domain.WorkspaceRoleAdmin)
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "workspace", &workspace.ID, workspace.Name)
+	http.Redirect(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), http.StatusSeeOther)
+}
+
+func (s *Server) workspaceMemberSave(w http.ResponseWriter, r *http.Request) {
+	workspace, ok := s.organizationWorkspace(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	userID := formInt(r, "user_id")
+	user, err := s.store.FindUserByID(r.Context(), userID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if user == nil || user.OrganizationID != workspace.OrganizationID {
+		http.Error(w, "user is outside organization", http.StatusForbidden)
+		return
+	}
+	role := domain.WorkspaceRole(r.FormValue("role"))
+	if err := s.store.SetWorkspaceMember(r.Context(), workspace.ID, userID, role); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "workspace_members", &workspace.ID, fmt.Sprintf("user=%d role=%s", userID, role))
+	http.Redirect(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), http.StatusSeeOther)
+}
+
+func (s *Server) workspaceMemberRemove(w http.ResponseWriter, r *http.Request) {
+	workspace, ok := s.organizationWorkspace(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	userID := formInt(r, "user_id")
+	if err := s.store.RemoveWorkspaceMember(r.Context(), workspace.ID, userID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "workspace_members", &workspace.ID, fmt.Sprintf("remove_user=%d", userID))
+	http.Redirect(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), http.StatusSeeOther)
+}
+
 func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 	users, err := s.store.ListUsers(r.Context())
 	if err != nil {
@@ -1018,9 +1374,9 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		for _, role := range u.Roles {
 			roles = append(roles, string(role))
 		}
-		rows = append(rows, []string{fmt.Sprint(u.ID), u.Email, u.DisplayName, strings.Join(roles, ","), boolText(u.Enabled)})
+		rows = append(rows, []string{u.Email, u.DisplayName, strings.Join(roles, ","), boolText(u.Enabled)})
 	}
-	s.render(w, r, templates.EntityList[domain.User]("Users", s.nav(r), []string{"ID", "Email", "Name", "Roles", "Enabled"}, rows, templates.UserForm(s.nav(r))))
+	s.render(w, r, templates.EntityList[domain.User]("Users", s.nav(r), []string{"Email", "Name", "Roles", "Enabled"}, rows, templates.UserForm(s.nav(r))))
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -1287,6 +1643,62 @@ func (s *Server) authorizedProjectManagement(w http.ResponseWriter, r *http.Requ
 	return project, true
 }
 
+func (s *Server) organizationWorkspace(w http.ResponseWriter, r *http.Request) (*domain.Workspace, bool) {
+	workspace := s.workspaceByID(w, r, pathID(r))
+	if workspace == nil {
+		return nil, false
+	}
+	if workspace.OrganizationID != s.access(r).OrganizationID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	return workspace, true
+}
+
+func (s *Server) workspaceByID(w http.ResponseWriter, r *http.Request, id int64) *domain.Workspace {
+	workspace, err := s.store.Workspace(r.Context(), id)
+	if err != nil {
+		s.serverError(w, r, err)
+		return nil
+	}
+	if workspace == nil {
+		http.NotFound(w, r)
+		return nil
+	}
+	return workspace
+}
+
+func (s *Server) currentWorkspaceGroup(w http.ResponseWriter, r *http.Request) (*domain.Group, bool) {
+	group, err := s.store.Group(r.Context(), pathID(r))
+	if err != nil {
+		s.serverError(w, r, err)
+		return nil, false
+	}
+	if group == nil {
+		http.NotFound(w, r)
+		return nil, false
+	}
+	if group.WorkspaceID != s.access(r).WorkspaceID {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	return group, true
+}
+
+func (s *Server) organizationUsers(ctx context.Context, organizationID int64) ([]domain.User, error) {
+	users, err := s.store.ListUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]domain.User, 0, len(users))
+	for _, user := range users {
+		if user.OrganizationID == organizationID {
+			filtered = append(filtered, user)
+		}
+	}
+	return filtered, nil
+}
+
 func (s *Server) userInWorkspace(ctx context.Context, userID, workspaceID int64) (bool, error) {
 	users, err := s.store.ListWorkspaceUsers(ctx, workspaceID)
 	if err != nil {
@@ -1298,6 +1710,221 @@ func (s *Server) userInWorkspace(ctx context.Context, userID, workspaceID int64)
 		}
 	}
 	return false, nil
+}
+
+func (s *Server) selectorData(r *http.Request, includeUsers, includeGroups bool) (*templates.SelectorData, error) {
+	access := s.access(r)
+	customers, _, err := s.store.ListCustomers(r.Context(), access, "", 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	projects, _, err := s.store.ListProjects(r.Context(), access, 0, "", 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	activities, _, err := s.store.ListActivities(r.Context(), access, 0, "", 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	tasks, _, err := s.store.ListTasks(r.Context(), access, 0, "", 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	data := &templates.SelectorData{
+		CustomerLabels: map[int64]string{},
+		ProjectLabels:  map[int64]string{},
+		ActivityLabels: map[int64]string{},
+		TaskLabels:     map[int64]string{},
+		UserLabels:     map[int64]string{},
+		GroupLabels:    map[int64]string{},
+	}
+	for _, customer := range customers {
+		label := customerLabel(customer)
+		data.CustomerLabels[customer.ID] = label
+		data.Customers = append(data.Customers, templates.SelectOption{Value: customer.ID, Label: label})
+	}
+	for _, project := range projects {
+		label := projectLabel(project, data.CustomerLabels)
+		data.ProjectLabels[project.ID] = label
+		data.Projects = append(data.Projects, templates.SelectOption{Value: project.ID, Label: label, Attrs: map[string]string{"customer-id": fmt.Sprint(project.CustomerID)}})
+	}
+	for _, activity := range activities {
+		label := activityLabel(activity, data.ProjectLabels)
+		data.ActivityLabels[activity.ID] = label
+		attrs := map[string]string{}
+		if activity.ProjectID != nil {
+			attrs["project-id"] = fmt.Sprint(*activity.ProjectID)
+		}
+		data.Activities = append(data.Activities, templates.SelectOption{Value: activity.ID, Label: label, Attrs: attrs})
+	}
+	for _, task := range tasks {
+		label := taskLabel(task, data.ProjectLabels)
+		data.TaskLabels[task.ID] = label
+		data.Tasks = append(data.Tasks, templates.SelectOption{Value: task.ID, Label: label, Attrs: map[string]string{"project-id": fmt.Sprint(task.ProjectID)}})
+	}
+	if includeUsers {
+		users, err := s.store.ListWorkspaceUsers(r.Context(), access.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		for _, user := range users {
+			label := userLabel(user)
+			data.UserLabels[user.ID] = label
+			data.Users = append(data.Users, templates.SelectOption{Value: user.ID, Label: label})
+		}
+	}
+	if includeGroups {
+		groups, err := s.store.ListGroups(r.Context(), access.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		for _, group := range groups {
+			data.GroupLabels[group.ID] = group.Name
+			data.Groups = append(data.Groups, templates.SelectOption{Value: group.ID, Label: group.Name})
+		}
+	}
+	return data, nil
+}
+
+func customerLabel(customer domain.Customer) string {
+	parts := []string{customer.Name}
+	if customer.Number != "" {
+		parts = append(parts, customer.Number)
+	}
+	if customer.Company != "" {
+		parts = append(parts, customer.Company)
+	}
+	return strings.Join(parts, " - ")
+}
+
+func projectLabel(project domain.Project, customers map[int64]string) string {
+	if customer := labelValue(customers, project.CustomerID); customer != "" {
+		return project.Name + " - " + customer
+	}
+	return project.Name
+}
+
+func activityLabel(activity domain.Activity, projects map[int64]string) string {
+	if activity.ProjectID != nil {
+		return activity.Name + " - " + labelValue(projects, *activity.ProjectID)
+	}
+	return activity.Name + " - Global"
+}
+
+func taskLabel(task domain.Task, projects map[int64]string) string {
+	return task.Name + " - " + labelValue(projects, task.ProjectID)
+}
+
+func userLabel(user domain.User) string {
+	name := strings.TrimSpace(user.DisplayName)
+	if name == "" {
+		name = user.Username
+	}
+	if user.Email != "" && user.Email != name {
+		return name + " - " + user.Email
+	}
+	return name
+}
+
+func labelValue(labels map[int64]string, id int64) string {
+	if labels != nil {
+		if value := labels[id]; value != "" {
+			return value
+		}
+	}
+	if id == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Unavailable #%d", id)
+}
+
+func (s *Server) customerInScope(r *http.Request, customerID int64) bool {
+	if customerID == 0 {
+		return false
+	}
+	customer, err := s.store.Customer(r.Context(), customerID)
+	return err == nil && customer != nil && customer.WorkspaceID == s.access(r).WorkspaceID
+}
+
+func (s *Server) validateWorkSelection(r *http.Request, projectID, customerID, activityID int64, taskID *int64) error {
+	if projectID == 0 || customerID == 0 || activityID == 0 {
+		return errors.New("customer, project, and activity are required")
+	}
+	project, err := s.store.Project(r.Context(), projectID)
+	if err != nil {
+		return err
+	}
+	if project == nil || project.WorkspaceID != s.access(r).WorkspaceID || project.CustomerID != customerID || !s.canTrackProject(r, projectID) {
+		return errors.New("invalid project selection")
+	}
+	activity, err := s.store.Activity(r.Context(), activityID)
+	if err != nil {
+		return err
+	}
+	if activity == nil || activity.WorkspaceID != s.access(r).WorkspaceID {
+		return errors.New("invalid activity selection")
+	}
+	if activity.ProjectID != nil && *activity.ProjectID != projectID {
+		return errors.New("activity does not belong to the selected project")
+	}
+	if taskID != nil {
+		task, err := s.store.Task(r.Context(), *taskID)
+		if err != nil {
+			return err
+		}
+		if task == nil || task.WorkspaceID != s.access(r).WorkspaceID || task.ProjectID != projectID {
+			return errors.New("task does not belong to the selected project")
+		}
+	}
+	return nil
+}
+
+func (s *Server) validateOptionalRateScope(r *http.Request) error {
+	customerID := formInt(r, "customer_id")
+	if customerID > 0 && !s.customerInScope(r, customerID) {
+		return errors.New("invalid customer selection")
+	}
+	projectID := formInt(r, "project_id")
+	if projectID > 0 && !s.canTrackProject(r, projectID) {
+		return errors.New("invalid project selection")
+	}
+	if projectID > 0 && customerID > 0 {
+		project, err := s.store.Project(r.Context(), projectID)
+		if err != nil {
+			return err
+		}
+		if project == nil || project.CustomerID != customerID {
+			return errors.New("project does not belong to the selected customer")
+		}
+	}
+	if activityID := formInt(r, "activity_id"); activityID > 0 {
+		activity, err := s.store.Activity(r.Context(), activityID)
+		if err != nil {
+			return err
+		}
+		if activity == nil || activity.WorkspaceID != s.access(r).WorkspaceID || (activity.ProjectID != nil && projectID > 0 && *activity.ProjectID != projectID) {
+			return errors.New("invalid activity selection")
+		}
+	}
+	if taskID := formInt(r, "task_id"); taskID > 0 {
+		task, err := s.store.Task(r.Context(), taskID)
+		if err != nil {
+			return err
+		}
+		if task == nil || task.WorkspaceID != s.access(r).WorkspaceID || (projectID > 0 && task.ProjectID != projectID) {
+			return errors.New("invalid task selection")
+		}
+	}
+	if userID := formInt(r, "user_id"); userID > 0 {
+		ok, err := s.userInWorkspace(r.Context(), userID, s.access(r).WorkspaceID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("invalid user selection")
+		}
+	}
+	return nil
 }
 
 func (s *Server) totpAvailable() bool {
@@ -1417,13 +2044,472 @@ func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) 
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
+// ─── Favorite edit/delete ──────────────────────────────────────────────────────
+
+func (s *Server) editFavorite(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	_ = r.ParseForm()
+	access := s.access(r)
+	userID := s.state(r).User.ID
+	var taskID *int64
+	if v := r.FormValue("task_id"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			taskID = &n
+		}
+	}
+	if err := s.store.UpdateFavorite(r.Context(), access.WorkspaceID, userID, id,
+		r.FormValue("name"), formInt(r, "project_id"), formInt(r, "activity_id"),
+		taskID, r.FormValue("description"), r.FormValue("tags")); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) deleteFavorite(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	access := s.access(r)
+	userID := s.state(r).User.ID
+	if err := s.store.DeleteFavorite(r.Context(), access.WorkspaceID, userID, id); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// ─── Saved report edit/delete/share ───────────────────────────────────────────
+
+func (s *Server) editSavedReport(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	_ = r.ParseForm()
+	access := s.access(r)
+	userID := s.state(r).User.ID
+	filter := map[string]string{
+		"begin":       r.FormValue("begin"),
+		"end":         r.FormValue("end"),
+		"customer_id": r.FormValue("customer_id"),
+		"project_id":  r.FormValue("project_id"),
+		"activity_id": r.FormValue("activity_id"),
+		"task_id":     r.FormValue("task_id"),
+		"user_id":     r.FormValue("user_id"),
+		"group_id":    r.FormValue("group_id"),
+	}
+	body, err := json.Marshal(filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := s.store.UpdateSavedReport(r.Context(), access.WorkspaceID, userID, id,
+		r.FormValue("name"), defaultString(r.FormValue("group"), "user"), string(body), checkbox(r, "shared")); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/reports", http.StatusSeeOther)
+}
+
+func (s *Server) deleteSavedReport(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	access := s.access(r)
+	userID := s.state(r).User.ID
+	if err := s.store.DeleteSavedReport(r.Context(), access.WorkspaceID, userID, id); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/reports", http.StatusSeeOther)
+}
+
+func (s *Server) shareSavedReport(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	_ = r.ParseForm()
+	access := s.access(r)
+	userID := s.state(r).User.ID
+	if r.FormValue("action") == "revoke" {
+		if err := s.store.RevokeReportShareToken(r.Context(), access.WorkspaceID, userID, id); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		http.Redirect(w, r, "/reports", http.StatusSeeOther)
+		return
+	}
+	token := randomToken(24)
+	days := 30
+	if v := r.FormValue("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 365 {
+			days = n
+		}
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(days) * 24 * time.Hour)
+	if err := s.store.SetReportShareToken(r.Context(), access.WorkspaceID, userID, id, token, expiresAt); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/reports", http.StatusSeeOther)
+}
+
+func (s *Server) viewSharedReport(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	if token == "" {
+		http.NotFound(w, r)
+		return
+	}
+	report, err := s.store.FindSharedReport(r.Context(), token)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if report == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if report.ShareExpiresAt != nil && report.ShareExpiresAt.Before(time.Now().UTC()) {
+		http.Error(w, "This shared report link has expired.", http.StatusGone)
+		return
+	}
+	filter := domain.ReportFilter{}
+	if report.FiltersJSON != "" {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(report.FiltersJSON), &m); err == nil {
+			filter.Group = m["group"]
+		}
+	}
+	access := domain.AccessContext{WorkspaceID: report.WorkspaceID, UserID: report.UserID, WorkspaceRole: domain.WorkspaceRoleAdmin}
+	rows, err := s.store.ListReports(r.Context(), access, filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.SharedReport(report.Name, rows))
+}
+
+// ─── Utilization dashboard ────────────────────────────────────────────────────
+
+func (s *Server) utilization(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var begin, end *time.Time
+	if v := q.Get("begin"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			begin = &t
+		}
+	}
+	if v := q.Get("end"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			end = &t
+		}
+	}
+	rows, err := s.store.UtilizationReport(r.Context(), s.access(r), begin, end)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Utilization(s.nav(r), rows, q.Get("begin"), q.Get("end")))
+}
+
+// ─── CSV exports ──────────────────────────────────────────────────────────────
+
+func (s *Server) exportReports(w http.ResponseWriter, r *http.Request) {
+	access := s.access(r)
+	filter := domain.ReportFilter{
+		Group:      defaultString(r.URL.Query().Get("group"), "user"),
+		CustomerID: int64Param(r, "customer_id"),
+		ProjectID:  int64Param(r, "project_id"),
+		ActivityID: int64Param(r, "activity_id"),
+		TaskID:     int64Param(r, "task_id"),
+		UserID:     int64Param(r, "user_id"),
+		GroupID:    int64Param(r, "group_id"),
+	}
+	filter.Begin = parseDateParam(r, "begin")
+	filter.End = parseDateParam(r, "end")
+	rows, err := s.store.ListReports(r.Context(), access, filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="report.csv"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"Name", "Count", "TrackedSeconds", "AmountCents"})
+	for _, row := range rows {
+		_ = cw.Write([]string{
+			fmt.Sprintf("%v", row["name"]),
+			fmt.Sprintf("%v", row["count"]),
+			fmt.Sprintf("%v", row["seconds"]),
+			fmt.Sprintf("%v", row["cents"]),
+		})
+	}
+	cw.Flush()
+}
+
+func (s *Server) exportTimesheets(w http.ResponseWriter, r *http.Request) {
+	filter := s.timesheetScope(r)
+	filter.CustomerID = int64Param(r, "customer_id")
+	filter.ProjectID = int64Param(r, "project_id")
+	filter.ActivityID = int64Param(r, "activity_id")
+	filter.TaskID = int64Param(r, "task_id")
+	filter.Begin = parseDateParam(r, "begin")
+	filter.End = parseDateParam(r, "end")
+	filter.Page = 1
+	filter.Size = 10000
+	items, _, err := s.store.ListTimesheets(r.Context(), filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="timesheets.csv"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"ID", "Date", "User", "Project", "Task", "Description", "Duration", "Billable", "Rate"})
+	for _, ts := range items {
+		date := ""
+		if !ts.StartedAt.IsZero() {
+			date = ts.StartedAt.Format("2006-01-02")
+		}
+		dur := ""
+		if ts.DurationSeconds > 0 {
+			dur = strconv.FormatInt(ts.DurationSeconds, 10)
+		}
+		_ = cw.Write([]string{
+			strconv.FormatInt(ts.ID, 10),
+			date,
+			strconv.FormatInt(ts.UserID, 10),
+			strconv.FormatInt(ts.ProjectID, 10),
+			func() string {
+				if ts.TaskID != nil {
+					return strconv.FormatInt(*ts.TaskID, 10)
+				}
+				return ""
+			}(),
+			ts.Description,
+			dur,
+			boolText(ts.Billable),
+			formatCents(ts.RateCents),
+		})
+	}
+	cw.Flush()
+}
+
+// ─── Exchange Rates ───────────────────────────────────────────────────────────
+
+func (s *Server) exchangeRates(w http.ResponseWriter, r *http.Request) {
+	rates, err := s.store.ListExchangeRates(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.ExchangeRates(s.nav(r), rates))
+}
+
+func (s *Server) saveExchangeRate(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	from := strings.TrimSpace(r.FormValue("from_currency"))
+	to := strings.TrimSpace(r.FormValue("to_currency"))
+	if len(from) != 3 || len(to) != 3 {
+		s.badRequest(w, r, errors.New("currency codes must be 3 letters"))
+		return
+	}
+	rateStr := strings.TrimSpace(r.FormValue("rate"))
+	rateFloat, err := strconv.ParseFloat(rateStr, 64)
+	if err != nil || rateFloat <= 0 {
+		s.badRequest(w, r, errors.New("rate must be a positive number"))
+		return
+	}
+	effStr := strings.TrimSpace(r.FormValue("effective_from"))
+	effDate, err := time.Parse("2006-01-02", effStr)
+	if err != nil {
+		s.badRequest(w, r, errors.New("effective_from must be YYYY-MM-DD"))
+		return
+	}
+	rate := &domain.ExchangeRate{
+		WorkspaceID:     s.access(r).WorkspaceID,
+		FromCurrency:    strings.ToUpper(from),
+		ToCurrency:      strings.ToUpper(to),
+		RateThousandths: int64(rateFloat * 1000),
+		EffectiveFrom:   effDate.UTC(),
+	}
+	if err := s.store.UpsertExchangeRate(r.Context(), rate); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/admin/exchange-rates", http.StatusSeeOther)
+}
+
+func (s *Server) deleteExchangeRate(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if id == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if err := s.store.DeleteExchangeRate(r.Context(), s.access(r).WorkspaceID, id); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/admin/exchange-rates", http.StatusSeeOther)
+}
+
+// ─── Rate Recalculation ───────────────────────────────────────────────────────
+
+func (s *Server) recalculate(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	projectID := int64Param(r, "project_id")
+	var since *time.Time
+	if v := q.Get("since"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			since = &t
+		}
+	}
+	var preview []domain.RecalcPreviewRow
+	if projectID > 0 || since != nil {
+		var err error
+		preview, err = s.store.RecalcPreview(r.Context(), s.access(r), projectID, since)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Recalculate(s.nav(r), preview, selectors, projectID, q.Get("since")))
+}
+
+func (s *Server) applyRecalculate(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	projectID := formInt(r, "project_id")
+	var since *time.Time
+	if v := r.FormValue("since"); v != "" {
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			since = &t
+		}
+	}
+	if projectID == 0 {
+		s.badRequest(w, r, errors.New("project_id is required"))
+		return
+	}
+	count, err := s.store.ApplyRecalc(r.Context(), s.access(r), projectID, since)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "recalculate", "rates", nil, fmt.Sprintf("updated %d timesheets", count))
+	http.Redirect(w, r, fmt.Sprintf("/admin/recalculate?project_id=%d&since=%s&applied=%d",
+		projectID, r.FormValue("since"), count), http.StatusSeeOther)
+}
+
 func (s *Server) writeInvoiceFile(inv *domain.Invoice) error {
+	ctx := context.Background()
+	detail, err := s.store.InvoiceDetails(ctx, inv.ID)
+	if err != nil || detail == nil {
+		detail = &domain.InvoiceDetail{Invoice: *inv}
+	}
 	dir := filepath.Join(s.cfg.DataDir, "invoices")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	content := fmt.Sprintf("<!doctype html><title>%s</title><h1>%s</h1><p>Total: %.2f</p>", inv.Number, inv.Number, float64(inv.TotalCents)/100)
-	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(content), 0o644)
+	var sb strings.Builder
+	sb.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Invoice `)
+	sb.WriteString(htmlEscape(inv.Number))
+	sb.WriteString(`</title><style>
+body{font-family:sans-serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333}
+table{width:100%;border-collapse:collapse;margin:20px 0}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid #ddd}
+th{background:#f5f5f5;font-weight:600}
+.total-row td{font-weight:bold;border-top:2px solid #333}
+.header{display:flex;justify-content:space-between;margin-bottom:40px}
+.from,.to{min-width:220px}
+h1{margin:0 0 4px}
+.meta{color:#666;font-size:.9em}
+</style></head><body>`)
+	sb.WriteString(`<div class="header"><div class="from">`)
+	if detail.WorkspaceName != "" {
+		sb.WriteString(`<h1>`)
+		sb.WriteString(htmlEscape(detail.WorkspaceName))
+		sb.WriteString(`</h1>`)
+	} else {
+		sb.WriteString(`<h1>Invoice</h1>`)
+	}
+	sb.WriteString(`<div class="meta">Invoice #: `)
+	sb.WriteString(htmlEscape(inv.Number))
+	sb.WriteString(`<br>Date: `)
+	sb.WriteString(inv.CreatedAt.Format("2006-01-02"))
+	sb.WriteString(`</div></div>`)
+	sb.WriteString(`<div class="to"><strong>Bill To:</strong><br>`)
+	sb.WriteString(htmlEscape(detail.Customer.Name))
+	if detail.Customer.Email != "" {
+		sb.WriteString(`<br>`)
+		sb.WriteString(htmlEscape(detail.Customer.Email))
+	}
+	sb.WriteString(`</div></div>`)
+	sb.WriteString(`<table><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Total</th></tr></thead><tbody>`)
+	if len(detail.Items) > 0 {
+		for _, item := range detail.Items {
+			sb.WriteString(`<tr><td>`)
+			sb.WriteString(htmlEscape(item.Description))
+			sb.WriteString(`</td><td>`)
+			sb.WriteString(fmt.Sprintf("%d", item.Quantity))
+			sb.WriteString(`</td><td>`)
+			sb.WriteString(formatCents(item.UnitCents))
+			sb.WriteString(`</td><td>`)
+			sb.WriteString(formatCents(item.TotalCents))
+			sb.WriteString(`</td></tr>`)
+		}
+	} else {
+		sb.WriteString(`<tr><td colspan="4">(no line items)</td></tr>`)
+	}
+	sb.WriteString(`</tbody><tfoot>`)
+	if inv.TaxCents > 0 {
+		sb.WriteString(`<tr><td colspan="3">Subtotal</td><td>`)
+		sb.WriteString(formatCents(inv.TotalCents - inv.TaxCents))
+		sb.WriteString(`</td></tr><tr><td colspan="3">Tax</td><td>`)
+		sb.WriteString(formatCents(inv.TaxCents))
+		sb.WriteString(`</td></tr>`)
+	}
+	sb.WriteString(`<tr class="total-row"><td colspan="3">Total</td><td>`)
+	sb.WriteString(formatCents(inv.TotalCents))
+	sb.WriteString(`</td></tr></tfoot></table>`)
+	sb.WriteString(`</body></html>`)
+	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(sb.String()), 0o644)
+}
+
+func randomToken(bytes int) string {
+	b := make([]byte, bytes)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+func htmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, `"`, "&#34;")
+	return s
+}
+
+func formatCents(cents int64) string {
+	return fmt.Sprintf("%.2f", float64(cents)/100)
 }
 
 func (s *Server) queueEvent(ctx context.Context, workspaceID int64, event string, payload any) {
@@ -1507,6 +2593,21 @@ func formInt(r *http.Request, key string) int64 {
 	return value
 }
 
+func formIntList(r *http.Request, key string) []int64 {
+	raw := r.Form[key]
+	out := make([]int64, 0, len(raw))
+	seen := map[int64]bool{}
+	for _, value := range raw {
+		id, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 func formOptionalInt(r *http.Request, key string) *int64 {
 	if strings.TrimSpace(r.FormValue(key)) == "" {
 		return nil
@@ -1550,6 +2651,68 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
+}
+
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	previousDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			previousDash = false
+			continue
+		}
+		if !previousDash && b.Len() > 0 {
+			b.WriteByte('-')
+			previousDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func projectTemplateFromForm(r *http.Request) domain.ProjectTemplate {
+	return domain.ProjectTemplate{
+		Name:               r.FormValue("name"),
+		Description:        r.FormValue("description"),
+		ProjectName:        r.FormValue("project_name"),
+		ProjectNumber:      r.FormValue("project_number"),
+		OrderNo:            r.FormValue("order_number"),
+		Visible:            checkbox(r, "visible"),
+		Private:            checkbox(r, "private"),
+		Billable:           checkbox(r, "billable"),
+		EstimateSeconds:    formInt(r, "estimate_hours") * 3600,
+		BudgetCents:        formInt(r, "budget_cents"),
+		BudgetAlertPercent: defaultInt64(formInt(r, "budget_alert_percent"), 80),
+		Archived:           checkbox(r, "archived"),
+		Tasks:              projectTemplateTasksFromText(r.FormValue("tasks")),
+		Activities:         projectTemplateActivitiesFromText(r.FormValue("activities")),
+	}
+}
+
+func projectTemplateTasksFromText(value string) []domain.ProjectTemplateTask {
+	lines := splitCSV(strings.ReplaceAll(value, "\n", ","))
+	tasks := make([]domain.ProjectTemplateTask, 0, len(lines))
+	for _, line := range lines {
+		tasks = append(tasks, domain.ProjectTemplateTask{Name: line, Visible: true, Billable: true})
+	}
+	return tasks
+}
+
+func projectTemplateActivitiesFromText(value string) []domain.ProjectTemplateActivity {
+	lines := splitCSV(strings.ReplaceAll(value, "\n", ","))
+	activities := make([]domain.ProjectTemplateActivity, 0, len(lines))
+	for _, line := range lines {
+		activities = append(activities, domain.ProjectTemplateActivity{Name: line, Visible: true, Billable: true})
+	}
+	return activities
+}
+
+func defaultInt64(value, fallback int64) int64 {
+	if value == 0 {
+		return fallback
+	}
+	return value
 }
 
 func parseRange(startValue, endValue string) (time.Time, time.Time, error) {
@@ -1605,16 +2768,19 @@ func checkFuturePolicy(policy string, start, end time.Time) error {
 	return nil
 }
 
-func timesheetRows(items []domain.Timesheet) [][]string {
+func timesheetRows(items []domain.Timesheet, selectors *templates.SelectorData) [][]string {
 	rows := [][]string{}
 	for _, t := range items {
 		end := ""
 		if t.EndedAt != nil {
 			end = templates.FormatTime(*t.EndedAt)
 		}
+		task := ""
+		if t.TaskID != nil {
+			task = labelValue(selectors.TaskLabels, *t.TaskID)
+		}
 		rows = append(rows, []string{
-			fmt.Sprint(t.ID),
-			ptrText(t.TaskID),
+			task,
 			templates.FormatTime(t.StartedAt),
 			end,
 			fmt.Sprintf("%dh %02dm", t.DurationSeconds/3600, (t.DurationSeconds%3600)/60),

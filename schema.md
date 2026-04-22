@@ -17,6 +17,7 @@ SQLite is the first database. PostgreSQL can be added later by implementing the 
 - `groups`, `group_members`, `project_members`, `project_groups`
 - legacy compatibility: `teams`, `team_members`, `customer_teams`, `project_teams`, `activity_teams`
 - `customers`, `projects`, `activities`, `tasks`
+- `project_templates`, `project_template_tasks`, `project_template_activities`
 - `favorites`, `saved_reports`
 - `rates`, `user_cost_rates`
 - `timesheets`, `tags`, `timesheet_tags`
@@ -24,7 +25,7 @@ SQLite is the first database. PostgreSQL can be added later by implementing the 
 - `webhook_endpoints`, `webhook_deliveries`
 - `audit_log`, `settings`, `schema_migrations`
 
-Workspace-owned records include `workspace_id`. Users include `organization_id`, optional TOTP state, and hashed recovery codes. Sessions include the selected `workspace_id`. Private projects use `projects.private` plus `project_members`/`project_groups` for scoped visibility. Projects include lightweight estimate and budget fields. Tasks sit below projects and can be attached to timesheets, favorites, reports, and task-scoped rates.
+Workspace-owned records include `workspace_id`. Workspaces include description and archived state. Users include `organization_id`, optional TOTP state, and hashed recovery codes. Sessions include the selected `workspace_id`. Private projects use `projects.private` plus `project_members`/`project_groups` for scoped visibility. Projects include lightweight estimate and budget fields. Tasks sit below projects and can be attached to timesheets, favorites, reports, and task-scoped rates. Project templates are workspace-scoped and copy safe setup defaults, tasks, and activities only.
 
 Rates support `effective_from`/`effective_to`, optional task scope, and stored `internal_amount_cents`. User cost rates are separately effective-dated in `user_cost_rates`; timesheets store the resolved billing and internal cents at creation time for audit stability.
 
@@ -48,4 +49,5 @@ Rates support `effective_from`/`effective_to`, optional task scope, and stored `
 - `workspace_members(user_id, workspace_id)`
 - `project_members(user_id, project_id)`
 - `group_members(user_id, group_id)`
+- `project_templates(workspace_id, name)`
 - unique `users.email`, `roles.name`, `tags(workspace_id, name)`, `settings.name`

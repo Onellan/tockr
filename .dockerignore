@@ -1,5 +1,12 @@
 .git
+.github
+.playwright-cli
+.trunk
 data
+docs
+deployment
+output
+*.md
 *.db
 *.db-shm
 *.db-wal
@@ -9,4 +16,4 @@ migrate
 migrate.exe
 coverage.out
 .env
-
+*.log

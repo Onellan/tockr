@@ -17,11 +17,34 @@ Set `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` before production use.
 
 ## Docker
 
+Use the published GitHub Container Registry image on a Raspberry Pi or server:
+
+```sh
+docker pull ghcr.io/<owner>/tockr:latest
+docker run -d --name tockr \
+  --restart unless-stopped \
+  -p 8029:8080 \
+  -v tockr-data:/app/data \
+  -e TOCKR_SESSION_SECRET='change-this-32-byte-production-secret' \
+  -e TOCKR_ADMIN_PASSWORD='change-this-admin-password' \
+  ghcr.io/<owner>/tockr:latest
+```
+
+Then open `http://localhost:8029`.
+
+For local development from source:
+
 ```sh
 docker compose up --build
 ```
 
-Open `http://localhost:8029`.
+To update a published-image install:
+
+```sh
+docker pull ghcr.io/<owner>/tockr:latest
+docker rm -f tockr
+docker run -d --name tockr --restart unless-stopped -p 8029:8080 -v tockr-data:/app/data ghcr.io/<owner>/tockr:latest
+```
 
 ## Features
 
@@ -35,7 +58,10 @@ Open `http://localhost:8029`.
 - Read-only weekly calendar for reviewing scoped time entries.
 - Account self-service for display name, timezone, password, and TOTP.
 - Workspace switcher for users with access to multiple workspaces.
+- Organization-level workspace administration, workspace creation, and workspace member management.
 - Project membership and group assignment editing for project managers/admins.
+- Bulk group/project membership editors.
+- Workspace-scoped project templates for repeatable project setup.
 - Future-time policy: `allow`, `deny`, `end_of_day`, `end_of_week`.
 - Dashboard, project insights, entity reports, task reports, and saved report definitions.
 - Effective-dated billable rates and user cost rates for future profitability reporting.
@@ -47,9 +73,10 @@ Open `http://localhost:8029`.
 ## Documentation
 
 - [Architecture](architecture.md)
-- [Rewrite plan](rewrite-plan.md)
+- [Product tracker](TRACKER.md)
 - [Schema](schema.md)
-- [Migration plan](migration-plan.md)
 - [Docker deployment](deployment/docker.md)
 - [systemd deployment](deployment/systemd.md)
 - [Raspberry Pi notes](deployment/raspberry-pi.md)
+- [Raspberry Pi Docker install](docs/raspberry-pi.md)
+- [CI/CD pipeline](docs/ci-cd.md)

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -178,11 +179,14 @@ func TestDropdownsAndFaviconHeadRender(t *testing.T) {
 		`rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png?v=20260422"`,
 		`rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=20260422"`,
 		`rel="manifest" href="/static/site.webmanifest?v=20260422"`,
-		`<script src="/static/menu.js" defer>`,
+		`<script src="/static/menu.js?v=20260422-navfix" defer>`,
 	} {
 		if strings.Count(loginBody, expected) != 1 {
 			t.Fatalf("expected one %q in login head", expected)
 		}
+	}
+	if strings.Contains(loginBody, "htmx-lite.js") {
+		t.Fatal("login head should not include unused htmx-lite asset")
 	}
 
 	body := getWithCookie(app, "/", cookie).Body.String()
@@ -227,6 +231,143 @@ func TestSavedReportsDropdownRendersMenuLinks(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("reports missing saved-report dropdown markup %q", expected)
 		}
+	}
+}
+
+func TestIDFieldsRenderAsHumanReadableSelectors(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	customer, project, _, task := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	pages := []string{"/", "/timesheets", "/projects", "/activities", "/tasks", "/rates", "/reports", "/invoices"}
+	for _, page := range pages {
+		body := getWithCookie(app, page, cookie).Body.String()
+		for _, raw := range []string{"Customer ID", "Project ID", "Activity ID", "Task ID", "User ID", "Group ID"} {
+			if strings.Contains(body, raw) {
+				t.Fatalf("%s still exposes raw label %q", page, raw)
+			}
+		}
+	}
+
+	dashboard := getWithCookie(app, "/", cookie).Body.String()
+	for _, expected := range []string{
+		`<select name="customer_id" required>`,
+		`<select name="project_id" required data-filter-attr="customer-id" data-filter-parent="customer_id">`,
+		`<select name="activity_id" required data-filter-attr="project-id" data-filter-parent="project_id">`,
+		`<select name="task_id" data-filter-attr="project-id" data-filter-parent="project_id">`,
+		`Alpha Customer - ACME`,
+		`Buildout - Alpha Customer - ACME`,
+		`Implementation - Buildout - Alpha Customer - ACME`,
+		`Launch task - Buildout - Alpha Customer - ACME`,
+		`data-customer-id="` + strconv.FormatInt(customer.ID, 10) + `"`,
+		`data-project-id="` + strconv.FormatInt(project.ID, 10) + `"`,
+	} {
+		if !strings.Contains(dashboard, expected) {
+			t.Fatalf("dashboard selector markup missing %q", expected)
+		}
+	}
+
+	rates := getWithCookie(app, "/rates", cookie).Body.String()
+	if !strings.Contains(rates, `<select name="user_id">`) || !strings.Contains(rates, `Administrator - admin@example.com`) {
+		t.Fatal("rates page should render human-readable user selector")
+	}
+	if !strings.Contains(getWithCookie(app, "/timesheets", cookie).Body.String(), task.Name) {
+		t.Fatal("timesheets should render task options by name")
+	}
+}
+
+func TestSelectorOptionsRespectProjectScope(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, domain.User{
+		Email:       "member@example.com",
+		Username:    "member",
+		DisplayName: "Member",
+		Timezone:    "UTC",
+		Enabled:     true,
+	}, "member12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	customer := &domain.Customer{WorkspaceID: 1, Name: "Scoped Customer", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	privateProject := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Private Selector Project", Visible: true, Private: true, Billable: true}
+	if err := store.UpsertProject(ctx, privateProject); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "member@example.com", "member12345")
+	body := getWithCookie(app, "/", cookie).Body.String()
+	if strings.Contains(body, "Private Selector Project") {
+		t.Fatal("private project leaked into selector before membership")
+	}
+	user, err := store.FindUserByEmail(ctx, "member@example.com")
+	if err != nil || user == nil {
+		t.Fatal("missing member")
+	}
+	if err := store.AddProjectMember(ctx, privateProject.ID, user.ID, domain.ProjectRoleMember); err != nil {
+		t.Fatal(err)
+	}
+	body = getWithCookie(app, "/", cookie).Body.String()
+	if !strings.Contains(body, "Private Selector Project") {
+		t.Fatal("assigned private project should appear in selector")
+	}
+}
+
+func TestSelectorFormSubmissionAndRelationshipValidation(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	customer, project, activity, task := seedSelectorFixtures(t, store)
+	otherTask := &domain.Task{WorkspaceID: 1, ProjectID: project.ID, Name: "Other project task", Visible: true, Billable: true}
+	otherProject := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Other Project", Visible: true, Billable: true}
+	if err := store.UpsertProject(context.Background(), otherProject); err != nil {
+		t.Fatal(err)
+	}
+	otherTask.ProjectID = otherProject.ID
+	if err := store.UpsertTask(context.Background(), otherTask); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/timesheets", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	form := strings.NewReader(
+		"csrf=" + csrf +
+			"&customer_id=" + strconv.FormatInt(customer.ID, 10) +
+			"&project_id=" + strconv.FormatInt(project.ID, 10) +
+			"&activity_id=" + strconv.FormatInt(activity.ID, 10) +
+			"&task_id=" + strconv.FormatInt(task.ID, 10) +
+			"&start=2026-04-22T09%3A00&end=2026-04-22T10%3A00&break_minutes=0&description=Selector+entry",
+	)
+	req := httptest.NewRequest(http.MethodPost, "/timesheets", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("valid selector submission returned %d", rec.Code)
+	}
+	if body := getWithCookie(app, "/timesheets", cookie).Body.String(); !strings.Contains(body, "Launch task") || strings.Contains(body, strconv.FormatInt(task.ID, 10)+`</td>`) {
+		t.Fatal("timesheet row should show task label instead of raw task ID")
+	}
+
+	form = strings.NewReader(
+		"csrf=" + csrf +
+			"&customer_id=" + strconv.FormatInt(customer.ID, 10) +
+			"&project_id=" + strconv.FormatInt(project.ID, 10) +
+			"&activity_id=" + strconv.FormatInt(activity.ID, 10) +
+			"&task_id=" + strconv.FormatInt(otherTask.ID, 10) +
+			"&start=2026-04-22T11%3A00&end=2026-04-22T12%3A00&break_minutes=0",
+	)
+	req = httptest.NewRequest(http.MethodPost, "/timesheets", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched task submission returned %d, want 400", rec.Code)
 	}
 }
 
@@ -362,6 +503,227 @@ func TestScopedAuthorizationHidesPrivateProjectsUntilMembership(t *testing.T) {
 	}
 }
 
+func TestWorkspaceAdminCreateAndManageMembers(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, domain.User{
+		Email:       "member-admin@example.com",
+		Username:    "member-admin",
+		DisplayName: "Member Admin",
+		Timezone:    "UTC",
+		Enabled:     true,
+	}, "member12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.FindUserByEmail(ctx, "member-admin@example.com")
+	if err != nil || member == nil {
+		t.Fatal("missing member")
+	}
+
+	adminCookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/admin/workspaces", adminCookie).Body.String()
+	if !strings.Contains(body, "Create workspace") {
+		t.Fatal("workspace admin screen did not render create form")
+	}
+	csrf := csrfFromBody(t, body)
+	rec := postFormWithCookie(app, "/admin/workspaces", adminCookie, url.Values{
+		"csrf":             {csrf},
+		"name":             {"Client Ops"},
+		"slug":             {"client-ops"},
+		"default_currency": {"USD"},
+		"timezone":         {"UTC"},
+		"description":      {"Client operations workspace"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("workspace create returned %d", rec.Code)
+	}
+	var workspaceID int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT id FROM workspaces WHERE slug='client-ops'`).Scan(&workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	body = getWithCookie(app, "/admin/workspaces/"+strconv.FormatInt(workspaceID, 10), adminCookie).Body.String()
+	if !strings.Contains(body, "Add or update member") || !strings.Contains(body, "Client operations workspace") {
+		t.Fatal("workspace detail did not render settings and member UI")
+	}
+	csrf = csrfFromBody(t, body)
+	rec = postFormWithCookie(app, "/admin/workspaces/"+strconv.FormatInt(workspaceID, 10)+"/members", adminCookie, url.Values{
+		"csrf":    {csrf},
+		"user_id": {strconv.FormatInt(member.ID, 10)},
+		"role":    {"analyst"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("workspace member save returned %d", rec.Code)
+	}
+	var role string
+	if err := store.DB().QueryRowContext(ctx, `SELECT role FROM workspace_members WHERE workspace_id=? AND user_id=?`, workspaceID, member.ID).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "analyst" {
+		t.Fatalf("workspace role = %q, want analyst", role)
+	}
+
+	memberCookie := loginCookie(t, app, "member-admin@example.com", "member12345")
+	rec = getWithCookie(app, "/admin/workspaces", memberCookie)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("normal member workspace admin access = %d, want 403", rec.Code)
+	}
+}
+
+func TestBulkGroupAndProjectMembershipEditors(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	for _, user := range []domain.User{
+		{Email: "bulk-one@example.com", Username: "bulk-one", DisplayName: "Bulk One", Timezone: "UTC", Enabled: true},
+		{Email: "bulk-two@example.com", Username: "bulk-two", DisplayName: "Bulk Two", Timezone: "UTC", Enabled: true},
+	} {
+		if err := store.CreateUser(ctx, user, "member12345", []domain.Role{domain.RoleUser}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, _ := store.FindUserByEmail(ctx, "bulk-one@example.com")
+	second, _ := store.FindUserByEmail(ctx, "bulk-two@example.com")
+	groupID, err := store.CreateGroup(ctx, 1, "Bulk Delivery", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, project, _, _ := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	body := getWithCookie(app, "/groups/"+strconv.FormatInt(groupID, 10)+"/members", cookie).Body.String()
+	if !strings.Contains(body, "Bulk add or remove workspace users") {
+		t.Fatal("group bulk editor did not render")
+	}
+	csrf := csrfFromBody(t, body)
+	rec := postFormWithCookie(app, "/groups/"+strconv.FormatInt(groupID, 10)+"/members", cookie, url.Values{
+		"csrf":    {csrf},
+		"user_id": {strconv.FormatInt(first.ID, 10), strconv.FormatInt(second.ID, 10)},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("bulk group add returned %d", rec.Code)
+	}
+	groupMembers, err := store.ListGroupMembers(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groupMembers) != 2 {
+		t.Fatalf("group member count = %d, want 2", len(groupMembers))
+	}
+
+	body = getWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/members", cookie).Body.String()
+	csrf = csrfFromBody(t, body)
+	rec = postFormWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/members", cookie, url.Values{
+		"csrf":    {csrf},
+		"user_id": {strconv.FormatInt(first.ID, 10), strconv.FormatInt(second.ID, 10)},
+		"role":    {"manager"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("bulk project member add returned %d", rec.Code)
+	}
+	members, err := store.ListProjectMembers(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("project member count = %d, want 2", len(members))
+	}
+	rec = postFormWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/groups", cookie, url.Values{
+		"csrf":     {csrf},
+		"group_id": {strconv.FormatInt(groupID, 10)},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("project group add returned %d", rec.Code)
+	}
+	groups, err := store.ListProjectGroups(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("project group count = %d, want 1", len(groups))
+	}
+}
+
+func TestProjectTemplateCreateEditAndUse(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	customer, _, _, _ := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/project-templates", cookie).Body.String()
+	if !strings.Contains(body, "Create template") {
+		t.Fatal("project templates screen did not render")
+	}
+	csrf := csrfFromBody(t, body)
+	rec := postFormWithCookie(app, "/project-templates", cookie, url.Values{
+		"csrf":                 {csrf},
+		"name":                 {"Implementation Template"},
+		"project_name":         {"Implementation Project"},
+		"estimate_hours":       {"12"},
+		"budget_cents":         {"50000"},
+		"budget_alert_percent": {"75"},
+		"visible":              {"on"},
+		"billable":             {"on"},
+		"tasks":                {"Plan\nBuild"},
+		"activities":           {"Consulting\nReview"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("template create returned %d", rec.Code)
+	}
+	var templateID int64
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT id FROM project_templates WHERE name='Implementation Template'`).Scan(&templateID); err != nil {
+		t.Fatal(err)
+	}
+	body = getWithCookie(app, "/project-templates/"+strconv.FormatInt(templateID, 10), cookie).Body.String()
+	if !strings.Contains(body, "Plan") || !strings.Contains(body, "Consulting") {
+		t.Fatal("template detail did not render copied defaults")
+	}
+	csrf = csrfFromBody(t, body)
+	rec = postFormWithCookie(app, "/project-templates/"+strconv.FormatInt(templateID, 10)+"/use", cookie, url.Values{
+		"csrf":         {csrf},
+		"customer_id":  {strconv.FormatInt(customer.ID, 10)},
+		"project_name": {"Client Launch"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("template use returned %d", rec.Code)
+	}
+	var projectID int64
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT id FROM projects WHERE name='Client Launch'`).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	var taskCount, activityCount int
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM tasks WHERE project_id=?`, projectID).Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM activities WHERE project_id=?`, projectID).Scan(&activityCount); err != nil {
+		t.Fatal(err)
+	}
+	if taskCount != 2 || activityCount != 2 {
+		t.Fatalf("template copied %d tasks and %d activities, want 2 and 2", taskCount, activityCount)
+	}
+}
+
+func seedSelectorFixtures(t *testing.T, store *sqlite.Store) (*domain.Customer, *domain.Project, *domain.Activity, *domain.Task) {
+	t.Helper()
+	ctx := context.Background()
+	customer := &domain.Customer{WorkspaceID: 1, Name: "Alpha Customer", Company: "ACME", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	project := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Buildout", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	activity := &domain.Activity{WorkspaceID: 1, ProjectID: &project.ID, Name: "Implementation", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, activity); err != nil {
+		t.Fatal(err)
+	}
+	task := &domain.Task{WorkspaceID: 1, ProjectID: project.ID, Name: "Launch task", Visible: true, Billable: true}
+	if err := store.UpsertTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	return customer, project, activity, task
+}
+
 func testApp(t *testing.T) (*Server, *sqlite.Store) {
 	t.Helper()
 	return testAppWithConfig(t, config.Config{})
@@ -404,6 +766,15 @@ func loginCookie(t *testing.T, app *Server, email, password string) *http.Cookie
 
 func getWithCookie(app *Server, target string, cookie *http.Cookie) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func postFormWithCookie(app *Server, target string, cookie *http.Cookie, form url.Values) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	app.Handler().ServeHTTP(rec, req)

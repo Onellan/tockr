@@ -17,18 +17,6 @@ const (
 	PermManageProjects = "manage_projects"
 )
 
-func HasLegacyRole(user *domain.User, role domain.Role) bool {
-	if user == nil {
-		return false
-	}
-	for _, item := range user.Roles {
-		if item == role {
-			return true
-		}
-	}
-	return false
-}
-
 func HasPermission(access domain.AccessContext, permission string) bool {
 	switch permission {
 	case PermAdmin, PermManageOrg:

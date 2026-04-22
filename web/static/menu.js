@@ -1,4 +1,109 @@
 (function () {
+  var navStorageKey = "tockr.collapsedNavGroups";
+  var defaultCollapsedGroups = ["manage", "analyze", "admin"];
+
+  function readNavState() {
+    try {
+      var value = localStorage.getItem(navStorageKey);
+      if (!value) return { collapsed: [], expanded: [] };
+      var state = JSON.parse(value);
+      if (Array.isArray(state)) {
+        return { collapsed: state, expanded: [] };
+      }
+      return {
+        collapsed: Array.isArray(state.collapsed) ? state.collapsed : [],
+        expanded: Array.isArray(state.expanded) ? state.expanded : []
+      };
+    } catch (error) {
+      return { collapsed: [], expanded: [] };
+    }
+  }
+
+  function writeNavState(state) {
+    try {
+      localStorage.setItem(navStorageKey, JSON.stringify(state));
+    } catch (error) {
+      return;
+    }
+  }
+
+  function setSectionCollapsed(section, collapsed) {
+    var trigger = section.querySelector("[data-nav-toggle]");
+    var items = section.querySelector(".nav-section-items");
+    if (!trigger || !items) return;
+    section.classList.toggle("collapsed", collapsed);
+    items.hidden = collapsed;
+    trigger.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+
+  function setupNavSections() {
+    var state = readNavState();
+    document.querySelectorAll("[data-nav-section]").forEach(function (section) {
+      var group = section.getAttribute("data-nav-group");
+      var hasActiveLink = Boolean(section.querySelector(".nav-link.active"));
+      var defaultCollapsed = defaultCollapsedGroups.indexOf(group) !== -1;
+      var explicitlyExpanded = state.expanded.indexOf(group) !== -1;
+      var explicitlyCollapsed = state.collapsed.indexOf(group) !== -1;
+      setSectionCollapsed(section, !hasActiveLink && (explicitlyCollapsed || (defaultCollapsed && !explicitlyExpanded)));
+    });
+  }
+
+  document.addEventListener("click", function (event) {
+    var trigger = event.target.closest("[data-nav-toggle]");
+    if (!trigger) return;
+    var section = trigger.closest("[data-nav-section]");
+    if (!section) return;
+    var group = section.getAttribute("data-nav-group");
+    var collapsed = trigger.getAttribute("aria-expanded") === "true";
+    var state = readNavState();
+    state.collapsed = state.collapsed.filter(function (item) {
+      return item !== group;
+    });
+    state.expanded = state.expanded.filter(function (item) {
+      return item !== group;
+    });
+    if (collapsed) state.collapsed.push(group);
+    else state.expanded.push(group);
+    writeNavState(state);
+    setSectionCollapsed(section, collapsed);
+  });
+
+  setupNavSections();
+
+  function setupDependentSelectors() {
+    document.querySelectorAll("select[data-filter-parent]").forEach(function (select) {
+      var form = select.closest("form") || document;
+      var parentName = select.getAttribute("data-filter-parent");
+      var optionAttr = select.getAttribute("data-filter-attr");
+      var parent = form.querySelector('[name="' + parentName + '"]');
+      if (!parent || !optionAttr) return;
+
+      function refreshOptions() {
+        var parentValue = parent.value;
+        var selectedOption = select.options[select.selectedIndex];
+        Array.from(select.options).forEach(function (option) {
+          if (!option.value) {
+            option.hidden = false;
+            option.disabled = false;
+            return;
+          }
+          var optionValue = option.getAttribute("data-" + optionAttr);
+          var visible = !parentValue || !optionValue || optionValue === parentValue;
+          option.hidden = !visible;
+          option.disabled = !visible;
+        });
+        if (selectedOption && selectedOption.disabled) {
+          select.value = "";
+        }
+      }
+
+      parent.addEventListener("change", refreshOptions);
+      refreshOptions();
+    });
+  }
+
+  setupDependentSelectors();
+
   function dropdowns() {
     return Array.from(document.querySelectorAll("[data-dropdown]"));
   }

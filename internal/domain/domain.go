@@ -45,9 +45,30 @@ type Workspace struct {
 	OrganizationID  int64
 	Name            string
 	Slug            string
+	Description     string
 	DefaultCurrency string
 	Timezone        string
+	Archived        bool
 	CreatedAt       time.Time
+}
+
+type WorkspaceMember struct {
+	WorkspaceID         int64
+	UserID              int64
+	Role                WorkspaceRole
+	DisplayName         string
+	Email               string
+	Enabled             bool
+	GroupCount          int64
+	ProjectMemberCount  int64
+	ManagedProjectCount int64
+	CreatedAt           time.Time
+}
+
+type WorkspaceSummary struct {
+	Workspace
+	MemberCount  int64
+	ProjectCount int64
 }
 
 type Group struct {
@@ -174,6 +195,7 @@ type Task struct {
 	Number          string
 	Visible         bool
 	Billable        bool
+	Archived        bool
 	EstimateSeconds int64
 	CreatedAt       time.Time
 }
@@ -279,14 +301,54 @@ type WebhookEndpoint struct {
 }
 
 type SavedReport struct {
-	ID          int64
-	WorkspaceID int64
-	UserID      int64
-	Name        string
-	GroupBy     string
-	FiltersJSON string
-	Shared      bool
-	CreatedAt   time.Time
+	ID             int64
+	WorkspaceID    int64
+	UserID         int64
+	Name           string
+	GroupBy        string
+	FiltersJSON    string
+	Shared         bool
+	ShareToken     string
+	ShareExpiresAt *time.Time
+	CreatedAt      time.Time
+}
+
+type ExchangeRate struct {
+	ID              int64
+	WorkspaceID     int64
+	FromCurrency    string
+	ToCurrency      string
+	RateThousandths int64
+	EffectiveFrom   time.Time
+	CreatedAt       time.Time
+}
+
+type InvoiceDetail struct {
+	Invoice
+	Customer      Customer
+	Items         []InvoiceItem
+	WorkspaceName string
+}
+
+type RecalcPreviewRow struct {
+	TimesheetID       int64
+	StartedAt         time.Time
+	UserID            int64
+	ProjectID         int64
+	CurrentRateCents  int64
+	ResolvedRateCents int64
+	DeltaCents        int64
+	Description       string
+	Exported          bool
+}
+
+type UtilizationRow struct {
+	UserID          int64
+	DisplayName     string
+	TotalSeconds    int64
+	BillableSeconds int64
+	EntryCents      int64
+	EntryCount      int64
 }
 
 type ReportFilter struct {
@@ -310,6 +372,45 @@ type ProjectDashboard struct {
 	OverEstimate    bool
 	OverBudget      bool
 	Alert           bool
+}
+
+type ProjectTemplate struct {
+	ID                 int64
+	WorkspaceID        int64
+	Name               string
+	Description        string
+	ProjectName        string
+	ProjectNumber      string
+	OrderNo            string
+	Visible            bool
+	Private            bool
+	Billable           bool
+	EstimateSeconds    int64
+	BudgetCents        int64
+	BudgetAlertPercent int64
+	Archived           bool
+	Tasks              []ProjectTemplateTask
+	Activities         []ProjectTemplateActivity
+	CreatedAt          time.Time
+}
+
+type ProjectTemplateTask struct {
+	ID              int64
+	TemplateID      int64
+	Name            string
+	Number          string
+	Visible         bool
+	Billable        bool
+	EstimateSeconds int64
+}
+
+type ProjectTemplateActivity struct {
+	ID         int64
+	TemplateID int64
+	Name       string
+	Number     string
+	Visible    bool
+	Billable   bool
 }
 
 type Page struct {

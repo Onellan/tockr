@@ -9,20 +9,21 @@ Tockr is a lightweight Kimai-inspired time tracking application designed for Ras
 - `templ` runtime components for HTML rendering.
 - SQLite with WAL, foreign keys, busy timeout, and short transactions.
 - No SPA, no Node.js runtime, no microservices.
-- htmx-compatible markup is used for progressive enhancement only; all primary workflows work as normal HTML forms.
+- A small plain JavaScript file handles navigation, dropdown menus, and dependent selectors; all primary workflows work as normal HTML forms.
 
 ## Modules
 
-- `internal/auth`: login, logout, password hashing, optional TOTP, role/permission checks, sessions.
-- `internal/users`: user administration.
-- `internal/customers`, `internal/projects`, `internal/activities`: master data.
-- `internal/timesheets`: timer start/stop, manual time entry, filtering, tagging, future-time policy.
-- `internal/rates`: scoped, effective-dated billable rates and user cost resolution.
-- `internal/reports`: dashboard, customer, activity, project, and user rollups.
-- `internal/invoices`: invoice records, invoice metadata, CSV export, invoice document download.
-- `internal/webhooks`: signed JSON webhooks with in-process retry.
-- `internal/api`: compact JSON integration API.
-- `internal/db/sqlite`: migrations, repositories, and SQLite-specific pragmas.
+- `cmd/app`: application entrypoint, graceful shutdown, database setup, and webhook worker startup.
+- `cmd/migrate`: one-way legacy Kimai SQLite import utility.
+- `internal/auth`: password hashing, optional TOTP, role constants, and permission checks.
+- `internal/domain`: core data types shared across HTTP, persistence, and integrations.
+- `internal/platform/config`: environment-backed runtime configuration.
+- `internal/platform/http`: routes, handlers, middleware, request validation, and API endpoints.
+- `internal/db/sqlite`: migrations, repositories, hierarchy backfill, and SQLite-specific pragmas.
+- `internal/db/legacy`: legacy role and value conversion helpers for imports.
+- `internal/webhooks`: signed JSON webhook delivery with persisted retry state.
+- `web/templates`: server-rendered HTML components.
+- `web/static`: CSS, favicon assets, and the small JavaScript enhancement layer.
 
 ## Pi-Friendly Decisions
 

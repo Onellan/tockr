@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -51,8 +52,14 @@ func CurrentTOTPCode(secret string, now time.Time) (string, bool) {
 }
 
 func TOTPURI(issuer, account, secret string) string {
-	label := strings.ReplaceAll(issuer+":"+account, " ", "%20")
-	return fmt.Sprintf("otpauth://totp/%s?secret=%s&issuer=%s&period=30&digits=6", label, secret, strings.ReplaceAll(issuer, " ", "%20"))
+	label := url.PathEscape(issuer + ":" + account)
+	query := url.Values{
+		"digits": []string{"6"},
+		"issuer": []string{issuer},
+		"period": []string{"30"},
+		"secret": []string{secret},
+	}
+	return fmt.Sprintf("otpauth://totp/%s?%s", label, query.Encode())
 }
 
 func NewRecoveryCodes(count int) []string {
