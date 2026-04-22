@@ -18,6 +18,7 @@ type Config struct {
 	DefaultTimezone   string
 	DefaultCurrency   string
 	FutureTimePolicy  string
+	TOTPMode          string
 	AdminEmail        string
 	AdminPassword     string
 	ShutdownTimeout   time.Duration
@@ -34,6 +35,7 @@ func Load() Config {
 		DefaultTimezone:   getenv("TOCKR_DEFAULT_TIMEZONE", "UTC"),
 		DefaultCurrency:   getenv("TOCKR_DEFAULT_CURRENCY", "USD"),
 		FutureTimePolicy:  getenv("TOCKR_FUTURE_TIME_POLICY", "end_of_day"),
+		TOTPMode:          getenv("TOCKR_TOTP_MODE", "disabled"),
 		AdminEmail:        getenv("TOCKR_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:     getenv("TOCKR_ADMIN_PASSWORD", "admin12345"),
 		ShutdownTimeout:   10 * time.Second,

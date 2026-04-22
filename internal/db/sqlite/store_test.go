@@ -202,3 +202,64 @@ func TestTogglInspiredPhaseOneModels(t *testing.T) {
 		t.Fatalf("expected project dashboard to flag estimate threshold, got %#v", dashboard)
 	}
 }
+
+func TestHistoricalRatesAndUserCostResolution(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SeedAdmin(ctx, "admin@example.com", "secret12345", "UTC", "USD"); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || user == nil {
+		t.Fatal("missing admin")
+	}
+	customer := &domain.Customer{WorkspaceID: 1, Name: "Rates", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	project := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Historical", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	activity := &domain.Activity{WorkspaceID: 1, ProjectID: &project.ID, Name: "Build", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, activity); err != nil {
+		t.Fatal(err)
+	}
+	task := &domain.Task{WorkspaceID: 1, ProjectID: project.ID, Name: "Feature", Visible: true, Billable: true}
+	if err := store.UpsertTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	oldFrom := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newFrom := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	taskTo := task.ID
+	if err := store.UpsertRate(ctx, &domain.Rate{WorkspaceID: 1, TaskID: &taskTo, AmountCents: 12000, EffectiveFrom: oldFrom}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRate(ctx, &domain.Rate{WorkspaceID: 1, TaskID: &taskTo, AmountCents: 15000, EffectiveFrom: newFrom}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertUserCostRate(ctx, &domain.UserCostRate{WorkspaceID: 1, UserID: user.ID, AmountCents: 7000, EffectiveFrom: oldFrom}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertUserCostRate(ctx, &domain.UserCostRate{WorkspaceID: 1, UserID: user.ID, AmountCents: 9000, EffectiveFrom: newFrom}); err != nil {
+		t.Fatal(err)
+	}
+	rate, cost, err := store.ResolveRateAt(ctx, 1, user.ID, customer.ID, project.ID, activity.ID, &task.ID, time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rate != 12000 || cost == nil || *cost != 7000 {
+		t.Fatalf("expected old rate/cost, got rate=%d cost=%v", rate, cost)
+	}
+	rate, cost, err = store.ResolveRateAt(ctx, 1, user.ID, customer.ID, project.ID, activity.ID, &task.ID, time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rate != 15000 || cost == nil || *cost != 9000 {
+		t.Fatalf("expected new rate/cost, got rate=%d cost=%v", rate, cost)
+	}
+}

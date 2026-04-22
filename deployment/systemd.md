@@ -19,6 +19,7 @@ Environment=TOCKR_DB_PATH=/var/lib/tockr/tockr.db
 Environment=TOCKR_DATA_DIR=/var/lib/tockr
 Environment=TOCKR_SESSION_SECRET=change-this-32-byte-production-secret
 Environment=TOCKR_COOKIE_SECURE=false
+Environment=TOCKR_TOTP_MODE=disabled
 ExecStart=/opt/tockr/tockr
 Restart=on-failure
 RestartSec=5
@@ -37,4 +38,3 @@ Enable:
 sudo systemctl daemon-reload
 sudo systemctl enable --now tockr
 ```
-

@@ -239,6 +239,25 @@ select {
   min-width: 0;
 }
 
+.workspace-switcher select {
+  width: auto;
+  min-width: 170px;
+  background: var(--surface-2);
+  font-weight: 750;
+}
+
+.workspace-pill {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font-weight: 750;
+}
+
 .account-name {
   max-width: 220px;
   overflow: hidden;
@@ -250,6 +269,15 @@ select {
 
 .dropdown {
   position: relative;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .dropdown-menu {
@@ -302,6 +330,25 @@ select {
   font-weight: 750;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.row-menu {
+  display: inline-flex;
+}
+
+.icon-button {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-soft);
 }
 
 .account-menu {
@@ -716,6 +763,79 @@ tr:last-child td {
   border-radius: var(--radius-sm);
 }
 
+.section-spacer {
+  height: var(--space-5);
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(150px, 1fr));
+  gap: var(--space-3);
+}
+
+.calendar-day {
+  min-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: var(--space-3);
+}
+
+.calendar-day-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.calendar-day-head span,
+.calendar-entry small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.calendar-entry {
+  display: grid;
+  gap: 2px;
+  margin-bottom: var(--space-2);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
+  padding: var(--space-2);
+}
+
+.calendar-entry span {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.calendar-empty {
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  color: var(--muted);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.recovery-box {
+  margin-top: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: var(--space-4);
+}
+
+.recovery-box code {
+  display: block;
+  margin-top: var(--space-3);
+  color: var(--text);
+}
+
 .auth-main {
   min-height: 100vh;
   display: grid;
@@ -794,6 +914,7 @@ tr:last-child td {
 
   .metric-grid,
   .two-col,
+  .calendar-grid,
   .form-grid,
   .login-shell {
     grid-template-columns: 1fr;
@@ -824,10 +945,14 @@ tr:last-child td {
   .account-area {
     width: 100%;
     justify-content: space-between;
+    flex-wrap: wrap;
   }
 
   .account-menu,
-  .account-trigger {
+  .account-trigger,
+  .workspace-switcher,
+  .workspace-switcher label,
+  .workspace-switcher select {
     width: 100%;
   }
 

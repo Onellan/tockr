@@ -15,6 +15,14 @@ Default seed credentials from `docker-compose.yml`:
 
 Change `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` before production use.
 
+Useful environment variables:
+
+- `TOCKR_ADDR`: bind address inside the container, default `:8080`.
+- `TOCKR_DB_PATH`: SQLite database path.
+- `TOCKR_DATA_DIR`: invoice/static data directory.
+- `TOCKR_TOTP_MODE`: `disabled`, `optional`, or `required`.
+- `TOCKR_FUTURE_TIME_POLICY`: `allow`, `deny`, `end_of_day`, or `end_of_week`.
+
 ## Reverse Proxy
 
 Terminate TLS in the proxy and forward:

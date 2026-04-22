@@ -104,6 +104,8 @@ type User struct {
 	PasswordHash   string
 	Timezone       string
 	Enabled        bool
+	TOTPSecret     string
+	TOTPEnabled    bool
 	Roles          []Role
 	CreatedAt      time.Time
 	LastLoginAt    *time.Time
@@ -196,11 +198,24 @@ type Rate struct {
 	CustomerID          *int64
 	ProjectID           *int64
 	ActivityID          *int64
+	TaskID              *int64
 	UserID              *int64
 	Kind                string
 	AmountCents         int64
 	InternalAmountCents *int64
 	Fixed               bool
+	EffectiveFrom       time.Time
+	EffectiveTo         *time.Time
+}
+
+type UserCostRate struct {
+	ID            int64
+	WorkspaceID   int64
+	UserID        int64
+	AmountCents   int64
+	EffectiveFrom time.Time
+	EffectiveTo   *time.Time
+	CreatedAt     time.Time
 }
 
 type Timesheet struct {

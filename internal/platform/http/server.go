@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,11 +66,22 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireLoginMiddleware)
 		r.Get("/", s.dashboard)
+		r.Get("/account", s.account)
+		r.Post("/account", s.updateAccount)
+		r.Post("/account/password", s.updatePassword)
+		r.Post("/account/totp/enable", s.enableTOTP)
+		r.Post("/account/totp/disable", s.disableTOTP)
+		r.Post("/workspace", s.switchWorkspace)
 		r.Get("/customers", s.customers)
 		r.Post("/customers", s.requirePermission(auth.PermManageMaster, s.saveCustomer))
 		r.Get("/projects", s.projects)
 		r.Post("/projects", s.requirePermission(auth.PermManageMaster, s.saveProject))
 		r.Get("/projects/{id}/dashboard", s.projectDashboard)
+		r.Get("/projects/{id}/members", s.projectMembers)
+		r.Post("/projects/{id}/members", s.projectMemberSave)
+		r.Post("/projects/{id}/members/remove", s.projectMemberRemove)
+		r.Post("/projects/{id}/groups", s.projectGroupSave)
+		r.Post("/projects/{id}/groups/remove", s.projectGroupRemove)
 		r.Get("/activities", s.activities)
 		r.Post("/activities", s.requirePermission(auth.PermManageMaster, s.saveActivity))
 		r.Get("/tasks", s.tasks)
@@ -80,7 +92,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/groups", s.requirePermission(auth.PermManageGroups, s.saveGroup))
 		r.Get("/rates", s.requirePermission(auth.PermManageRates, s.rates))
 		r.Post("/rates", s.requirePermission(auth.PermManageRates, s.saveRate))
+		r.Post("/rates/costs", s.requirePermission(auth.PermManageRates, s.saveUserCostRate))
 		r.Get("/timesheets", s.timesheets)
+		r.Get("/calendar", s.calendar)
 		r.Post("/timesheets", s.saveTimesheet)
 		r.Post("/timesheets/start", s.startTimer)
 		r.Post("/favorites", s.saveFavorite)
@@ -187,7 +201,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login?message=Invalid+credentials", http.StatusSeeOther)
 		return
 	}
-	session, err := s.store.CreateSession(r.Context(), user.ID, 14*24*time.Hour)
+	if s.totpAvailable() && user.TOTPEnabled {
+		code := strings.TrimSpace(r.FormValue("totp"))
+		valid := auth.VerifyTOTP(user.TOTPSecret, code, time.Now().UTC())
+		if !valid {
+			var err error
+			valid, err = s.store.UseRecoveryCode(r.Context(), user.ID, code)
+			if err != nil {
+				s.serverError(w, r, err)
+				return
+			}
+		}
+		if !valid {
+			http.Redirect(w, r, "/login?message=Two-factor+code+required", http.StatusSeeOther)
+			return
+		}
+	}
+	session, err := s.store.CreateSession(r.Context(), user.ID, 0, 14*24*time.Hour)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -195,6 +225,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.TouchLogin(r.Context(), user.ID)
 	s.store.Audit(r.Context(), &user.ID, "login", "user", &user.ID, "")
 	http.SetCookie(w, s.cookie(session.ID))
+	if s.totpRequired() && !user.TOTPEnabled {
+		http.Redirect(w, r, "/account?message=Two-factor+setup+is+required", http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -205,6 +239,110 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "tockr_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+func (s *Server) account(w http.ResponseWriter, r *http.Request) {
+	state := s.state(r)
+	secret := ""
+	uri := ""
+	if s.totpAvailable() && !state.User.TOTPEnabled {
+		secret = auth.NewTOTPSecret()
+		uri = auth.TOTPURI("Tockr", state.User.Email, secret)
+	}
+	s.render(w, r, templates.Account(s.nav(r), *state.User, s.cfg.TOTPMode, secret, uri, nil, r.URL.Query().Get("message")))
+}
+
+func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	userID := s.state(r).User.ID
+	if err := s.store.UpdateProfile(r.Context(), userID, r.FormValue("display_name"), r.FormValue("timezone")); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), &userID, "update", "account", &userID, "profile")
+	http.Redirect(w, r, "/account?message=Profile+updated", http.StatusSeeOther)
+}
+
+func (s *Server) updatePassword(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	password := r.FormValue("password")
+	if len(password) < 8 || password != r.FormValue("confirm") {
+		http.Redirect(w, r, "/account?message=Password+confirmation+does+not+match", http.StatusSeeOther)
+		return
+	}
+	user := s.state(r).User
+	if !auth.CheckPassword(user.PasswordHash, r.FormValue("current_password")) {
+		http.Redirect(w, r, "/account?message=Current+password+is+incorrect", http.StatusSeeOther)
+		return
+	}
+	userID := user.ID
+	if err := s.store.UpdatePassword(r.Context(), userID, password); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), &userID, "update", "account", &userID, "password")
+	http.Redirect(w, r, "/account?message=Password+updated", http.StatusSeeOther)
+}
+
+func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
+	if !s.totpAvailable() {
+		http.Error(w, "totp disabled", http.StatusForbidden)
+		return
+	}
+	_ = r.ParseForm()
+	secret := strings.TrimSpace(r.FormValue("secret"))
+	if !auth.VerifyTOTP(secret, r.FormValue("code"), time.Now().UTC()) {
+		http.Redirect(w, r, "/account?message=Invalid+two-factor+code", http.StatusSeeOther)
+		return
+	}
+	codes := auth.NewRecoveryCodes(8)
+	userID := s.state(r).User.ID
+	if err := s.store.EnableTOTP(r.Context(), userID, secret, codes); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	user, _ := s.store.FindUserByID(r.Context(), userID)
+	s.store.Audit(r.Context(), &userID, "enable", "totp", &userID, "")
+	nav := s.nav(r)
+	if user != nil {
+		s.render(w, r, templates.Account(nav, *user, s.cfg.TOTPMode, "", "", codes, "Two-factor authentication enabled"))
+		return
+	}
+	http.Redirect(w, r, "/account?message=Two-factor+authentication+enabled", http.StatusSeeOther)
+}
+
+func (s *Server) disableTOTP(w http.ResponseWriter, r *http.Request) {
+	if s.totpRequired() {
+		http.Redirect(w, r, "/account?message=Two-factor+is+required+for+this+deployment", http.StatusSeeOther)
+		return
+	}
+	userID := s.state(r).User.ID
+	if err := s.store.DisableTOTP(r.Context(), userID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), &userID, "disable", "totp", &userID, "")
+	http.Redirect(w, r, "/account?message=Two-factor+authentication+disabled", http.StatusSeeOther)
+}
+
+func (s *Server) switchWorkspace(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	workspaceID := formInt(r, "workspace_id")
+	state := s.state(r)
+	ok, err := s.store.UserCanAccessWorkspace(r.Context(), state.User.ID, workspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if !ok {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := s.store.SwitchSessionWorkspace(r.Context(), state.Session.ID, workspaceID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, safeReturn(r, "/"), http.StatusSeeOther)
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +405,11 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := [][]string{}
 	for _, p := range items {
-		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable), fmt.Sprintf(`<a class="table-action" href="/projects/%d/dashboard">Dashboard</a>`, p.ID)})
+		actions := `<a class="table-action" href="/projects/` + fmt.Sprint(p.ID) + `/dashboard">Dashboard</a>`
+		if s.access(r).ManagesProject(p.ID) {
+			actions += templates.RowActionMenu(fmt.Sprintf("project-%d-actions", p.ID), "Project actions", s.nav(r).CSRF, []templates.MenuAction{{Label: "Members", Href: fmt.Sprintf("/projects/%d/members", p.ID)}})
+		}
+		rows = append(rows, []string{fmt.Sprint(p.ID), fmt.Sprint(p.CustomerID), p.Name, p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable), `<div class="row-actions">` + actions + `</div>`})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
@@ -295,6 +437,109 @@ func (s *Server) projectDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, r, templates.ProjectDashboard(s.nav(r), dashboard))
+}
+
+func (s *Server) projectMembers(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.authorizedProjectManagement(w, r)
+	if !ok {
+		return
+	}
+	members, err := s.store.ListProjectMembers(r.Context(), project.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	assignedGroups, err := s.store.ListProjectGroups(r.Context(), project.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	users, err := s.store.ListWorkspaceUsers(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	groups, err := s.store.ListGroups(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.ProjectMembers(s.nav(r), *project, members, users, assignedGroups, groups))
+}
+
+func (s *Server) projectMemberSave(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.authorizedProjectManagement(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	role := domain.ProjectRole(r.FormValue("role"))
+	if role != domain.ProjectRoleManager {
+		role = domain.ProjectRoleMember
+	}
+	userID := formInt(r, "user_id")
+	if ok, err := s.userInWorkspace(r.Context(), userID, s.access(r).WorkspaceID); err != nil {
+		s.serverError(w, r, err)
+		return
+	} else if !ok {
+		http.Error(w, "user is not in workspace", http.StatusForbidden)
+		return
+	}
+	if err := s.store.AddProjectMember(r.Context(), project.ID, userID, role); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "project_members", &project.ID, fmt.Sprintf("user=%d role=%s", userID, role))
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
+}
+
+func (s *Server) projectMemberRemove(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.authorizedProjectManagement(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	userID := formInt(r, "user_id")
+	if err := s.store.RemoveProjectMember(r.Context(), project.ID, userID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "project_members", &project.ID, fmt.Sprintf("remove_user=%d", userID))
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
+}
+
+func (s *Server) projectGroupSave(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.authorizedProjectManagement(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	groupID := formInt(r, "group_id")
+	if err := s.store.AddGroupToProject(r.Context(), project.ID, groupID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "project_groups", &project.ID, fmt.Sprintf("group=%d", groupID))
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
+}
+
+func (s *Server) projectGroupRemove(w http.ResponseWriter, r *http.Request) {
+	project, ok := s.authorizedProjectManagement(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	groupID := formInt(r, "group_id")
+	if err := s.store.RemoveGroupFromProject(r.Context(), project.ID, groupID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	actor := s.state(r).User.ID
+	s.store.Audit(r.Context(), &actor, "update", "project_groups", &project.ID, fmt.Sprintf("remove_group=%d", groupID))
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/members", project.ID), http.StatusSeeOther)
 }
 
 func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
@@ -440,11 +685,12 @@ func (s *Server) rates(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	rows := [][]string{}
-	for _, rate := range rates {
-		rows = append(rows, []string{fmt.Sprint(rate.ID), ptrText(rate.CustomerID), ptrText(rate.ProjectID), ptrText(rate.ActivityID), ptrText(rate.UserID), rate.Kind, fmt.Sprint(rate.AmountCents), ptrText(rate.InternalAmountCents), boolText(rate.Fixed)})
+	costs, err := s.store.ListUserCostRates(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
 	}
-	s.render(w, r, templates.EntityList[domain.Rate]("Rates", s.nav(r), []string{"ID", "Customer", "Project", "Activity", "User", "Kind", "Amount", "Internal", "Fixed"}, rows, templates.RateForm(s.nav(r))))
+	s.render(w, r, templates.Rates(s.nav(r), rates, costs))
 }
 
 func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
@@ -454,13 +700,36 @@ func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
 		CustomerID:          formOptionalInt(r, "customer_id"),
 		ProjectID:           formOptionalInt(r, "project_id"),
 		ActivityID:          formOptionalInt(r, "activity_id"),
+		TaskID:              formOptionalInt(r, "task_id"),
 		UserID:              formOptionalInt(r, "user_id"),
 		Kind:                "hourly",
 		AmountCents:         formInt(r, "amount_cents"),
 		InternalAmountCents: formOptionalInt(r, "internal_amount_cents"),
 		Fixed:               checkbox(r, "fixed"),
+		EffectiveFrom:       formDateOrEpoch(r, "effective_from"),
+		EffectiveTo:         formOptionalDate(r, "effective_to"),
 	}
 	if err := s.store.UpsertRate(r.Context(), rate); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/rates", http.StatusSeeOther)
+}
+
+func (s *Server) saveUserCostRate(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	rate := &domain.UserCostRate{
+		WorkspaceID:   s.access(r).WorkspaceID,
+		UserID:        formInt(r, "user_id"),
+		AmountCents:   formInt(r, "amount_cents"),
+		EffectiveFrom: formDateOrEpoch(r, "effective_from"),
+		EffectiveTo:   formOptionalDate(r, "effective_to"),
+	}
+	if rate.UserID == 0 || rate.AmountCents < 0 {
+		s.badRequest(w, r, errors.New("valid user and cost are required"))
+		return
+	}
+	if err := s.store.UpsertUserCostRate(r.Context(), rate); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
@@ -477,6 +746,25 @@ func (s *Server) timesheets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, r, templates.Timesheets(s.nav(r), timesheetRows(items)))
+}
+
+func (s *Server) calendar(w http.ResponseWriter, r *http.Request) {
+	start := weekStart(time.Now().UTC())
+	if date := parseDateParam(r, "date"); date != nil {
+		start = weekStart(date.UTC())
+	}
+	end := start.AddDate(0, 0, 7)
+	filter := s.timesheetScope(r)
+	filter.Begin = &start
+	filter.End = &end
+	filter.Page = 1
+	filter.Size = 500
+	items, _, err := s.store.ListTimesheets(r.Context(), filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Calendar(s.nav(r), start, items))
 }
 
 func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
@@ -872,7 +1160,7 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 					if err == nil && user != nil {
 						state.User = user
 						state.Session = session
-						access, err := s.store.AccessForUser(r.Context(), user.ID)
+						access, err := s.store.AccessForUserWorkspace(r.Context(), user.ID, session.WorkspaceID)
 						if err == nil {
 							state.Access = access
 						}
@@ -914,6 +1202,10 @@ func (s *Server) requireLogin(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		if s.mustSetupTOTP(r) {
+			http.Redirect(w, r, "/account?message=Two-factor+setup+is+required", http.StatusSeeOther)
+			return
+		}
 		next(w, r)
 	}
 }
@@ -922,6 +1214,10 @@ func (s *Server) requireLoginMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.state(r).User == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if s.mustSetupTOTP(r) {
+			http.Redirect(w, r, "/account?message=Two-factor+setup+is+required", http.StatusSeeOther)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -973,6 +1269,54 @@ func (s *Server) canTrackProject(r *http.Request, projectID int64) bool {
 	return access.IsWorkspaceAdmin() || !project.Private || access.CanAccessProject(projectID)
 }
 
+func (s *Server) authorizedProjectManagement(w http.ResponseWriter, r *http.Request) (*domain.Project, bool) {
+	projectID := pathID(r)
+	project, err := s.store.Project(r.Context(), projectID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return nil, false
+	}
+	if project == nil || project.WorkspaceID != s.access(r).WorkspaceID {
+		http.NotFound(w, r)
+		return nil, false
+	}
+	if !s.access(r).ManagesProject(projectID) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	return project, true
+}
+
+func (s *Server) userInWorkspace(ctx context.Context, userID, workspaceID int64) (bool, error) {
+	users, err := s.store.ListWorkspaceUsers(ctx, workspaceID)
+	if err != nil {
+		return false, err
+	}
+	for _, user := range users {
+		if user.ID == userID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Server) totpAvailable() bool {
+	return s.cfg.TOTPMode == "optional" || s.cfg.TOTPMode == "required"
+}
+
+func (s *Server) totpRequired() bool {
+	return s.cfg.TOTPMode == "required"
+}
+
+func (s *Server) mustSetupTOTP(r *http.Request) bool {
+	state := s.state(r)
+	if !s.totpRequired() || state.User == nil || state.User.TOTPEnabled {
+		return false
+	}
+	path := r.URL.Path
+	return path != "/account" && path != "/account/totp/enable" && path != "/logout" && !strings.HasPrefix(path, "/static/")
+}
+
 func accessibleProjectIDs(access domain.AccessContext) []int64 {
 	seen := map[int64]bool{}
 	ids := []int64{}
@@ -1021,7 +1365,18 @@ func (s *Server) nav(r *http.Request) *templates.NavUser {
 	} {
 		permissions[permission] = auth.HasPermission(state.Access, permission)
 	}
-	return &templates.NavUser{DisplayName: state.User.DisplayName, CSRF: state.Session.CSRFToken, CurrentPath: r.URL.Path, Permissions: permissions}
+	workspaces, _ := s.store.ListUserWorkspaces(r.Context(), state.User.ID)
+	currentName := ""
+	for _, workspace := range workspaces {
+		if workspace.ID == state.Access.WorkspaceID {
+			currentName = workspace.Name
+			break
+		}
+	}
+	if currentName == "" {
+		currentName = "Workspace"
+	}
+	return &templates.NavUser{DisplayName: state.User.DisplayName, Email: state.User.Email, CSRF: state.Session.CSRFToken, CurrentPath: r.URL.Path, Permissions: permissions, CurrentWorkspaceID: state.Access.WorkspaceID, CurrentWorkspaceName: currentName, Workspaces: workspaces}
 }
 
 func (s *Server) cookie(sessionID string) *http.Cookie {
@@ -1095,6 +1450,20 @@ func redirectOrJSON(w http.ResponseWriter, r *http.Request, location string) {
 	http.Redirect(w, r, location, http.StatusSeeOther)
 }
 
+func safeReturn(r *http.Request, fallback string) string {
+	ref := r.Header.Get("Referer")
+	if ref == "" {
+		return fallback
+	}
+	if parsed, err := url.Parse(ref); err == nil && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/") {
+		return parsed.RequestURI()
+	}
+	if parsed, err := url.Parse(ref); err == nil && parsed.Host == r.Host && strings.HasPrefix(parsed.Path, "/") {
+		return parsed.RequestURI()
+	}
+	return fallback
+}
+
 func page(r *http.Request) int {
 	value, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if value == 0 {
@@ -1146,6 +1515,26 @@ func formOptionalInt(r *http.Request, key string) *int64 {
 	return &value
 }
 
+func formDateOrEpoch(r *http.Request, key string) time.Time {
+	if value := formOptionalDate(r, key); value != nil {
+		return *value
+	}
+	return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+}
+
+func formOptionalDate(r *http.Request, key string) *time.Time {
+	value := strings.TrimSpace(r.FormValue(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil
+	}
+	parsed = parsed.UTC()
+	return &parsed
+}
+
 func checkbox(r *http.Request, key string) bool {
 	value := r.FormValue(key)
 	return value == "on" || value == "true" || value == "1"
@@ -1176,6 +1565,17 @@ func parseRange(startValue, endValue string) (time.Time, time.Time, error) {
 		return time.Time{}, time.Time{}, errors.New("end must be after start")
 	}
 	return start.UTC(), end.UTC(), nil
+}
+
+func weekStart(value time.Time) time.Time {
+	value = value.UTC()
+	y, m, d := value.Date()
+	day := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	weekday := int(day.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	return day.AddDate(0, 0, 1-weekday)
 }
 
 func checkFuturePolicy(policy string, start, end time.Time) error {

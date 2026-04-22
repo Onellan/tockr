@@ -23,10 +23,11 @@ type Store struct {
 }
 
 type Session struct {
-	ID        string
-	UserID    int64
-	CSRFToken string
-	ExpiresAt time.Time
+	ID          string
+	UserID      int64
+	WorkspaceID int64
+	CSRFToken   string
+	ExpiresAt   time.Time
 }
 
 type TimesheetFilter struct {
@@ -152,6 +153,10 @@ func (s *Store) Audit(ctx context.Context, userID *int64, action, entity string,
 }
 
 func (s *Store) AccessForUser(ctx context.Context, userID int64) (domain.AccessContext, error) {
+	return s.AccessForUserWorkspace(ctx, userID, 0)
+}
+
+func (s *Store) AccessForUserWorkspace(ctx context.Context, userID, workspaceID int64) (domain.AccessContext, error) {
 	access := domain.AccessContext{
 		UserID:            userID,
 		ManagedProjectIDs: map[int64]bool{},
@@ -167,10 +172,21 @@ func (s *Store) AccessForUser(ctx context.Context, userID int64) (domain.AccessC
 	}
 	access.OrganizationRole = domain.OrganizationRole(orgRole)
 	var workspaceRole string
-	err := s.db.QueryRowContext(ctx, `SELECT w.id, wm.role FROM workspace_members wm JOIN workspaces w ON w.id=wm.workspace_id WHERE wm.user_id=? ORDER BY w.id LIMIT 1`, userID).
-		Scan(&access.WorkspaceID, &workspaceRole)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return access, err
+	if workspaceID > 0 {
+		err := s.db.QueryRowContext(ctx, `SELECT w.id, COALESCE(wm.role,'') FROM workspaces w LEFT JOIN workspace_members wm ON wm.workspace_id=w.id AND wm.user_id=? WHERE w.id=?`, userID, workspaceID).
+			Scan(&access.WorkspaceID, &workspaceRole)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return access, err
+		}
+		if access.WorkspaceID > 0 && workspaceRole == "" && !access.IsOrgAdmin() {
+			access.WorkspaceID = 0
+		}
+	} else {
+		err := s.db.QueryRowContext(ctx, `SELECT w.id, wm.role FROM workspace_members wm JOIN workspaces w ON w.id=wm.workspace_id WHERE wm.user_id=? ORDER BY w.id LIMIT 1`, userID).
+			Scan(&access.WorkspaceID, &workspaceRole)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return access, err
+		}
 	}
 	access.WorkspaceRole = domain.WorkspaceRole(workspaceRole)
 	if access.WorkspaceID == 0 && access.IsOrgAdmin() {
@@ -179,7 +195,7 @@ func (s *Store) AccessForUser(ctx context.Context, userID int64) (domain.AccessC
 		}
 		access.WorkspaceRole = domain.WorkspaceRoleAdmin
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT project_id, role FROM project_members WHERE user_id=?`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT pm.project_id, pm.role FROM project_members pm JOIN projects p ON p.id=pm.project_id WHERE pm.user_id=? AND p.workspace_id=?`, userID, access.WorkspaceID)
 	if err != nil {
 		return access, err
 	}
@@ -198,7 +214,7 @@ func (s *Store) AccessForUser(ctx context.Context, userID int64) (domain.AccessC
 	if err := rows.Err(); err != nil {
 		return access, err
 	}
-	groupRows, err := s.db.QueryContext(ctx, `SELECT DISTINCT pg.project_id FROM group_members gm JOIN project_groups pg ON pg.group_id=gm.group_id WHERE gm.user_id=?`, userID)
+	groupRows, err := s.db.QueryContext(ctx, `SELECT DISTINCT pg.project_id FROM group_members gm JOIN project_groups pg ON pg.group_id=gm.group_id JOIN projects p ON p.id=pg.project_id WHERE gm.user_id=? AND p.workspace_id=?`, userID, access.WorkspaceID)
 	if err != nil {
 		return access, err
 	}
@@ -222,12 +238,12 @@ func (s *Store) FindUserByID(ctx context.Context, id int64) (*domain.User, error
 }
 
 func (s *Store) scanUser(ctx context.Context, where string, args ...any) (*domain.User, error) {
-	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, created_at, last_login_at FROM users ` + where
+	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, created_at, last_login_at FROM users ` + where
 	row := s.db.QueryRowContext(ctx, q, args...)
 	var u domain.User
 	var created string
 	var last sql.NullString
-	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &created, &last); err != nil {
+	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -264,7 +280,7 @@ func (s *Store) userRoles(ctx context.Context, userID int64) ([]domain.Role, err
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, created_at, last_login_at FROM users ORDER BY display_name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, created_at, last_login_at FROM users ORDER BY display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +289,49 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 		var u domain.User
 		var created string
 		var last sql.NullString
-		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &created, &last); err != nil {
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
+			return nil, err
+		}
+		u.CreatedAt = parseTime(created)
+		if last.Valid {
+			t := parseTime(last.String)
+			u.LastLoginAt = &t
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range users {
+		roles, err := s.userRoles(ctx, users[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		users[i].Roles = roles
+	}
+	return users, nil
+}
+
+func (s *Store) ListWorkspaceUsers(ctx context.Context, workspaceID int64) ([]domain.User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT u.id, u.organization_id, u.email, u.username, u.display_name, u.password_hash, u.timezone, u.enabled, u.totp_secret, u.totp_enabled, u.created_at, u.last_login_at
+		FROM users u
+		JOIN workspace_members wm ON wm.user_id=u.id
+		WHERE wm.workspace_id=?
+		ORDER BY u.display_name`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	var users []domain.User
+	for rows.Next() {
+		var u domain.User
+		var created string
+		var last sql.NullString
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		u.CreatedAt = parseTime(created)
@@ -345,6 +403,155 @@ func (s *Store) CreateUser(ctx context.Context, u domain.User, password string, 
 	return tx.Commit()
 }
 
+func (s *Store) UpdateProfile(ctx context.Context, userID int64, displayName, timezone string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET display_name=?, timezone=? WHERE id=?`, strings.TrimSpace(displayName), defaultString(strings.TrimSpace(timezone), "UTC"), userID)
+	return err
+}
+
+func (s *Store) UpdatePassword(ctx context.Context, userID int64, password string) error {
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE users SET password_hash=? WHERE id=?`, hash, userID)
+	return err
+}
+
+func (s *Store) EnableTOTP(ctx context.Context, userID int64, secret string, recoveryCodes []string) error {
+	hashes := []string{}
+	for _, code := range recoveryCodes {
+		hash, err := auth.HashPassword(code)
+		if err != nil {
+			return err
+		}
+		hashes = append(hashes, hash)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET totp_secret=?, totp_enabled=1, totp_recovery_hashes=? WHERE id=?`, secret, strings.Join(hashes, "\n"), userID)
+	return err
+}
+
+func (s *Store) DisableTOTP(ctx context.Context, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET totp_secret='', totp_enabled=0, totp_recovery_hashes='' WHERE id=?`, userID)
+	return err
+}
+
+func (s *Store) UseRecoveryCode(ctx context.Context, userID int64, code string) (bool, error) {
+	var raw string
+	if err := s.db.QueryRowContext(ctx, `SELECT totp_recovery_hashes FROM users WHERE id=?`, userID).Scan(&raw); err != nil {
+		return false, err
+	}
+	hashes := splitLines(raw)
+	for index, hash := range hashes {
+		if auth.CheckPassword(hash, code) {
+			hashes = append(hashes[:index], hashes[index+1:]...)
+			_, err := s.db.ExecContext(ctx, `UPDATE users SET totp_recovery_hashes=? WHERE id=?`, strings.Join(hashes, "\n"), userID)
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+func splitLines(value string) []string {
+	raw := strings.Split(value, "\n")
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func hasOrgAdminMembership(ctx context.Context, db *sql.DB, userID, organizationID int64) bool {
+	var role string
+	err := db.QueryRowContext(ctx, `SELECT role FROM organization_members WHERE user_id=? AND organization_id=?`, userID, organizationID).Scan(&role)
+	return err == nil && (role == string(domain.OrgRoleOwner) || role == string(domain.OrgRoleAdmin))
+}
+
+func (s *Store) ListUserWorkspaces(ctx context.Context, userID int64) ([]domain.Workspace, error) {
+	user, err := s.FindUserByID(ctx, userID)
+	if err != nil || user == nil {
+		return nil, err
+	}
+	query := `SELECT w.id, w.organization_id, w.name, w.slug, w.default_currency, w.timezone, w.created_at
+		FROM workspaces w
+		JOIN workspace_members wm ON wm.workspace_id=w.id
+		WHERE wm.user_id=?
+		ORDER BY w.name`
+	args := []any{userID}
+	if hasOrgAdminMembership(ctx, s.db, userID, user.OrganizationID) {
+		query = `SELECT w.id, w.organization_id, w.name, w.slug, w.default_currency, w.timezone, w.created_at
+			FROM workspaces w
+			WHERE w.organization_id=?
+			ORDER BY w.name`
+		args = []any{user.OrganizationID}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	workspaces := []domain.Workspace{}
+	for rows.Next() {
+		var w domain.Workspace
+		var created string
+		if err := rows.Scan(&w.ID, &w.OrganizationID, &w.Name, &w.Slug, &w.DefaultCurrency, &w.Timezone, &created); err != nil {
+			return nil, err
+		}
+		w.CreatedAt = parseTime(created)
+		workspaces = append(workspaces, w)
+	}
+	return workspaces, rows.Err()
+}
+
+func (s *Store) Workspace(ctx context.Context, id int64) (*domain.Workspace, error) {
+	var w domain.Workspace
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT id, organization_id, name, slug, default_currency, timezone, created_at FROM workspaces WHERE id=?`, id).
+		Scan(&w.ID, &w.OrganizationID, &w.Name, &w.Slug, &w.DefaultCurrency, &w.Timezone, &created)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	w.CreatedAt = parseTime(created)
+	return &w, nil
+}
+
+func (s *Store) UserCanAccessWorkspace(ctx context.Context, userID, workspaceID int64) (bool, error) {
+	workspaces, err := s.ListUserWorkspaces(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	for _, workspace := range workspaces {
+		if workspace.ID == workspaceID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) SwitchSessionWorkspace(ctx context.Context, sessionID string, workspaceID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET workspace_id=? WHERE id=?`, workspaceID, sessionID)
+	return err
+}
+
+func (s *Store) defaultWorkspaceForUser(ctx context.Context, userID int64) int64 {
+	var workspaceID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM workspace_members WHERE user_id=? ORDER BY workspace_id LIMIT 1`, userID).Scan(&workspaceID); err == nil && workspaceID > 0 {
+		return workspaceID
+	}
+	var organizationID int64
+	if err := s.db.QueryRowContext(ctx, `SELECT organization_id FROM users WHERE id=?`, userID).Scan(&organizationID); err == nil && organizationID > 0 {
+		if err := s.db.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, organizationID).Scan(&workspaceID); err == nil && workspaceID > 0 {
+			return workspaceID
+		}
+	}
+	return 1
+}
+
 func (s *Store) ListGroups(ctx context.Context, workspaceID int64) ([]domain.Group, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, description, created_at FROM groups WHERE workspace_id=? ORDER BY name`, workspaceID)
 	if err != nil {
@@ -385,9 +592,58 @@ func (s *Store) AddProjectMember(ctx context.Context, projectID, userID int64, r
 	return err
 }
 
+func (s *Store) RemoveProjectMember(ctx context.Context, projectID, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM project_members WHERE project_id=? AND user_id=?`, projectID, userID)
+	return err
+}
+
 func (s *Store) AddGroupToProject(ctx context.Context, projectID, groupID int64) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO project_groups(project_id, group_id, created_at) VALUES(?,?,?)`, projectID, groupID, utcNow())
 	return err
+}
+
+func (s *Store) RemoveGroupFromProject(ctx context.Context, projectID, groupID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM project_groups WHERE project_id=? AND group_id=?`, projectID, groupID)
+	return err
+}
+
+func (s *Store) ListProjectMembers(ctx context.Context, projectID int64) ([]domain.ProjectMember, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT project_id, user_id, role, created_at FROM project_members WHERE project_id=? ORDER BY user_id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := []domain.ProjectMember{}
+	for rows.Next() {
+		var member domain.ProjectMember
+		var role, created string
+		if err := rows.Scan(&member.ProjectID, &member.UserID, &role, &created); err != nil {
+			return nil, err
+		}
+		member.Role = domain.ProjectRole(role)
+		member.CreatedAt = parseTime(created)
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
+func (s *Store) ListProjectGroups(ctx context.Context, projectID int64) ([]domain.Group, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT g.id, g.workspace_id, g.name, g.description, g.created_at FROM groups g JOIN project_groups pg ON pg.group_id=g.id WHERE pg.project_id=? ORDER BY g.name`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	groups := []domain.Group{}
+	for rows.Next() {
+		var group domain.Group
+		var created string
+		if err := rows.Scan(&group.ID, &group.WorkspaceID, &group.Name, &group.Description, &created); err != nil {
+			return nil, err
+		}
+		group.CreatedAt = parseTime(created)
+		groups = append(groups, group)
+	}
+	return groups, rows.Err()
 }
 
 func (s *Store) ListFavorites(ctx context.Context, workspaceID, userID int64) ([]domain.Favorite, error) {
@@ -446,17 +702,20 @@ func (s *Store) TouchLogin(ctx context.Context, userID int64) error {
 	return err
 }
 
-func (s *Store) CreateSession(ctx context.Context, userID int64, ttl time.Duration) (*Session, error) {
-	session := &Session{ID: randomToken(32), UserID: userID, CSRFToken: randomToken(32), ExpiresAt: time.Now().UTC().Add(ttl)}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id, user_id, csrf_token, expires_at, created_at) VALUES(?,?,?,?,?)`,
-		session.ID, session.UserID, session.CSRFToken, formatTime(session.ExpiresAt), utcNow())
+func (s *Store) CreateSession(ctx context.Context, userID, workspaceID int64, ttl time.Duration) (*Session, error) {
+	if workspaceID == 0 {
+		workspaceID = s.defaultWorkspaceForUser(ctx, userID)
+	}
+	session := &Session{ID: randomToken(32), UserID: userID, WorkspaceID: workspaceID, CSRFToken: randomToken(32), ExpiresAt: time.Now().UTC().Add(ttl)}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id, user_id, workspace_id, csrf_token, expires_at, created_at) VALUES(?,?,?,?,?,?)`,
+		session.ID, session.UserID, session.WorkspaceID, session.CSRFToken, formatTime(session.ExpiresAt), utcNow())
 	return session, err
 }
 
 func (s *Store) FindSession(ctx context.Context, id string) (*Session, error) {
 	var session Session
 	var expires string
-	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, csrf_token, expires_at FROM sessions WHERE id=?`, id).Scan(&session.ID, &session.UserID, &session.CSRFToken, &expires)
+	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, workspace_id, csrf_token, expires_at FROM sessions WHERE id=?`, id).Scan(&session.ID, &session.UserID, &session.WorkspaceID, &session.CSRFToken, &expires)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -789,22 +1048,29 @@ func (s *Store) UpsertRate(ctx context.Context, r *domain.Rate) error {
 	if r.WorkspaceID == 0 {
 		r.WorkspaceID = 1
 	}
+	if r.EffectiveFrom.IsZero() {
+		r.EffectiveFrom = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	var effectiveTo any
+	if r.EffectiveTo != nil {
+		effectiveTo = formatTime(*r.EffectiveTo)
+	}
 	if r.ID == 0 {
-		res, err := s.db.ExecContext(ctx, `INSERT INTO rates(workspace_id, customer_id, project_id, activity_id, user_id, kind, amount_cents, internal_amount_cents, fixed) VALUES(?,?,?,?,?,?,?,?,?)`,
-			r.WorkspaceID, r.CustomerID, r.ProjectID, r.ActivityID, r.UserID, defaultString(r.Kind, "hourly"), r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed))
+		res, err := s.db.ExecContext(ctx, `INSERT INTO rates(workspace_id, customer_id, project_id, activity_id, task_id, user_id, kind, amount_cents, internal_amount_cents, fixed, effective_from, effective_to) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			r.WorkspaceID, r.CustomerID, r.ProjectID, r.ActivityID, r.TaskID, r.UserID, defaultString(r.Kind, "hourly"), r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed), formatTime(r.EffectiveFrom), effectiveTo)
 		if err != nil {
 			return err
 		}
 		r.ID, err = res.LastInsertId()
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE rates SET workspace_id=?, customer_id=?, project_id=?, activity_id=?, user_id=?, kind=?, amount_cents=?, internal_amount_cents=?, fixed=? WHERE id=?`,
-		r.WorkspaceID, r.CustomerID, r.ProjectID, r.ActivityID, r.UserID, r.Kind, r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed), r.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE rates SET workspace_id=?, customer_id=?, project_id=?, activity_id=?, task_id=?, user_id=?, kind=?, amount_cents=?, internal_amount_cents=?, fixed=?, effective_from=?, effective_to=? WHERE id=?`,
+		r.WorkspaceID, r.CustomerID, r.ProjectID, r.ActivityID, r.TaskID, r.UserID, r.Kind, r.AmountCents, r.InternalAmountCents, boolInt(r.Fixed), formatTime(r.EffectiveFrom), effectiveTo, r.ID)
 	return err
 }
 
 func (s *Store) ListRates(ctx context.Context, workspaceID int64) ([]domain.Rate, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, customer_id, project_id, activity_id, user_id, kind, amount_cents, internal_amount_cents, fixed FROM rates WHERE workspace_id=? ORDER BY id DESC`, workspaceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, customer_id, project_id, activity_id, task_id, user_id, kind, amount_cents, internal_amount_cents, fixed, effective_from, effective_to FROM rates WHERE workspace_id=? ORDER BY effective_from DESC, id DESC`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -812,47 +1078,142 @@ func (s *Store) ListRates(ctx context.Context, workspaceID int64) ([]domain.Rate
 	var rates []domain.Rate
 	for rows.Next() {
 		var r domain.Rate
-		var customer, project, activity, user, internal sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.WorkspaceID, &customer, &project, &activity, &user, &r.Kind, &r.AmountCents, &internal, &r.Fixed); err != nil {
+		var customer, project, activity, task, user, internal sql.NullInt64
+		var effectiveFrom string
+		var effectiveTo sql.NullString
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &customer, &project, &activity, &task, &user, &r.Kind, &r.AmountCents, &internal, &r.Fixed, &effectiveFrom, &effectiveTo); err != nil {
 			return nil, err
 		}
 		r.CustomerID = nullableInt(customer)
 		r.ProjectID = nullableInt(project)
 		r.ActivityID = nullableInt(activity)
+		r.TaskID = nullableInt(task)
 		r.UserID = nullableInt(user)
 		r.InternalAmountCents = nullableInt(internal)
+		r.EffectiveFrom = parseTime(effectiveFrom)
+		if effectiveTo.Valid {
+			value := parseTime(effectiveTo.String)
+			r.EffectiveTo = &value
+		}
 		rates = append(rates, r)
 	}
 	return rates, rows.Err()
 }
 
 func (s *Store) ResolveRate(ctx context.Context, workspaceID, userID, customerID, projectID, activityID int64) (int64, *int64, error) {
+	return s.ResolveRateAt(ctx, workspaceID, userID, customerID, projectID, activityID, nil, time.Now().UTC())
+}
+
+func (s *Store) ResolveRateAt(ctx context.Context, workspaceID, userID, customerID, projectID, activityID int64, taskID *int64, at time.Time) (int64, *int64, error) {
 	candidates := []struct {
 		where string
 		args  []any
 	}{
-		{"activity_id=? AND user_id=?", []any{activityID, userID}},
-		{"activity_id=? AND user_id IS NULL", []any{activityID}},
-		{"project_id=? AND user_id=?", []any{projectID, userID}},
-		{"project_id=? AND user_id IS NULL", []any{projectID}},
-		{"customer_id=? AND user_id=?", []any{customerID, userID}},
-		{"customer_id=? AND user_id IS NULL", []any{customerID}},
-		{"customer_id IS NULL AND project_id IS NULL AND activity_id IS NULL AND user_id=?", []any{userID}},
-		{"customer_id IS NULL AND project_id IS NULL AND activity_id IS NULL AND user_id IS NULL", nil},
+		{"activity_id=? AND task_id IS NULL AND user_id=?", []any{activityID, userID}},
+		{"activity_id=? AND task_id IS NULL AND user_id IS NULL", []any{activityID}},
+		{"project_id=? AND task_id IS NULL AND user_id=?", []any{projectID, userID}},
+		{"project_id=? AND task_id IS NULL AND user_id IS NULL", []any{projectID}},
+		{"customer_id=? AND project_id IS NULL AND activity_id IS NULL AND task_id IS NULL AND user_id=?", []any{customerID, userID}},
+		{"customer_id=? AND project_id IS NULL AND activity_id IS NULL AND task_id IS NULL AND user_id IS NULL", []any{customerID}},
+		{"customer_id IS NULL AND project_id IS NULL AND activity_id IS NULL AND task_id IS NULL AND user_id=?", []any{userID}},
+		{"customer_id IS NULL AND project_id IS NULL AND activity_id IS NULL AND task_id IS NULL AND user_id IS NULL", nil},
+	}
+	if taskID != nil {
+		taskCandidates := []struct {
+			where string
+			args  []any
+		}{
+			{"task_id=? AND user_id=?", []any{*taskID, userID}},
+			{"task_id=? AND user_id IS NULL", []any{*taskID}},
+		}
+		candidates = append(taskCandidates, candidates...)
 	}
 	for _, candidate := range candidates {
 		var amount int64
 		var internal sql.NullInt64
 		args := append([]any{workspaceID}, candidate.args...)
-		err := s.db.QueryRowContext(ctx, `SELECT amount_cents, internal_amount_cents FROM rates WHERE workspace_id=? AND `+candidate.where+` ORDER BY id DESC LIMIT 1`, args...).Scan(&amount, &internal)
+		args = append(args, formatTime(at))
+		err := s.db.QueryRowContext(ctx, `SELECT amount_cents, internal_amount_cents FROM rates WHERE workspace_id=? AND `+candidate.where+` AND effective_from<=? AND (effective_to IS NULL OR effective_to='' OR effective_to>?) ORDER BY effective_from DESC, id DESC LIMIT 1`, append(args, formatTime(at))...).Scan(&amount, &internal)
 		if err == nil {
-			return amount, nullableInt(internal), nil
+			cost := nullableInt(internal)
+			if cost == nil {
+				userCost, err := s.ResolveUserCostAt(ctx, workspaceID, userID, at)
+				if err != nil {
+					return 0, nil, err
+				}
+				cost = userCost
+			}
+			return amount, cost, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return 0, nil, err
 		}
 	}
-	return 0, nil, nil
+	userCost, err := s.ResolveUserCostAt(ctx, workspaceID, userID, at)
+	return 0, userCost, err
+}
+
+func (s *Store) UpsertUserCostRate(ctx context.Context, r *domain.UserCostRate) error {
+	if r.WorkspaceID == 0 {
+		r.WorkspaceID = 1
+	}
+	if r.EffectiveFrom.IsZero() {
+		r.EffectiveFrom = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	var effectiveTo any
+	if r.EffectiveTo != nil {
+		effectiveTo = formatTime(*r.EffectiveTo)
+	}
+	if r.ID == 0 {
+		res, err := s.db.ExecContext(ctx, `INSERT INTO user_cost_rates(workspace_id, user_id, amount_cents, effective_from, effective_to, created_at) VALUES(?,?,?,?,?,?)`,
+			r.WorkspaceID, r.UserID, r.AmountCents, formatTime(r.EffectiveFrom), effectiveTo, utcNow())
+		if err != nil {
+			return err
+		}
+		r.ID, err = res.LastInsertId()
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE user_cost_rates SET workspace_id=?, user_id=?, amount_cents=?, effective_from=?, effective_to=? WHERE id=?`,
+		r.WorkspaceID, r.UserID, r.AmountCents, formatTime(r.EffectiveFrom), effectiveTo, r.ID)
+	return err
+}
+
+func (s *Store) ListUserCostRates(ctx context.Context, workspaceID int64) ([]domain.UserCostRate, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, user_id, amount_cents, effective_from, effective_to, created_at FROM user_cost_rates WHERE workspace_id=? ORDER BY effective_from DESC, id DESC`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rates []domain.UserCostRate
+	for rows.Next() {
+		var rate domain.UserCostRate
+		var effectiveFrom, created string
+		var effectiveTo sql.NullString
+		if err := rows.Scan(&rate.ID, &rate.WorkspaceID, &rate.UserID, &rate.AmountCents, &effectiveFrom, &effectiveTo, &created); err != nil {
+			return nil, err
+		}
+		rate.EffectiveFrom = parseTime(effectiveFrom)
+		if effectiveTo.Valid {
+			value := parseTime(effectiveTo.String)
+			rate.EffectiveTo = &value
+		}
+		rate.CreatedAt = parseTime(created)
+		rates = append(rates, rate)
+	}
+	return rates, rows.Err()
+}
+
+func (s *Store) ResolveUserCostAt(ctx context.Context, workspaceID, userID int64, at time.Time) (*int64, error) {
+	var amount int64
+	err := s.db.QueryRowContext(ctx, `SELECT amount_cents FROM user_cost_rates WHERE workspace_id=? AND user_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to='' OR effective_to>?) ORDER BY effective_from DESC, id DESC LIMIT 1`,
+		workspaceID, userID, formatTime(at), formatTime(at)).Scan(&amount)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &amount, nil
 }
 
 func (s *Store) StartTimer(ctx context.Context, t *domain.Timesheet, tagNames []string) error {
@@ -872,7 +1233,7 @@ func (s *Store) StartTimer(ctx context.Context, t *domain.Timesheet, tagNames []
 	if t.WorkspaceID == 0 {
 		t.WorkspaceID = 1
 	}
-	rate, internal, err := s.ResolveRate(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID)
+	rate, internal, err := s.ResolveRateAt(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID, t.TaskID, t.StartedAt)
 	if err != nil {
 		return err
 	}
@@ -891,7 +1252,7 @@ func (s *Store) CreateTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 	if t.WorkspaceID == 0 {
 		t.WorkspaceID = 1
 	}
-	rate, internal, err := s.ResolveRate(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID)
+	rate, internal, err := s.ResolveRateAt(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID, t.TaskID, t.StartedAt)
 	if err != nil {
 		return err
 	}
@@ -1589,7 +1950,13 @@ func eventAllowed(events []string, event string) bool {
 func (s *Store) ensureHierarchy(ctx context.Context) error {
 	adds := map[string]map[string]string{
 		"users": {
-			"organization_id": "INTEGER NOT NULL DEFAULT 1",
+			"organization_id":      "INTEGER NOT NULL DEFAULT 1",
+			"totp_secret":          "TEXT NOT NULL DEFAULT ''",
+			"totp_enabled":         "INTEGER NOT NULL DEFAULT 0",
+			"totp_recovery_hashes": "TEXT NOT NULL DEFAULT ''",
+		},
+		"sessions": {
+			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
 		},
 		"customers": {
 			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
@@ -1608,7 +1975,10 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
 		},
 		"rates": {
-			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
+			"workspace_id":   "INTEGER NOT NULL DEFAULT 1",
+			"task_id":        "INTEGER",
+			"effective_from": "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z'",
+			"effective_to":   "TEXT",
 		},
 		"timesheets": {
 			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
@@ -1642,6 +2012,8 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 		`UPDATE activities SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
 		`UPDATE tags SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
 		`UPDATE rates SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
+		`UPDATE rates SET effective_from='1970-01-01T00:00:00Z' WHERE effective_from IS NULL OR effective_from=''`,
+		`UPDATE sessions SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
 		`UPDATE timesheets SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
 		`UPDATE invoices SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
 		`UPDATE webhook_endpoints SET workspace_id=1 WHERE workspace_id IS NULL OR workspace_id=0`,
@@ -1680,6 +2052,9 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_timesheets_task_started ON timesheets(task_id, started_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_favorites_user_workspace ON favorites(user_id, workspace_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_saved_reports_user_workspace ON saved_reports(user_id, workspace_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_rates_workspace_effective ON rates(workspace_id, effective_from DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_rates_workspace_task_effective ON rates(workspace_id, task_id, effective_from DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_cost_rates_effective ON user_cost_rates(workspace_id, user_id, effective_from DESC)`,
 	}
 	for _, query := range indexes {
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
@@ -1732,13 +2107,16 @@ CREATE TABLE IF NOT EXISTS users(
 	password_hash TEXT NOT NULL,
 	timezone TEXT NOT NULL DEFAULT 'UTC',
 	enabled INTEGER NOT NULL DEFAULT 1,
+	totp_secret TEXT NOT NULL DEFAULT '',
+	totp_enabled INTEGER NOT NULL DEFAULT 0,
+	totp_recovery_hashes TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	last_login_at TEXT
 );
 CREATE TABLE IF NOT EXISTS user_roles(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, PRIMARY KEY(user_id, role_id));
 CREATE TABLE IF NOT EXISTS organization_members(organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('owner','admin')), created_at TEXT NOT NULL, PRIMARY KEY(organization_id, user_id));
 CREATE TABLE IF NOT EXISTS workspace_members(workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('admin','analyst','member')), created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, user_id));
-CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE, csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS teams(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS team_members(team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, lead INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(team_id, user_id));
 CREATE TABLE IF NOT EXISTS groups(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(workspace_id, name));
@@ -1810,11 +2188,23 @@ CREATE TABLE IF NOT EXISTS rates(
 	customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
 	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
 	activity_id INTEGER REFERENCES activities(id) ON DELETE CASCADE,
+	task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
 	user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
 	kind TEXT NOT NULL DEFAULT 'hourly',
 	amount_cents INTEGER NOT NULL,
 	internal_amount_cents INTEGER,
-	fixed INTEGER NOT NULL DEFAULT 0
+	fixed INTEGER NOT NULL DEFAULT 0,
+	effective_from TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z',
+	effective_to TEXT
+);
+CREATE TABLE IF NOT EXISTS user_cost_rates(
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	amount_cents INTEGER NOT NULL,
+	effective_from TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z',
+	effective_to TEXT,
+	created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tags(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, visible INTEGER NOT NULL DEFAULT 1, UNIQUE(workspace_id, name));
 CREATE TABLE IF NOT EXISTS timesheets(
@@ -1824,6 +2214,7 @@ CREATE TABLE IF NOT EXISTS timesheets(
 	customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
 	project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 	activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+	task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
 	started_at TEXT NOT NULL,
 	ended_at TEXT,
 	timezone TEXT NOT NULL DEFAULT 'UTC',

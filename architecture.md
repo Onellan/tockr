@@ -13,11 +13,11 @@ Tockr is a lightweight Kimai-inspired time tracking application designed for Ras
 
 ## Modules
 
-- `internal/auth`: login, logout, password hashing, role/permission checks, sessions.
+- `internal/auth`: login, logout, password hashing, optional TOTP, role/permission checks, sessions.
 - `internal/users`: user administration.
 - `internal/customers`, `internal/projects`, `internal/activities`: master data.
 - `internal/timesheets`: timer start/stop, manual time entry, filtering, tagging, future-time policy.
-- `internal/rates`: simple scoped rate resolution.
+- `internal/rates`: scoped, effective-dated billable rates and user cost resolution.
 - `internal/reports`: dashboard, customer, activity, project, and user rollups.
 - `internal/invoices`: invoice records, invoice metadata, CSV export, invoice document download.
 - `internal/webhooks`: signed JSON webhooks with in-process retry.
@@ -30,6 +30,6 @@ Tockr is a lightweight Kimai-inspired time tracking application designed for Ras
 - Timestamps are stored as UTC RFC3339 text.
 - Lists are paginated by default.
 - Reports are aggregation queries, not background materialization.
+- Calendar is a read-only weekly projection over existing timesheet queries.
 - Webhooks run in-process and persist delivery attempts for retry.
 - The app avoids ORM reflection and heavyweight template engines.
-

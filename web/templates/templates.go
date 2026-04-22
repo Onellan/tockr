@@ -18,10 +18,14 @@ import (
 )
 
 type NavUser struct {
-	DisplayName string
-	CSRF        string
-	CurrentPath string
-	Permissions map[string]bool
+	DisplayName          string
+	Email                string
+	CSRF                 string
+	CurrentPath          string
+	Permissions          map[string]bool
+	CurrentWorkspaceID   int64
+	CurrentWorkspaceName string
+	Workspaces           []domain.Workspace
 }
 
 type navItem struct {
@@ -34,6 +38,7 @@ type navItem struct {
 var primaryNav = []navItem{
 	{"Dashboard", "/", "Work", ""},
 	{"Timesheets", "/timesheets", "Work", auth.PermTrackTime},
+	{"Calendar", "/calendar", "Work", auth.PermTrackTime},
 	{"Customers", "/customers", "Manage", ""},
 	{"Projects", "/projects", "Manage", ""},
 	{"Tasks", "/tasks", "Manage", ""},
@@ -64,9 +69,10 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><nav class="side-nav" aria-label="Primary navigation">`)
 		renderNav(w, user, primaryNav)
 		renderNav(w, user, adminNav)
-		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div>`, esc(title))
+		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
+		renderWorkspaceSwitcher(w, user)
 		renderAccountDropdown(w, user)
-		_, _ = fmt.Fprint(w, `</header><main class="content" id="main-content" tabindex="-1">`)
+		_, _ = fmt.Fprint(w, `</div></header><main class="content" id="main-content" tabindex="-1">`)
 		if err := body.Render(ctx, w); err != nil {
 			return err
 		}
@@ -81,7 +87,7 @@ func Login(message string) templ.Component {
 		if message != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
 		}
-		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button class="primary full">Login</button></form></section>`)
+		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><label>Two-factor code <input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Only if enabled"></label><button class="primary full">Login</button></form></section>`)
 		return nil
 	}))
 }
@@ -191,9 +197,44 @@ func GroupForm(user *NavUser) templ.Component {
 
 func RateForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/rates"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id"></label><label>Project ID<input name="project_id"></label><label>Activity ID<input name="activity_id"></label><label>User ID<input name="user_id"></label><label>Hourly amount cents<input name="amount_cents" required></label><label>Internal cents<input name="internal_amount_cents"></label><label class="check"><input type="checkbox" name="fixed"> Fixed rate</label><div class="form-actions"><button class="primary">Save rate</button></div></form>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/rates"><input type="hidden" name="csrf" value="%s"><label>Customer ID<input name="customer_id"></label><label>Project ID<input name="project_id"></label><label>Activity ID<input name="activity_id"></label><label>Task ID<input name="task_id"></label><label>User ID<input name="user_id"></label><label>Hourly amount cents<input name="amount_cents" required></label><label>Internal cents<input name="internal_amount_cents"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to<input type="date" name="effective_to"></label><label class="check"><input type="checkbox" name="fixed"> Fixed rate</label><div class="form-actions"><button class="primary">Save rate</button></div></form>`, esc(user.CSRF))
 		return nil
 	})
+}
+
+func UserCostForm(user *NavUser) templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/rates/costs"><input type="hidden" name="csrf" value="%s"><label>User ID<input name="user_id" required></label><label>Hourly cost cents<input name="amount_cents" required></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to<input type="date" name="effective_to"></label><div class="form-actions"><button class="primary">Save user cost</button></div></form>`, esc(user.CSRF))
+		return nil
+	})
+}
+
+func Rates(user *NavUser, rates []domain.Rate, costs []domain.UserCostRate) templ.Component {
+	return Layout("Rates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Rates", "Financial controls", "Date-effective billable rates and user cost rates for auditable reporting.")
+		_, _ = fmt.Fprint(w, `<section class="two-col">`)
+		_, _ = fmt.Fprint(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Billable rate</h2><p>Scope by customer, project, activity, task, or user.</p></div></div>`)
+		if err := RateForm(user).Render(ctx, w); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprint(w, `</div><div class="panel form-panel"><div class="panel-head"><div><h2>User cost</h2><p>Use effective dates before profitability reporting.</p></div></div>`)
+		if err := UserCostForm(user).Render(ctx, w); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprint(w, `</div></section>`)
+		rateRows := [][]string{}
+		for _, rate := range rates {
+			rateRows = append(rateRows, []string{fmt.Sprint(rate.ID), ptrText(rate.CustomerID), ptrText(rate.ProjectID), ptrText(rate.ActivityID), ptrText(rate.TaskID), ptrText(rate.UserID), money(rate.AmountCents), ptrText(rate.InternalAmountCents), dateInput(&rate.EffectiveFrom), dateInput(rate.EffectiveTo)})
+		}
+		dataTable(w, []string{"ID", "Customer", "Project", "Activity", "Task", "User", "Bill rate", "Internal", "From", "To"}, rateRows)
+		costRows := [][]string{}
+		for _, cost := range costs {
+			costRows = append(costRows, []string{fmt.Sprint(cost.ID), fmt.Sprint(cost.UserID), money(cost.AmountCents), dateInput(&cost.EffectiveFrom), dateInput(cost.EffectiveTo)})
+		}
+		_, _ = fmt.Fprint(w, `<div class="section-spacer"></div>`)
+		dataTable(w, []string{"ID", "User", "Cost", "From", "To"}, costRows)
+		return nil
+	}))
 }
 
 func Timesheets(user *NavUser, rows [][]string) templ.Component {
@@ -248,6 +289,94 @@ func ProjectDashboard(user *NavUser, d domain.ProjectDashboard) templ.Component 
 		if d.Alert {
 			_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold.</div>`)
 		}
+		return nil
+	}))
+}
+
+func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet) templ.Component {
+	return Layout("Calendar", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Calendar", "Time review", "A lightweight weekly view of time entries without drag-and-drop complexity.")
+		prev := weekStart.AddDate(0, 0, -7).Format("2006-01-02")
+		next := weekStart.AddDate(0, 0, 7).Format("2006-01-02")
+		_, _ = fmt.Fprintf(w, `<div class="tabs"><a class="tab-link" href="/calendar?date=%s">Previous week</a><a class="tab-link active" aria-current="page" href="/calendar?date=%s">%s</a><a class="tab-link" href="/calendar?date=%s">Next week</a></div><section class="calendar-grid">`, esc(prev), esc(weekStart.Format("2006-01-02")), esc(weekStart.Format("Jan 2")+" - "+weekStart.AddDate(0, 0, 6).Format("Jan 2")), esc(next))
+		for day := 0; day < 7; day++ {
+			current := weekStart.AddDate(0, 0, day)
+			total := int64(0)
+			for _, entry := range entries {
+				if sameDay(entry.StartedAt, current) {
+					total += entry.DurationSeconds
+				}
+			}
+			_, _ = fmt.Fprintf(w, `<article class="calendar-day"><div class="calendar-day-head"><strong>%s</strong><span>%s</span></div>`, esc(current.Format("Mon 02")), esc(duration(total)))
+			empty := true
+			for _, entry := range entries {
+				if !sameDay(entry.StartedAt, current) {
+					continue
+				}
+				empty = false
+				_, _ = fmt.Fprintf(w, `<div class="calendar-entry"><strong>%s</strong><span>%s · Project %d</span><small>%s</small></div>`, esc(timeRange(entry)), esc(duration(entry.DurationSeconds)), entry.ProjectID, esc(entry.Description))
+			}
+			if empty {
+				_, _ = fmt.Fprint(w, `<div class="calendar-empty">No entries</div>`)
+			}
+			_, _ = fmt.Fprint(w, `</article>`)
+		}
+		_, _ = fmt.Fprint(w, `</section>`)
+		return nil
+	}))
+}
+
+func Account(user *NavUser, account domain.User, totpMode string, setupSecret, setupURI string, recoveryCodes []string, message string) templ.Component {
+	return Layout("Account", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Account", "Profile and security", "Manage personal settings without changing admin-only access.")
+		if message != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
+		}
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Profile</h2><p>Name and local display preferences.</p></div></div><form method="post" action="/account" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Display name<input name="display_name" value="%s" required></label><label>Email<input value="%s" disabled></label><label>Timezone<input name="timezone" value="%s"></label><div class="form-actions"><button class="primary">Save profile</button></div></form></div>`, esc(user.CSRF), esc(account.DisplayName), esc(account.Email), esc(account.Timezone))
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Password</h2><p>Change your password for local authentication.</p></div></div><form method="post" action="/account/password" class="form-grid"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="username" autocomplete="username" value="%s"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><label>Confirm password<input name="confirm" type="password" minlength="8" autocomplete="new-password" required></label><div class="form-actions"><button class="primary">Update password</button></div></form></div></section>`, esc(user.CSRF), esc(account.Email))
+		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Two-factor authentication</h2><p>Optional unless deployment policy requires it.</p></div></div>`)
+		if totpMode == "disabled" {
+			_, _ = fmt.Fprint(w, `<p>Two-factor authentication is disabled for this deployment.</p>`)
+		} else if account.TOTPEnabled {
+			_, _ = fmt.Fprintf(w, `<p><span class="badge success">Enabled</span></p><form method="post" action="/account/totp/disable" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Disable TOTP</button></form>`, esc(user.CSRF))
+		} else {
+			_, _ = fmt.Fprintf(w, `<p><span class="badge muted">Not enabled</span></p><form method="post" action="/account/totp/enable" class="form-grid"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="secret" value="%s"><label class="wide">Authenticator URI<input readonly value="%s"></label><label>Verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><div class="form-actions"><button class="primary">Enable TOTP</button></div></form>`, esc(user.CSRF), esc(setupSecret), esc(setupURI))
+		}
+		if len(recoveryCodes) > 0 {
+			_, _ = fmt.Fprint(w, `<div class="recovery-box"><strong>Recovery codes</strong><p>Save these now. They are shown once.</p><code>`)
+			for _, code := range recoveryCodes {
+				_, _ = fmt.Fprintf(w, `%s<br>`, esc(code))
+			}
+			_, _ = fmt.Fprint(w, `</code></div>`)
+		}
+		_, _ = fmt.Fprint(w, `</section>`)
+		return nil
+	}))
+}
+
+func ProjectMembers(user *NavUser, project domain.Project, members []domain.ProjectMember, users []domain.User, assignedGroups []domain.Group, groups []domain.Group) templ.Component {
+	return Layout("Project members", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, project.Name, "Project access", "Manage direct project members and group access for private work.")
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Add member</h2><p>Managers can administer this project; members can track time.</p></div></div><form method="post" action="/projects/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>User<select name="user_id">`, project.ID, esc(user.CSRF))
+		for _, u := range users {
+			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, u.ID, esc(u.DisplayName))
+		}
+		_, _ = fmt.Fprintf(w, `</select></label><label>Role<select name="role"><option value="member">Member</option><option value="manager">Manager</option></select></label><div class="form-actions"><button class="primary">Save member</button></div></form></div><div class="panel form-panel"><div class="panel-head"><div><h2>Add group</h2><p>Groups make bulk access easier to maintain.</p></div></div><form method="post" action="/projects/%d/groups" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Group<select name="group_id">`, project.ID, esc(user.CSRF))
+		for _, g := range groups {
+			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, g.ID, esc(g.Name))
+		}
+		_, _ = fmt.Fprint(w, `</select></label><div class="form-actions"><button class="primary">Add group</button></div></form></div></section>`)
+		memberRows := [][]string{}
+		for _, member := range members {
+			memberRows = append(memberRows, []string{fmt.Sprint(member.UserID), string(member.Role), fmt.Sprintf(`<form method="post" action="/projects/%d/members/remove"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="user_id" value="%d"><button class="table-action">Remove</button></form>`, project.ID, esc(user.CSRF), member.UserID)})
+		}
+		dataTableRaw(w, []string{"User", "Role", "Action"}, memberRows)
+		groupRows := [][]string{}
+		for _, group := range assignedGroups {
+			groupRows = append(groupRows, []string{fmt.Sprint(group.ID), group.Name, fmt.Sprintf(`<form method="post" action="/projects/%d/groups/remove"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="group_id" value="%d"><button class="table-action">Remove</button></form>`, project.ID, esc(user.CSRF), group.ID)})
+		}
+		_, _ = fmt.Fprint(w, `<div class="section-spacer"></div>`)
+		dataTableRaw(w, []string{"Group", "Name", "Action"}, groupRows)
 		return nil
 	}))
 }
@@ -316,7 +445,48 @@ func renderAccountDropdown(w io.Writer, user *NavUser) {
 	if name != "" {
 		initial = strings.ToUpper(string([]rune(name)[0]))
 	}
-	_, _ = fmt.Fprintf(w, `<div class="dropdown account-menu" data-dropdown="account"><button class="account-trigger" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><span class="avatar" aria-hidden="true">%s</span><span class="account-name">%s</span><span class="chevron" aria-hidden="true">▾</span></button><div class="dropdown-menu dropdown-menu-right" id="account-menu" role="menu" hidden data-dropdown-menu><a role="menuitem" href="/">Dashboard</a><a role="menuitem" href="/timesheets">Timesheets</a><form method="post" action="/logout" role="none"><input type="hidden" name="csrf" value="%s"><button role="menuitem" type="submit">Logout</button></form></div></div>`, esc(initial), esc(user.DisplayName), esc(user.CSRF))
+	_, _ = fmt.Fprintf(w, `<div class="dropdown account-menu" data-dropdown="account"><button class="account-trigger" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><span class="avatar" aria-hidden="true">%s</span><span class="account-name">%s</span><span class="chevron" aria-hidden="true">▾</span></button><div class="dropdown-menu dropdown-menu-right" id="account-menu" role="menu" hidden data-dropdown-menu><a role="menuitem" href="/">Dashboard</a><a role="menuitem" href="/timesheets">Timesheets</a><a role="menuitem" href="/account">Account settings</a><form method="post" action="/logout" role="none"><input type="hidden" name="csrf" value="%s"><button role="menuitem" type="submit">Logout</button></form></div></div>`, esc(initial), esc(user.DisplayName), esc(user.CSRF))
+}
+
+func renderWorkspaceSwitcher(w io.Writer, user *NavUser) {
+	if user == nil || len(user.Workspaces) <= 1 {
+		if user != nil && user.CurrentWorkspaceName != "" {
+			_, _ = fmt.Fprintf(w, `<span class="workspace-pill">%s</span>`, esc(user.CurrentWorkspaceName))
+		}
+		return
+	}
+	_, _ = fmt.Fprintf(w, `<form method="post" action="/workspace" class="workspace-switcher"><input type="hidden" name="csrf" value="%s"><label><span class="sr-only">Workspace</span><select name="workspace_id" onchange="this.form.submit()">`, esc(user.CSRF))
+	for _, workspace := range user.Workspaces {
+		selected := ""
+		if workspace.ID == user.CurrentWorkspaceID {
+			selected = " selected"
+		}
+		_, _ = fmt.Fprintf(w, `<option value="%d"%s>%s</option>`, workspace.ID, selected, esc(workspace.Name))
+	}
+	_, _ = fmt.Fprint(w, `</select></label></form>`)
+}
+
+type MenuAction struct {
+	Label  string
+	Href   string
+	Method string
+}
+
+func RowActionMenu(id, label string, csrf string, actions []MenuAction) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, `<div class="dropdown row-menu" data-dropdown="%s"><button class="icon-button" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="%s-menu" aria-label="%s">•••</button><div class="dropdown-menu dropdown-menu-right" id="%s-menu" role="menu" hidden data-dropdown-menu>`, esc(id), esc(id), esc(label), esc(id))
+	for _, action := range actions {
+		if strings.EqualFold(action.Method, "post") {
+			_, _ = fmt.Fprintf(&b, `<form method="post" action="%s" role="none"><input type="hidden" name="csrf" value="%s"><button role="menuitem" type="submit">%s</button></form>`, esc(action.Href), esc(csrf), esc(action.Label))
+		} else {
+			_, _ = fmt.Fprintf(&b, `<a role="menuitem" href="%s">%s</a>`, esc(action.Href), esc(action.Label))
+		}
+	}
+	_, _ = fmt.Fprint(&b, `</div></div>`)
+	return b.String()
 }
 
 func renderSavedReportsDropdown(w io.Writer, saved []domain.SavedReport) {
@@ -365,6 +535,19 @@ func reportOption(current, value, label string) string {
 		selected = ` selected`
 	}
 	return fmt.Sprintf(`<option value="%s"%s>%s</option>`, esc(value), selected, esc(label))
+}
+
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.UTC().Date()
+	by, bm, bd := b.UTC().Date()
+	return ay == by && am == bm && ad == bd
+}
+
+func timeRange(entry domain.Timesheet) string {
+	if entry.EndedAt == nil {
+		return entry.StartedAt.Format("15:04") + " - running"
+	}
+	return entry.StartedAt.Format("15:04") + " - " + entry.EndedAt.Format("15:04")
 }
 
 func savedReportHref(report domain.SavedReport) string {
@@ -445,6 +628,13 @@ func idValue(value int64) string {
 		return ""
 	}
 	return esc(fmt.Sprint(value))
+}
+
+func ptrText(value *int64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(*value)
 }
 
 func duration(seconds int64) string {

@@ -18,13 +18,15 @@ SQLite is the first database. PostgreSQL can be added later by implementing the 
 - legacy compatibility: `teams`, `team_members`, `customer_teams`, `project_teams`, `activity_teams`
 - `customers`, `projects`, `activities`, `tasks`
 - `favorites`, `saved_reports`
-- `rates`
+- `rates`, `user_cost_rates`
 - `timesheets`, `tags`, `timesheet_tags`
 - `invoices`, `invoice_items`, `invoice_meta`
 - `webhook_endpoints`, `webhook_deliveries`
 - `audit_log`, `settings`, `schema_migrations`
 
-Workspace-owned records include `workspace_id`. Users include `organization_id`. Private projects use `projects.private` plus `project_members`/`project_groups` for scoped visibility. Projects include lightweight estimate and budget fields. Tasks sit below projects and can be attached to timesheets, favorites, and reports.
+Workspace-owned records include `workspace_id`. Users include `organization_id`, optional TOTP state, and hashed recovery codes. Sessions include the selected `workspace_id`. Private projects use `projects.private` plus `project_members`/`project_groups` for scoped visibility. Projects include lightweight estimate and budget fields. Tasks sit below projects and can be attached to timesheets, favorites, reports, and task-scoped rates.
+
+Rates support `effective_from`/`effective_to`, optional task scope, and stored `internal_amount_cents`. User cost rates are separately effective-dated in `user_cost_rates`; timesheets store the resolved billing and internal cents at creation time for audit stability.
 
 ## Key Indexes
 
@@ -40,6 +42,8 @@ Workspace-owned records include `workspace_id`. Users include `organization_id`.
 - `tasks(project_id, visible)`
 - `favorites(user_id, workspace_id)`
 - `saved_reports(user_id, workspace_id)`
+- `rates(workspace_id, task_id, effective_from DESC)`
+- `user_cost_rates(workspace_id, user_id, effective_from DESC)`
 - `invoices(customer_id, created_at DESC)`
 - `workspace_members(user_id, workspace_id)`
 - `project_members(user_id, project_id)`
