@@ -198,8 +198,18 @@ func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 func ProjectForm(user *NavUser, selectors *SelectorData) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/projects"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-		renderSelect(w, "Customer", "customer_id", optionList(selectors, "customer"), 0, true, "Select a customer", nil)
-		_, _ = fmt.Fprint(w, `<label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Order<input name="order_number"></label><label>Estimate hours<input name="estimate_hours" value="0"></label><label>Budget cents<input name="budget_cents" value="0"></label><label>Alert percent<input name="budget_alert_percent" value="80"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="private"> Private</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save project</button></div></form>`)
+		renderSelect(w, "Customer"+tipHTML("The client this project is billed to. Determines currency and default billing contact."), "customer_id", optionList(selectors, "customer"), 0, true, "Select a customer", nil)
+		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" required></label>`, tipHTML("Project display name shown in timesheets, reports and invoices."))
+		_, _ = fmt.Fprintf(w, `<label>Number %s<input name="number"></label>`, tipHTML("Internal reference code (e.g. P-001). Optional — used for export matching."))
+		_, _ = fmt.Fprintf(w, `<label>Order %s<input name="order_number"></label>`, tipHTML("Purchase order or contract reference number for invoice line items."))
+		_, _ = fmt.Fprintf(w, `<label>Estimate hours %s<input name="estimate_hours" value="0"></label>`, tipHTML("Total hours budgeted. Tockr shows burn against this in the project dashboard."))
+		_, _ = fmt.Fprintf(w, `<label>Budget %s<input name="budget_cents" value="0"></label>`, tipHTML("Monetary budget in cents (e.g. 1000000 = $10,000). Triggers an alert when spend reaches the alert threshold."))
+		_, _ = fmt.Fprintf(w, `<label>Alert at %% %s<input name="budget_alert_percent" value="80"></label>`, tipHTML("Send a budget warning when this percentage of the monetary budget is consumed (e.g. 80 = alert at 80%)."))
+		_, _ = fmt.Fprint(w, `<label class="wide">Comment<textarea name="comment"></textarea></label>`)
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible" checked> Visible %s</label>`, tipHTML("Visible projects appear in timesheet entry selectors. Uncheck to archive a project."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="private"> Private %s</label>`, tipHTML("Private projects are only visible to explicitly assigned members."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable" checked> Billable %s</label>`, tipHTML("Billable projects are included in invoice and rate calculations."))
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save project</button></div></form>`)
 		return nil
 	})
 }
@@ -207,8 +217,13 @@ func ProjectForm(user *NavUser, selectors *SelectorData) templ.Component {
 func ActivityForm(user *NavUser, selectors *SelectorData) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/activities"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-		renderSelect(w, "Project", "project_id", optionList(selectors, "project"), 0, false, "Global activity", nil)
-		_, _ = fmt.Fprint(w, `<label>Name<input name="name" required></label><label>Number<input name="number"></label><label class="wide">Comment<textarea name="comment"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save activity</button></div></form>`)
+		renderSelect(w, "Project"+tipHTML("Scope this activity to one project, or leave blank to make it available across all projects."), "project_id", optionList(selectors, "project"), 0, false, "Global activity", nil)
+		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" required></label>`, tipHTML("Activity type shown in timesheets (e.g. Development, Design, Testing)."))
+		_, _ = fmt.Fprintf(w, `<label>Number %s<input name="number"></label>`, tipHTML("Optional reference code. Useful for matching against external project management tools."))
+		_, _ = fmt.Fprint(w, `<label class="wide">Comment<textarea name="comment"></textarea></label>`)
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible" checked> Visible %s</label>`, tipHTML("Visible activities appear in timesheet selectors. Uncheck to retire an activity without deleting it."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable" checked> Billable %s</label>`, tipHTML("Billable activities are included in invoice and rate calculations."))
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save activity</button></div></form>`)
 		return nil
 	})
 }
@@ -216,8 +231,13 @@ func ActivityForm(user *NavUser, selectors *SelectorData) templ.Component {
 func TaskForm(user *NavUser, selectors *SelectorData) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/tasks"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-		renderSelect(w, "Project", "project_id", optionList(selectors, "project"), 0, true, "Select a project", nil)
-		_, _ = fmt.Fprint(w, `<label>Name<input name="name" required></label><label>Number<input name="number"></label><label>Estimate hours<input name="estimate_hours" value="0"></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save task</button></div></form>`)
+		renderSelect(w, "Project"+tipHTML("Tasks must belong to a project. Choose which project this task falls under."), "project_id", optionList(selectors, "project"), 0, true, "Select a project", nil)
+		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" required></label>`, tipHTML("Task name shown in timesheet selectors (e.g. a sprint ticket or deliverable)."))
+		_, _ = fmt.Fprintf(w, `<label>Number %s<input name="number"></label>`, tipHTML("Optional reference code — great for ticket numbers (e.g. PROJ-42). Shown in reports and CSV exports."))
+		_, _ = fmt.Fprintf(w, `<label>Estimate hours %s<input name="estimate_hours" value="0"></label>`, tipHTML("Estimated hours for this task. Used alongside the project estimate for burn-down tracking."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible" checked> Visible %s</label>`, tipHTML("Visible tasks appear in timesheet selectors. Uncheck to archive without deleting."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable" checked> Billable %s</label>`, tipHTML("Billable tasks contribute to invoice totals. Non-billable tasks are tracked but not charged."))
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save task</button></div></form>`)
 		return nil
 	})
 }
@@ -231,7 +251,10 @@ func TagForm(user *NavUser) templ.Component {
 
 func GroupForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/groups"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Save group</button></div></form>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/groups"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" required></label>`, tipHTML("Group name used to assign multiple users to projects at once. E.g. \"Backend team\" or \"Contractors\"."))
+		_, _ = fmt.Fprintf(w, `<label class="wide">Description %s<textarea name="description"></textarea></label>`, tipHTML("Optional description of this group's purpose or membership criteria."))
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save group</button></div></form>`)
 		return nil
 	})
 }
@@ -684,12 +707,19 @@ func renderWorkSelectors(w io.Writer, selectors *SelectorData, requireCore bool)
 	renderSelect(w, "Task", "task_id", optionList(selectors, "task"), 0, false, "No task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 }
 
-func renderSelect(w io.Writer, labelText, name string, options []SelectOption, selected int64, required bool, placeholder string, attrs map[string]string) {
+// tipHTML returns an inline tooltip icon span. text is escaped internally.
+func tipHTML(text string) string {
+	return `<span class="tooltip-icon" data-tooltip="` + esc(text) + `">i</span>`
+}
+
+// renderSelect renders a label+select combo. labelHTML is emitted raw — callers
+// must only pass trusted string literals or strings assembled with tipHTML/esc.
+func renderSelect(w io.Writer, labelHTML, name string, options []SelectOption, selected int64, required bool, placeholder string, attrs map[string]string) {
 	requiredAttr := ""
 	if required {
 		requiredAttr = " required"
 	}
-	_, _ = fmt.Fprintf(w, `<label>%s<select name="%s"%s`, esc(labelText), esc(name), requiredAttr)
+	_, _ = fmt.Fprintf(w, `<label>%s<select name="%s"%s`, labelHTML, esc(name), requiredAttr)
 	for _, key := range sortedKeys(attrs) {
 		value := attrs[key]
 		_, _ = fmt.Fprintf(w, ` %s="%s"`, esc(key), esc(value))
