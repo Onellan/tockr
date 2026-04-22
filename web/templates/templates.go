@@ -98,6 +98,7 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 		renderNav(w, user, primaryNav)
 		renderNav(w, user, adminNav)
 		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
+		renderWorkspaceSwitcher(w, user)
 		renderAccountDropdown(w, user)
 		_, _ = fmt.Fprint(w, `</div></header><main class="content" id="main-content" tabindex="-1">`)
 		if err := body.Render(ctx, w); err != nil {

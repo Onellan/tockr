@@ -7,25 +7,30 @@
 - Build command: `go build ./cmd/app`.
 - Dockerfile: multi-stage Go build into Alpine runtime, static binary, non-root runtime user, `/healthz` healthcheck.
 - Compose: local development publishes host `8029` to container `8080`.
-- Existing app workflows: none under `.github/workflows`.
-- Existing blocker: ARM64 Docker builds worked but were slow because Go compiled inside an emulated ARM64 builder.
-- Existing inefficiency: `.dockerignore` allowed local output and tool cache directories into the Docker build context.
+- Workflow: `.github/workflows/ci.yml`.
+- Container smoke path: builds a local image, starts it without supplied
+  secrets, verifies generated bootstrap files, checks `/healthz`, and logs in
+  with the generated admin password.
+- ARM64 Docker builds are kept efficient because Go cross-compiles inside the
+  build stage using Buildx target variables.
 
 ## Failure analysis
 
-No existing GitHub Actions workflow was failing because the repository did not have an app CI workflow yet. Local verification found these release risks:
+Earlier local verification found these release risks:
 
 - Docker context was larger than needed.
 - ARM64 build was slow under emulation.
 - Published image instructions were missing.
 - No automated container startup smoke test existed.
+- The smoke test supplied secrets manually instead of proving the automated
+  Docker install path.
 
 ## Implemented design
 
 The workflow in `.github/workflows/ci.yml` has three jobs:
 
 1. `validate`: checkout, set up Go from `go.mod`, run `go test ./...`, and build the app binary.
-2. `container-smoke`: build a local `linux/amd64` Docker image, start it, and verify `/healthz`.
+2. `container-smoke`: build a local `linux/amd64` Docker image, start it without supplied secrets, verify `/healthz`, verify generated bootstrap files, and check login with the generated admin password.
 3. `docker-image`: build `linux/amd64,linux/arm64` with Buildx and publish to GHCR on non-PR events.
 
 Publication only runs after validation and smoke testing pass.

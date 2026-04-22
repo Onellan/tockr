@@ -1,33 +1,31 @@
 # Raspberry Pi Docker Install
 
-Tockr publishes a Raspberry Pi friendly image to GitHub Container Registry.
+Tockr publishes a Raspberry Pi friendly Docker image to GitHub Container
+Registry.
 
-## Supported Pi platform
+## Supported Platform
 
+- Recommended: Raspberry Pi 4B or newer.
 - Recommended OS: Raspberry Pi OS 64-bit.
-- Required image platform: `linux/arm64`.
-- Also published: `linux/amd64` for development and server installs.
-- Not published by default: `linux/arm/v7`. The project targets Raspberry Pi 4B class 64-bit installs to keep CI fast and the release matrix small.
+- Published image platforms: `linux/arm64` and `linux/amd64`.
+- Default host port: `8029`.
+- Persistent data: Docker volume `tockr-data`.
 
-## Install
-
-Replace `<owner>` with the GitHub owner that publishes this repository.
+## Quick Install
 
 ```sh
-docker pull ghcr.io/<owner>/tockr:latest
 docker volume create tockr-data
 docker run -d --name tockr \
   --restart unless-stopped \
   -p 8029:8080 \
   -v tockr-data:/app/data \
-  -e TOCKR_SESSION_SECRET='change-this-32-byte-production-secret' \
-  -e TOCKR_ADMIN_EMAIL='admin@example.com' \
-  -e TOCKR_ADMIN_PASSWORD='change-this-admin-password' \
-  -e TOCKR_DEFAULT_TIMEZONE='UTC' \
-  -e TOCKR_DEFAULT_CURRENCY='USD' \
-  -e TOCKR_FUTURE_TIME_POLICY='end_of_day' \
-  -e TOCKR_TOTP_MODE='disabled' \
-  ghcr.io/<owner>/tockr:latest
+  ghcr.io/onellan/tockr:latest
+```
+
+Retrieve the generated admin password:
+
+```sh
+docker exec tockr cat /app/data/.admin_password
 ```
 
 Open:
@@ -36,56 +34,67 @@ Open:
 http://<pi-hostname-or-ip>:8029
 ```
 
-## Compose
+Log in with:
 
-```yaml
-services:
-  tockr:
-    image: ghcr.io/<owner>/tockr:latest
-    ports:
-      - "8029:8080"
-    environment:
-      TOCKR_ADDR: ":8080"
-      TOCKR_DB_PATH: "/app/data/tockr.db"
-      TOCKR_DATA_DIR: "/app/data"
-      TOCKR_SESSION_SECRET: "change-this-32-byte-production-secret"
-      TOCKR_ADMIN_EMAIL: "admin@example.com"
-      TOCKR_ADMIN_PASSWORD: "change-this-admin-password"
-      TOCKR_DEFAULT_TIMEZONE: "UTC"
-      TOCKR_DEFAULT_CURRENCY: "USD"
-      TOCKR_FUTURE_TIME_POLICY: "end_of_day"
-      TOCKR_TOTP_MODE: "disabled"
-    volumes:
-      - tockr-data:/app/data
-    restart: unless-stopped
+- Email: `admin@example.com`
+- Password: the generated value from `/app/data/.admin_password`
 
-volumes:
-  tockr-data:
+The session secret and bootstrap admin password are generated on first start
+and persisted in the Docker volume. You do not need to create configuration
+values manually.
+
+## Compose Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Onellan/tockr/main/docker-compose.prod.yml \
+  -o docker-compose.prod.yml
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml exec tockr cat /app/data/.admin_password
+```
+
+## Validate
+
+```sh
+docker ps --filter name=tockr
+curl -fsS http://<pi-hostname-or-ip>:8029/healthz
+docker logs tockr --tail 50
+```
+
+Expected health response:
+
+```json
+{"status":"ok"}
 ```
 
 ## Update
 
+Docker run:
+
 ```sh
-docker pull ghcr.io/<owner>/tockr:latest
-docker stop tockr
-docker rm tockr
-# Re-run the install command with the same volume and environment.
+docker pull ghcr.io/onellan/tockr:latest
+docker rm -f tockr
+docker run -d --name tockr \
+  --restart unless-stopped \
+  -p 8029:8080 \
+  -v tockr-data:/app/data \
+  ghcr.io/onellan/tockr:latest
 ```
 
-With Compose:
+Compose:
 
 ```sh
-docker compose pull
-docker compose up -d
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
 ```
 
 ## Backup
 
-For a simple volume backup, stop the container briefly and archive the data volume:
-
 ```sh
 docker stop tockr
 docker run --rm -v tockr-data:/data -v "$PWD":/backup alpine \
-  tar -czf "/backup/tockr-data-$(date +%F).tgz" -C /data .
+  tar -czf "/backup/tockr-backup-$(date +%F).tgz" -C /data .
 docker start tockr
 ```
+
+For the full setup guide, see [docker-setup.md](docker-setup.md). For updates
+and restore steps, see [updating.md](updating.md).

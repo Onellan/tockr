@@ -79,21 +79,31 @@ jobs:
           set -euo pipefail
           docker run -d --name tockr-smoke \
             -p 18080:8080 \
-            -e TOCKR_SESSION_SECRET=ci-smoke-secret-change-me \
-            -e TOCKR_ADMIN_PASSWORD=ci-smoke-admin-password \
+            -e TOCKR_ADMIN_EMAIL=admin@example.com \
             tockr:ci-smoke
           trap 'docker logs tockr-smoke || true; docker rm -f tockr-smoke || true' EXIT
 
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/healthz; then
-              docker inspect --format='{{.State.Health.Status}}' tockr-smoke
-              exit 0
+              break
             fi
             sleep 1
           done
 
-          echo "Container did not become healthy in time"
-          exit 1
+          if ! curl -fsS http://127.0.0.1:18080/healthz; then
+            echo "Container did not become healthy in time"
+            exit 1
+          fi
+
+          test "$(docker inspect --format='{{.State.Health.Status}}' tockr-smoke)" != "unhealthy"
+          test -n "$(docker exec tockr-smoke cat /app/data/.session_secret)"
+          admin_password="$(docker exec tockr-smoke cat /app/data/.admin_password)"
+          test "${#admin_password}" -ge 24
+
+          curl -fsS -i -X POST http://127.0.0.1:18080/login \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'email=admin@example.com' \
+            --data-urlencode "password=${admin_password}" | grep -q 'HTTP/1.1 303'
 
   docker-image:
     name: Build and publish Docker image

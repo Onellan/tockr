@@ -8,11 +8,11 @@ services:
       TOCKR_ADDR: ":8080"
       TOCKR_DB_PATH: "/app/data/tockr.db"
       TOCKR_DATA_DIR: "/app/data"
-      TOCKR_SESSION_SECRET: "change-this-32-byte-production-secret"
+      # TOCKR_SESSION_SECRET and TOCKR_ADMIN_PASSWORD are auto-generated and
+      # persisted in the volume on first start when not set explicitly.
       TOCKR_ADMIN_EMAIL: "admin@example.com"
-      TOCKR_ADMIN_PASSWORD: "admin12345"
       TOCKR_DEFAULT_TIMEZONE: "UTC"
-      TOCKR_DEFAULT_CURRENCY: "USD"
+      TOCKR_DEFAULT_CURRENCY: "ZAR"
       TOCKR_FUTURE_TIME_POLICY: "end_of_day"
       TOCKR_TOTP_MODE: "disabled"
     volumes:

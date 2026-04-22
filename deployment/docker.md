@@ -1,43 +1,54 @@
 # Docker Deployment
 
+See the full step-by-step guide at [docs/docker-setup.md](../docs/docker-setup.md).
+
 ## Pull the published image
 
 Tagged builds from `main` and release tags publish to GitHub Container Registry:
 
 ```sh
-docker pull ghcr.io/<owner>/tockr:latest
+docker volume create tockr-data
 docker run -d --name tockr \
   --restart unless-stopped \
   -p 8029:8080 \
   -v tockr-data:/app/data \
-  -e TOCKR_SESSION_SECRET='change-this-32-byte-production-secret' \
-  -e TOCKR_ADMIN_PASSWORD='change-this-admin-password' \
-  ghcr.io/<owner>/tockr:latest
+  ghcr.io/onellan/tockr:latest
 ```
 
 Open `http://localhost:8029`.
 
-For a public GHCR package, anonymous pulls work. If the package is private, run `docker login ghcr.io` first with an account that can read the package.
+Retrieve the generated admin password:
 
-## Compose example
+```sh
+docker exec tockr cat /app/data/.admin_password
+```
+
+The session secret and bootstrap admin password are generated on first start
+and stored in the data volume.
+
+For a private GHCR package, run `docker login ghcr.io` first.
+
+## Compose example (production)
+
+Use `docker-compose.prod.yml` from the repo root:
+
+```sh
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+Or copy this into your own `compose.yml`:
 
 ```yaml
 services:
   tockr:
-    image: ghcr.io/<owner>/tockr:latest
+    image: ghcr.io/onellan/tockr:latest
     ports:
       - "8029:8080"
     environment:
-      TOCKR_ADDR: ":8080"
-      TOCKR_DB_PATH: "/app/data/tockr.db"
-      TOCKR_DATA_DIR: "/app/data"
-      TOCKR_SESSION_SECRET: "change-this-32-byte-production-secret"
       TOCKR_ADMIN_EMAIL: "admin@example.com"
-      TOCKR_ADMIN_PASSWORD: "change-this-admin-password"
-      TOCKR_DEFAULT_TIMEZONE: "UTC"
-      TOCKR_DEFAULT_CURRENCY: "USD"
-      TOCKR_FUTURE_TIME_POLICY: "end_of_day"
-      TOCKR_TOTP_MODE: "disabled"
+      TOCKR_DEFAULT_TIMEZONE: "Africa/Johannesburg"
+      TOCKR_DEFAULT_CURRENCY: "ZAR"
     volumes:
       - tockr-data:/app/data
     restart: unless-stopped
@@ -55,26 +66,25 @@ docker compose up -d
 
 ## Build locally
 
-Build and run:
-
 ```sh
 docker compose up --build
 ```
 
 Open `http://localhost:8029`.
 
-Default seed credentials from `docker-compose.yml`:
+Default local development email from `docker-compose.yml`:
 
 - Email: `admin@example.com`
-- Password: `admin12345`
+- Password: generated at `/app/data/.admin_password`
 
-Change `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` before production use.
+## Useful environment variables
 
-Useful environment variables:
+See [docs/configuration.md](../docs/configuration.md) for the full reference.
 
-- `TOCKR_ADDR`: bind address inside the container, default `:8080`.
+- `TOCKR_ADDR`: bind address inside the container (default `:8080`).
 - `TOCKR_DB_PATH`: SQLite database path.
 - `TOCKR_DATA_DIR`: invoice/static data directory.
+- `TOCKR_SESSION_SECRET`: HMAC secret. Auto-generated if unset.
 - `TOCKR_TOTP_MODE`: `disabled`, `optional`, or `required`.
 - `TOCKR_FUTURE_TIME_POLICY`: `allow`, `deny`, `end_of_day`, or `end_of_week`.
 

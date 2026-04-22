@@ -79,3 +79,15 @@
 - [ ] End-to-end validated
 - [ ] Committed and pushed to GitHub
 - [ ] CI green
+# Active Docker Automation TODO
+
+- [x] Audit Docker setup, docs, bootstrap behavior, and CI workflow.
+- [x] Generate Docker session secret automatically.
+- [x] Generate Docker bootstrap admin password automatically.
+- [x] Remove fixed Docker admin password from Compose defaults.
+- [x] Rewrite canonical Docker setup documentation.
+- [x] Run local Go and Docker validation.
+- [ ] Push changes to GitHub.
+- [ ] Iterate GitHub Actions until CI succeeds.
+- [ ] Pull the GHCR image produced by GitHub.
+- [ ] Validate install from the published image.

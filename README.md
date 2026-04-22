@@ -8,29 +8,42 @@ Tockr is a lightweight Kimai-inspired time tracking app for Raspberry Pi 4B and 
 go run ./cmd/app
 ```
 
-Default seed login:
+Default local seed login:
 
 - `admin@example.com`
 - `admin12345`
 
-Set `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` before production use.
+The local development fallback is intentionally simple. Docker installs
+generate and persist the bootstrap password automatically.
 
 ## Docker
 
-Use the published GitHub Container Registry image on a Raspberry Pi or server:
+Use the published GitHub Container Registry image on a Raspberry Pi or any server:
 
 ```sh
-docker pull ghcr.io/<owner>/tockr:latest
+docker volume create tockr-data
 docker run -d --name tockr \
   --restart unless-stopped \
   -p 8029:8080 \
   -v tockr-data:/app/data \
-  -e TOCKR_SESSION_SECRET='change-this-32-byte-production-secret' \
-  -e TOCKR_ADMIN_PASSWORD='change-this-admin-password' \
-  ghcr.io/<owner>/tockr:latest
+  ghcr.io/onellan/tockr:latest
 ```
 
-Then open `http://localhost:8029`.
+Open `http://localhost:8029` after retrieving the generated bootstrap password.
+
+Retrieve the generated bootstrap password:
+
+```sh
+docker exec tockr cat /app/data/.admin_password
+```
+
+Log in with:
+
+- Email: `admin@example.com`
+- Password: the generated value printed by the command above
+
+The session secret and bootstrap admin password are both generated on first
+start and persisted in the data volume. No manual secret creation is required.
 
 For local development from source:
 
@@ -41,10 +54,14 @@ docker compose up --build
 To update a published-image install:
 
 ```sh
-docker pull ghcr.io/<owner>/tockr:latest
+docker pull ghcr.io/onellan/tockr:latest
 docker rm -f tockr
-docker run -d --name tockr --restart unless-stopped -p 8029:8080 -v tockr-data:/app/data ghcr.io/<owner>/tockr:latest
+docker run -d --name tockr --restart unless-stopped \
+  -p 8029:8080 -v tockr-data:/app/data \
+  ghcr.io/onellan/tockr:latest
 ```
+
+For a full step-by-step guide see [docs/docker-setup.md](docs/docker-setup.md).
 
 ## Features
 
@@ -79,4 +96,7 @@ docker run -d --name tockr --restart unless-stopped -p 8029:8080 -v tockr-data:/
 - [systemd deployment](deployment/systemd.md)
 - [Raspberry Pi notes](deployment/raspberry-pi.md)
 - [Raspberry Pi Docker install](docs/raspberry-pi.md)
+- [Docker configuration](docs/configuration.md)
+- [Docker updates](docs/updating.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [CI/CD pipeline](docs/ci-cd.md)
