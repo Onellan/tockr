@@ -98,7 +98,6 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 		renderNav(w, user, primaryNav)
 		renderNav(w, user, adminNav)
 		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
-		renderWorkspaceSwitcher(w, user)
 		renderAccountDropdown(w, user)
 		_, _ = fmt.Fprint(w, `</div></header><main class="content" id="main-content" tabindex="-1">`)
 		if err := body.Render(ctx, w); err != nil {
@@ -111,7 +110,7 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 
 func Login(message string) templ.Component {
 	return Layout("Login", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Fast, focused time tracking for small teams and Raspberry Pi deployments.</p><ul><li>Server-rendered workflows</li><li>SQLite-first operations</li><li>Kimai-inspired business structure</li></ul></div><form method="post" action="/login" class="login-card"><div><h2>Sign in</h2><p>Use your workspace credentials.</p></div>`)
+		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Know exactly where your team's time goes — and bill every hour with confidence.</p><ul><li>Capture time before it slips away</li><li>Turn hours into accurate, ready-to-send invoices</li><li>Keep projects on budget with real-time visibility</li></ul></div><form method="post" action="/login" class="login-card"><div><h2>Welcome back</h2><p>Sign in to your account.</p></div>`)
 		if message != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
 		}
@@ -126,7 +125,7 @@ func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet, 
 		_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
 		metric(w, "Active timers", fmt.Sprint(stats["active_timers"]), "Running entries")
 		metric(w, "Today", duration(stats["today_seconds"]), "Tracked by you")
-		metric(w, "Unexported", fmt.Sprint(stats["unexported"]), "Billable entries")
+		metric(w, "Unexported", fmt.Sprint(stats["unexported"]), "Not yet invoiced")
 		metric(w, "Invoices", fmt.Sprint(stats["invoices"]), "Created documents")
 		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Timer</h2><p>Start or stop the active work entry.</p></div></div>`)
 		if active != nil {
@@ -245,7 +244,7 @@ func RateForm(user *NavUser, selectors *SelectorData) templ.Component {
 		renderSelect(w, "Activity", "activity_id", optionList(selectors, "activity"), 0, false, "Any activity", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "Task", "task_id", optionList(selectors, "task"), 0, false, "Any task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "User", "user_id", optionList(selectors, "user"), 0, false, "Any user", nil)
-		_, _ = fmt.Fprint(w, `<label>Hourly amount cents<input name="amount_cents" required></label><label>Internal cents<input name="internal_amount_cents"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to<input type="date" name="effective_to"></label><label class="check"><input type="checkbox" name="fixed"> Fixed rate</label><div class="form-actions"><button class="primary">Save rate</button></div></form>`)
+		_, _ = fmt.Fprint(w, `<label>Billable rate (¢/hr)<input name="amount_cents" required placeholder="e.g. 10000 = $100/hr"></label><label>Internal cost rate (¢/hr) <span class="field-hint">optional, for margin reporting</span><input name="internal_amount_cents" placeholder="e.g. 6000 = $60/hr"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to <span class="field-hint">leave blank for open-ended</span><input type="date" name="effective_to"></label><label class="check"><input type="checkbox" name="fixed"> Fixed total <span class="field-hint">charges the rate as a flat fee, not per hour</span></label><div class="form-actions"><button class="primary">Save rate</button></div></form>`)
 		return nil
 	})
 }
@@ -262,6 +261,7 @@ func UserCostForm(user *NavUser, selectors *SelectorData) templ.Component {
 func Rates(user *NavUser, rates []domain.Rate, costs []domain.UserCostRate, selectors *SelectorData) templ.Component {
 	return Layout("Rates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Rates", "Financial controls", "Date-effective billable rates and user cost rates for auditable reporting.")
+		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How rate matching works:</strong> Tockr picks the most specific matching rate for each time entry. Leave a selector blank to make a rate apply more broadly — a rate with all fields blank applies to everyone. More specific rates always win over broader ones.</div>`)
 		_, _ = fmt.Fprint(w, `<section class="two-col">`)
 		_, _ = fmt.Fprint(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Billable rate</h2><p>Scope by customer, project, activity, task, or user.</p></div></div>`)
 		if err := RateForm(user, selectors).Render(ctx, w); err != nil {
@@ -292,7 +292,7 @@ func Timesheets(user *NavUser, rows [][]string, selectors *SelectorData) templ.C
 		pageHeader(w, "Timesheets", "Time entries", "Record work manually or use the timer from the dashboard.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create entry</h2><p>Select the related customer, project, activity, and optional task.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderWorkSelectors(w, selectors, true)
-		_, _ = fmt.Fprint(w, `<label>Start<input type="datetime-local" name="start" required></label><label>End<input type="datetime-local" name="end" required></label><label>Break minutes<input name="break_minutes" value="0"></label><label>Tags<input name="tags" placeholder="comma,separated"></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></section>`)
+		_, _ = fmt.Fprint(w, `<label>Start<input type="datetime-local" name="start" required></label><label>End<input type="datetime-local" name="end" required></label><label>Break minutes <span class="field-hint">deducted from the total duration</span><input name="break_minutes" value="0"></label><label>Tags<input name="tags" placeholder="comma,separated"></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></section>`)
 		dataTable(w, []string{"Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description"}, rows)
 		_, _ = fmt.Fprint(w, `<div class="export-row"><a class="ghost-button" href="/timesheets/export">Export CSV</a></div>`)
 		return nil
@@ -302,7 +302,7 @@ func Timesheets(user *NavUser, rows [][]string, selectors *SelectorData) templ.C
 func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, saved []domain.SavedReport, selectors *SelectorData) templ.Component {
 	return Layout("Reports", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		group := defaultVal(filter.Group, "user")
-		pageHeader(w, "Reports", "Analysis", "Branch-derived activity and customer reporting, simplified for fast reads.")
+		pageHeader(w, "Reports", "Analysis", "Filter, group, and save time-entry reports. Use \"Apply\" to view results and \"Save report\" to keep the current filters as a named shortcut.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Filters</h2><p>Save repeatable reporting views.</p></div></div><form method="get" action="/reports" class="toolbar-form selector-form"><label>Group by<select name="group">%s%s%s%s%s%s</select></label><label>Date from<input type="date" name="begin" value="%s"></label><label>Date to<input type="date" name="end" value="%s"></label>`,
 			reportOption(group, "user", "Users"), reportOption(group, "customer", "Customers"), reportOption(group, "project", "Projects"), reportOption(group, "activity", "Activities"), reportOption(group, "task", "Tasks"), reportOption(group, "group", "Groups"), dateInput(filter.Begin), dateInput(filter.End))
 		renderSelect(w, "Customer", "customer_id", optionList(selectors, "customer"), filter.CustomerID, false, "All customers", nil)
@@ -391,6 +391,12 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
 		}
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Profile</h2><p>Name and local display preferences.</p></div></div><form method="post" action="/account" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Display name<input name="display_name" value="%s" required></label><label>Email<input value="%s" disabled></label><label>Timezone<input name="timezone" value="%s"></label><div class="form-actions"><button class="primary">Save profile</button></div></form></div>`, esc(user.CSRF), esc(account.DisplayName), esc(account.Email), esc(account.Timezone))
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Workspace</h2><p>Your current workspace and how to switch.</p></div></div><div class="form-grid">`)
+		renderWorkspaceSwitcher(w, user)
+		if len(user.Workspaces) <= 1 {
+			_, _ = fmt.Fprintf(w, `<p class="workspace-account-name">%s</p>`, esc(user.CurrentWorkspaceName))
+		}
+		_, _ = fmt.Fprint(w, `</div></div>`)
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Password</h2><p>Change your password for local authentication.</p></div></div><form method="post" action="/account/password" class="form-grid"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="username" autocomplete="username" value="%s"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><label>Confirm password<input name="confirm" type="password" minlength="8" autocomplete="new-password" required></label><div class="form-actions"><button class="primary">Update password</button></div></form></div></section>`, esc(user.CSRF), esc(account.Email))
 		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Two-factor authentication</h2><p>Optional unless deployment policy requires it.</p></div></div>`)
 		if totpMode == "disabled" {
@@ -470,7 +476,7 @@ func WorkspaceDetail(user *NavUser, workspace domain.Workspace, members []domain
 			checked = " checked"
 		}
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Settings</h2><p>Changes apply only inside this organization.</p></div></div><form method="post" action="/admin/workspaces/%d" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Slug<input name="slug" value="%s" required></label><label>Currency<input name="default_currency" value="%s"></label><label>Timezone<input name="timezone" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, workspace.ID, esc(user.CSRF), esc(workspace.Name), esc(workspace.Slug), esc(workspace.DefaultCurrency), esc(workspace.Timezone), esc(workspace.Description), checked)
-		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Add or update member</h2><p>Workspace roles are separate from organization roles.</p></div></div><form method="post" action="/admin/workspaces/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>User<select name="user_id">`, workspace.ID, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Add or update member</h2><p>Member: track time · Analyst: track time + view reports · Admin: full workspace management</p></div></div><form method="post" action="/admin/workspaces/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>User<select name="user_id">`, workspace.ID, esc(user.CSRF))
 		for _, user := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, user.ID, esc(userLabel(user)))
 		}
@@ -511,7 +517,8 @@ func GroupMembers(user *NavUser, group domain.Group, members []domain.User, user
 func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selectors *SelectorData) templ.Component {
 	return Layout("Project templates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Project templates", "Admin", "Create reusable project blueprints for common work.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create template</h2><p>Templates copy project defaults plus task and activity names.</p></div></div>`)
+		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How templates work:</strong> Create a template once with your standard project settings, tasks, and activities. Then use <em>Use template</em> below to spin up a new project with all those defaults pre-applied.</div>`)
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create template</h2><p>Define defaults including tasks and activities (one per line).</p></div></div>`)
 		renderProjectTemplateForm(w, user, domain.ProjectTemplate{Visible: true, Billable: true, BudgetAlertPercent: 80}, "/project-templates")
 		_, _ = fmt.Fprint(w, `</section>`)
 		rows := [][]string{}
@@ -530,7 +537,7 @@ func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selecto
 			})
 		}
 		dataTableRaw(w, []string{"Template", "Project name", "Status", "Tasks", "Activities", "Action"}, rows)
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel section-spacer"><div class="panel-head"><div><h2>Use template</h2><p>Create a project in the current workspace.</p></div></div><form method="post" action="/project-templates/use" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Template<select name="template_id">`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel section-spacer"><div class="panel-head"><div><h2>Use template</h2><p>Creates a new project in this workspace with all tasks and activities from the template.</p></div></div><form method="post" action="/project-templates/use" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Template<select name="template_id">`, esc(user.CSRF))
 		for _, template := range templates {
 			if !template.Archived {
 				_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, template.ID, esc(template.Name))
@@ -579,7 +586,7 @@ func renderProjectTemplateForm(w io.Writer, user *NavUser, template domain.Proje
 func Invoices(user *NavUser, invoices []domain.Invoice, selectors *SelectorData) templ.Component {
 	return Layout("Invoices", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Invoices", "Billing", "Create lightweight invoice records from unexported billable time.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create invoice</h2><p>Select a customer and date range.</p></div></div><form method="post" action="/invoices" class="toolbar-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create invoice</h2><p>Pulls all unexported billable entries for the customer within the date range. Entries are marked as exported once included.</p></div></div><form method="post" action="/invoices" class="toolbar-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderSelect(w, "Customer", "customer_id", optionList(selectors, "customer"), 0, true, "Select a customer", nil)
 		_, _ = fmt.Fprint(w, `<label>Date from<input type="date" name="begin" required></label><label>Date to<input type="date" name="end" required></label><input name="tax" value="0" placeholder="Tax percent"><button class="primary">Create invoice</button></form></section>`)
 		rows := [][]string{}
@@ -607,6 +614,58 @@ func Webhooks(user *NavUser, hooks []domain.WebhookEndpoint) templ.Component {
 func UserForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/admin/users"><input type="hidden" name="csrf" value="%s"><label>Email<input name="email" type="email" required></label><label>Username<input name="username" required></label><label>Name<input name="display_name" required></label><label>Password<input name="password" type="password" required></label><label>Timezone<input name="timezone" value="UTC"></label><label>Role<select name="role"><option value="user">User</option><option value="teamlead">Team lead</option><option value="admin">Admin</option><option value="superadmin">Super admin</option></select></label><div class="form-actions"><button class="primary">Create user</button></div></form>`, esc(user.CSRF))
+		if user.Permissions["manage_users"] {
+			_, _ = fmt.Fprint(w,
+				`<div class="role-guide">`+
+					`<h3 class="role-guide-title">What each role can do</h3>`+
+					`<div class="role-cards">`+
+
+					`<div class="role-card role-card--user">`+
+					`<div class="role-card-header"><span class="role-badge">User</span><span class="role-card-desc">The baseline for every team member.</span></div>`+
+					`<ul class="role-features">`+
+					`<li><a href="/timesheets">Log &amp; edit time entries</a></li>`+
+					`<li><a href="/calendar">Calendar view</a></li>`+
+					`<li><a href="/">Dashboard &amp; live timer</a></li>`+
+					`<li><a href="/tags">Create and manage tags</a></li>`+
+					`<li>REST API access</li>`+
+					`<li><a href="/account">Manage own account &amp; 2FA</a></li>`+
+					`</ul></div>`+
+
+					`<div class="role-card role-card--teamlead">`+
+					`<div class="role-card-header"><span class="role-badge">Team lead</span><span class="role-card-desc">Reporting visibility across assigned projects.</span></div>`+
+					`<ul class="role-features">`+
+					`<li class="role-inherit">Everything a User can do</li>`+
+					`<li><a href="/reports">Reports, saved filters &amp; sharing</a></li>`+
+					`<li><a href="/reports/utilization">Team utilization dashboard</a></li>`+
+					`<li><a href="/reports/export">Export time data as CSV</a></li>`+
+					`<li>Scoped to projects they are assigned to</li>`+
+					`</ul></div>`+
+
+					`<div class="role-card role-card--admin">`+
+					`<div class="role-card-header"><span class="role-badge">Admin</span><span class="role-card-desc">Full workspace management.</span></div>`+
+					`<ul class="role-features">`+
+					`<li class="role-inherit">Everything a Team lead can do</li>`+
+					`<li><a href="/customers">Customers</a></li>`+
+					`<li><a href="/projects">Projects &amp; team members</a></li>`+
+					`<li><a href="/activities">Activities</a> &amp; <a href="/tasks">tasks</a></li>`+
+					`<li><a href="/rates">Billing rates</a> · <a href="/admin/exchange-rates">exchange rates</a> · <a href="/admin/recalculate">recalculation</a></li>`+
+					`<li><a href="/invoices">Invoices &amp; exports</a></li>`+
+					`<li><a href="/groups">Groups</a> &amp; <a href="/webhooks">webhooks</a></li>`+
+					`<li><a href="/admin/users">Create &amp; manage users</a></li>`+
+					`</ul></div>`+
+
+					`<div class="role-card role-card--superadmin">`+
+					`<div class="role-card-header"><span class="role-badge">Super admin</span><span class="role-card-desc">Organization-wide control.</span></div>`+
+					`<ul class="role-features">`+
+					`<li class="role-inherit">Everything an Admin can do</li>`+
+					`<li><a href="/admin/workspaces">Create &amp; manage workspaces</a></li>`+
+					`<li><a href="/admin/workspaces">Assign workspace members &amp; roles</a></li>`+
+					`<li><a href="/admin/workspaces">Organization-level settings &amp; ownership</a></li>`+
+					`</ul></div>`+
+
+					`</div></div>`,
+			)
+		}
 		return nil
 	})
 }
@@ -1152,7 +1211,7 @@ func SharedReport(name string, rows []map[string]any) templ.Component {
 
 func Utilization(user *NavUser, rows []domain.UtilizationRow, beginStr, endStr string) templ.Component {
 	return Layout("Utilization", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprint(w, `<section class="content-shell"><header class="page-header"><h1>Utilization</h1></header>`)
+		_, _ = fmt.Fprint(w, `<section class="content-shell"><header class="page-header"><h1>Utilization</h1><p class="page-desc">Shows how much time each team member tracked in the selected period and what percentage was billable. The bar chart is relative to the highest-tracked user.</p></header>`)
 		_, _ = fmt.Fprintf(w, `<form class="filter-bar" method="get" action="/reports/utilization"><label>From<input type="date" name="begin" value="%s"></label><label>To<input type="date" name="end" value="%s"></label><button class="primary">Apply</button>`, esc(beginStr), esc(endStr))
 		_, _ = fmt.Fprintf(w, ` <a class="button" href="/reports/export?begin=%s&end=%s">Export CSV</a></form>`, esc(beginStr), esc(endStr))
 		if len(rows) == 0 {
@@ -1187,6 +1246,7 @@ func Utilization(user *NavUser, rows []domain.UtilizationRow, beginStr, endStr s
 func ExchangeRates(user *NavUser, rates []domain.ExchangeRate) templ.Component {
 	return Layout("Exchange Rates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<section class="content-shell"><header class="page-header"><h1>Exchange Rates</h1></header>`)
+		_, _ = fmt.Fprint(w, `<p class="page-desc">Exchange rates let Tockr convert billing amounts for cross-currency reporting. Enter the multiplier as a decimal — for example, 0.920 means 1 USD converts to 0.920 EUR. The most recently effective rate for each currency pair is applied automatically.</p>`)
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/admin/exchange-rates"><input type="hidden" name="csrf" value="%s"><label>From<input name="from_currency" maxlength="3" placeholder="USD" required></label><label>To<input name="to_currency" maxlength="3" placeholder="EUR" required></label><label>Rate<input name="rate" type="number" step="0.000001" min="0.000001" placeholder="0.920" required></label><label>Effective From<input name="effective_from" type="date" required></label><div class="form-actions"><button class="primary">Add Rate</button></div></form>`, esc(user.CSRF))
 		if len(rates) == 0 {
 			_, _ = fmt.Fprint(w, `<p class="empty-state">No exchange rates defined.</p>`)
@@ -1206,6 +1266,7 @@ func ExchangeRates(user *NavUser, rates []domain.ExchangeRate) templ.Component {
 func Recalculate(user *NavUser, preview []domain.RecalcPreviewRow, selectors *SelectorData, projectID int64, sinceStr string) templ.Component {
 	return Layout("Recalculate Rates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprint(w, `<section class="content-shell"><header class="page-header"><h1>Retroactive Rate Recalculation</h1></header>`)
+		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How to use this screen:</strong> Choose a project and a start date, then click <strong>Preview</strong> to see which time entries have a different rate than the one currently configured. Entries already included in an exported invoice are flagged — recalculating them updates the stored value but will not change any invoice already sent. Click <strong>Apply</strong> only when you have reviewed all changes.</div>`)
 		_, _ = fmt.Fprintf(w, `<form class="filter-bar" method="get" action="/admin/recalculate">`)
 		renderSelect(w, "Project", "project_id", optionList(selectors, "project"), projectID, true, "Select a project", nil)
 		_, _ = fmt.Fprintf(w, `<label>Since<input type="date" name="since" value="%s"></label><button class="primary">Preview</button></form>`, esc(sinceStr))
@@ -1213,7 +1274,7 @@ func Recalculate(user *NavUser, preview []domain.RecalcPreviewRow, selectors *Se
 			_, _ = fmt.Fprint(w, `<p class="empty-state">No timesheets need recalculation for the selected filters.</p>`)
 		} else {
 			var deltaTotal int64
-			_, _ = fmt.Fprint(w, `<p class="callout warning">The following timesheets have a different rate than currently set. Review, then apply.</p>`)
+			_, _ = fmt.Fprint(w, `<div class="info-callout warn">The entries below have a different rate than the one currently configured. <strong>Exported entries are flagged</strong> — updating them will not change any invoice already sent, but will affect future exports.</div>`)
 			_, _ = fmt.Fprint(w, `<table><thead><tr><th>Date</th><th>Description</th><th>Current ¢/h</th><th>New ¢/h</th><th>Delta ¢</th><th>Exported</th></tr></thead><tbody>`)
 			for _, row := range preview {
 				deltaTotal += row.DeltaCents
