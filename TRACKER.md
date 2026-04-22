@@ -49,7 +49,9 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 - Customers, projects, activities, tags, tasks, groups, users, rates, invoices, reports, and webhooks.
 - Timer start/stop and manual time entries.
 - Favorites/pinned entries for repeated timer starts.
+- Favorite edit/delete controls.
 - Tasks under projects with task-aware timesheets and reporting.
+- Task edit/archive controls; archived tasks remain available historically and are excluded from new active selections.
 - Read-only weekly calendar.
 - Future-time policies: `allow`, `deny`, `end_of_day`, `end_of_week`.
 - Workspace-scoped project templates for repeatable project setup.
@@ -58,14 +60,20 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 ### Reporting And Billing
 
 - Dashboard summary cards.
+- Utilization dashboard with per-user tracked/billable time and lightweight CSS bars.
 - Project dashboard with tracked time, billable value, estimate progress, budget progress, and alert threshold state.
 - Reports grouped by user, customer, project, activity, task, and group.
 - Report filters for date, customer, project, activity, task, user, and group.
 - Saved report creation/list/open through the reports page.
+- Saved report edit/delete controls.
+- Saved report share links with expiring public report view.
 - Effective-dated billable rates with customer/project/activity/task/user scopes.
 - Effective-dated user cost rates.
+- Retroactive rate recalculation preview/apply workflow for workspace admins.
+- Workspace exchange-rate management for reporting conversions.
 - Timesheet creation stores resolved billing and internal cost rates for audit stability.
-- Basic invoice creation, metadata API, and invoice download.
+- Invoice creation, metadata API, invoice download, and richer HTML invoice output with customer and line-item details.
+- CSV export for reports and timesheets.
 
 ### UI And UX
 
@@ -91,16 +99,15 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 - Non-root container runtime user.
 - Docker healthcheck on `/healthz`.
 - Docker build context trimmed for faster Pi-friendly builds.
+- Docker first-run session secret and bootstrap admin password generation.
+- Published `latest` image is rebuilt for every push to `main` so GHCR does not lag behind documentation or small repo changes.
+- Published GHCR image has been anonymously pulled and validated from a fresh Docker volume.
 - Raspberry Pi Docker install documentation.
 
 ## Backlog
 
 ### High-Value Next Work
 
-- Favorite edit/delete UI.
-- Task edit/archive UI.
-- Saved report edit/delete UI.
-- Saved report sharing UI with signed expiring links.
 - Workspace invitations or pending-member states if email onboarding is added.
 - More webhook events for newer domain actions such as task, favorite, saved report, membership, and budget/rate changes.
 - API fields/endpoints for favorites and saved reports where useful.
@@ -109,7 +116,9 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 ### Reporting And Finance
 
 - Scheduled report delivery.
-- Profitability dashboards using resolved billable and internal cost data.
+- Deeper profitability dashboards using resolved billable/internal cost data and exchange-rate display rules.
+- XLSX export only if CSV proves insufficient; avoid adding spreadsheet dependencies without demand.
+- PDF invoice rendering remains deferred unless a lightweight non-headless-browser approach is chosen.
 
 ### Governance
 
@@ -134,7 +143,7 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 
 - PostgreSQL repository implementation when self-hosted users need it.
 - Optional `linux/arm/v7` Docker image only if 32-bit Raspberry Pi installs become a real requirement.
-- Path-filter tuning for CI if build frequency becomes noisy.
+- CI dependency/action upgrades before GitHub removes Node.js 20 support from older action runtimes.
 
 ## Deferred Or Dropped
 
@@ -156,6 +165,31 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 - Existing sessions default to the first accessible workspace when needed.
 - Hidden IDs remain acceptable for internal form submissions, row actions, route path IDs, API identifiers, audit logging, and persistence.
 - Project templates intentionally do not copy sensitive live data such as timesheets, invoices, rates, memberships, favorites, or audit entries.
+- Generated Docker secrets are stored in the persistent data volume and explicit environment variables still override them for existing scripted deployments.
+- Generated Docker admin password is only used for first-run bootstrap when the users table is empty; later UI password changes are not overwritten.
+
+## Docker And Release Validation
+
+- GitHub Actions workflow validates Go tests/build, smoke-tests a local Docker image, and publishes multi-platform `linux/amd64,linux/arm64` images to GHCR.
+- Container smoke tests intentionally omit `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` so CI proves the automated first-run path.
+- Run `24803564445` validated commit `04e7434` and published the automated Docker bootstrap image.
+- GHCR package visibility was made public, allowing anonymous end-user pulls.
+- Anonymous pull and install from `ghcr.io/onellan/tockr:latest` was validated from a fresh volume.
+- Latest image was later refreshed for commit `7478c52` after removing `main` push path ignores.
+- Current validated image digest: `ghcr.io/onellan/tockr@sha256:9dfc4895c4410364c1e91b330ebdee9fb266cec3f87a8cb74df4eb1593455ff0`.
+- Local proof container `tockr-default` has run successfully on `http://127.0.0.1:8029` with `/healthz` returning `{"status":"ok"}`.
+
+## Consolidated Feature Audit Notes
+
+- Favorites: implemented create/list/start/edit/delete. Future polish can add richer row context for project/activity display if needed.
+- Tasks: implemented create/list/edit/archive. Archived tasks preserve historical timesheets and are excluded from active selectors.
+- Saved reports: implemented create/list/open/edit/delete/share links. Future work can add scheduled delivery.
+- Utilization: implemented `/reports/utilization` with date filters and lightweight CSS bars.
+- Rates: implemented effective-dated billable/user cost rates and retroactive recalculation. Exported/finalized-record protections should be revisited if invoice locking is added.
+- Exchange rates: implemented workspace-scoped exchange-rate management for display/reporting conversion without mutating stored money values.
+- Invoices: implemented richer HTML invoice output using invoice/customer/item details. PDF generation remains deferred.
+- Exports: implemented CSV exports for reports and timesheets using standard library CSV.
+- CI/CD: implemented validation, smoke test, GHCR publish, public-image pull validation, and stale-latest prevention for all `main` pushes.
 
 ## Role Model
 
@@ -231,4 +265,20 @@ The temporary workspace-admin planning files from the workspace management imple
 - `schema-changes.md`
 - `ui-flow-plan.md`
 - `rollout-plan.md`
+- `TODO.md`
+
+The later feature, finance, export, Docker automation, and validation planning files were merged here and removed:
+
+- `automation-plan.md`
+- `ci-fix-log.md`
+- `end-to-end-validation.md`
+- `feature-audit.md`
+- `financial-model-plan.md`
+- `gap-analysis.md`
+- `invoice-export-plan.md`
+- `permission-impact.md`
+- `reporting-dashboard-plan.md`
+- `rollout-validation-plan.md`
+- `schema-changes.md`
+- `setup-audit.md`
 - `TODO.md`
