@@ -2,9 +2,11 @@ package templates
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -50,7 +52,7 @@ var adminNav = []navItem{
 
 func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s</title><link rel=\"stylesheet\" href=\"/static/style.css\"><script src=\"/static/htmx-lite.js\" defer></script></head><body>", esc(title))
+		_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s</title><link rel=\"icon\" href=\"/favicon.ico?v=20260422\" sizes=\"any\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/favicon-32x32.png?v=20260422\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/favicon-16x16.png?v=20260422\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/apple-touch-icon.png?v=20260422\"><link rel=\"manifest\" href=\"/static/site.webmanifest?v=20260422\"><meta name=\"theme-color\" content=\"#0f766e\"><link rel=\"stylesheet\" href=\"/static/style.css\"><script src=\"/static/htmx-lite.js\" defer></script><script src=\"/static/menu.js\" defer></script></head><body>", esc(title))
 		if user == nil {
 			_, _ = fmt.Fprint(w, `<main class="auth-main">`)
 			if err := body.Render(ctx, w); err != nil {
@@ -62,7 +64,9 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><nav class="side-nav" aria-label="Primary navigation">`)
 		renderNav(w, user, primaryNav)
 		renderNav(w, user, adminNav)
-		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area" aria-label="Account"><span class="account-name">%s</span><form method="post" action="/logout"><input type="hidden" name="csrf" value="%s"><button class="ghost-button" type="submit">Logout</button></form></div></header><main class="content" id="main-content" tabindex="-1">`, esc(title), esc(user.DisplayName), esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div>`, esc(title))
+		renderAccountDropdown(w, user)
+		_, _ = fmt.Fprint(w, `</header><main class="content" id="main-content" tabindex="-1">`)
 		if err := body.Render(ctx, w); err != nil {
 			return err
 		}
@@ -214,13 +218,7 @@ func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, s
 			reportOption(group, "group", "Groups"),
 			dateInput(filter.Begin), dateInput(filter.End), idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID), idValue(filter.TaskID),
 			esc(user.CSRF), esc(group), dateInput(filter.Begin), dateInput(filter.End), idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID), idValue(filter.TaskID), idValue(filter.UserID), idValue(filter.GroupID))
-		if len(saved) > 0 {
-			rows := [][]string{}
-			for _, report := range saved {
-				rows = append(rows, []string{report.Name, report.GroupBy})
-			}
-			dataTable(w, []string{"Saved report", "Group"}, rows)
-		}
+		renderSavedReportsDropdown(w, saved)
 		_, _ = fmt.Fprint(w, `<div class="tabs" aria-label="Report groups">`)
 		reportTab(w, group, "user", "Users")
 		reportTab(w, group, "customer", "Customers")
@@ -312,6 +310,26 @@ func renderNav(w io.Writer, user *NavUser, items []navItem) {
 	}
 }
 
+func renderAccountDropdown(w io.Writer, user *NavUser) {
+	initial := "?"
+	name := strings.TrimSpace(user.DisplayName)
+	if name != "" {
+		initial = strings.ToUpper(string([]rune(name)[0]))
+	}
+	_, _ = fmt.Fprintf(w, `<div class="dropdown account-menu" data-dropdown="account"><button class="account-trigger" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><span class="avatar" aria-hidden="true">%s</span><span class="account-name">%s</span><span class="chevron" aria-hidden="true">▾</span></button><div class="dropdown-menu dropdown-menu-right" id="account-menu" role="menu" hidden data-dropdown-menu><a role="menuitem" href="/">Dashboard</a><a role="menuitem" href="/timesheets">Timesheets</a><form method="post" action="/logout" role="none"><input type="hidden" name="csrf" value="%s"><button role="menuitem" type="submit">Logout</button></form></div></div>`, esc(initial), esc(user.DisplayName), esc(user.CSRF))
+}
+
+func renderSavedReportsDropdown(w io.Writer, saved []domain.SavedReport) {
+	if len(saved) == 0 {
+		return
+	}
+	_, _ = fmt.Fprint(w, `<div class="report-actions"><div class="dropdown" data-dropdown="saved-reports"><button class="ghost-button dropdown-trigger" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="saved-reports-menu">Saved reports <span class="chevron" aria-hidden="true">▾</span></button><div class="dropdown-menu" id="saved-reports-menu" role="menu" hidden data-dropdown-menu>`)
+	for _, report := range saved {
+		_, _ = fmt.Fprintf(w, `<a role="menuitem" href="%s"><span>%s</span><small>%s</small></a>`, esc(savedReportHref(report)), esc(report.Name), esc(report.GroupBy))
+	}
+	_, _ = fmt.Fprint(w, `</div></div></div>`)
+}
+
 func (u *NavUser) can(permission string) bool {
 	if permission == "" {
 		return true
@@ -347,6 +365,21 @@ func reportOption(current, value, label string) string {
 		selected = ` selected`
 	}
 	return fmt.Sprintf(`<option value="%s"%s>%s</option>`, esc(value), selected, esc(label))
+}
+
+func savedReportHref(report domain.SavedReport) string {
+	values := url.Values{}
+	values.Set("group", defaultVal(report.GroupBy, "user"))
+	var filters map[string]string
+	if err := json.Unmarshal([]byte(report.FiltersJSON), &filters); err == nil {
+		for key, value := range filters {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				values.Set(key, value)
+			}
+		}
+	}
+	return "/reports?" + values.Encode()
 }
 
 func pageHeader(w io.Writer, title, eyebrow, description string) {

@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,114 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	body = getWithCookie(app, "/reports?group=customer", cookie).Body.String()
 	if !strings.Contains(body, `class="tab-link active" aria-current="page" href="/reports?group=customer"`) {
 		t.Fatal("expected customer report tab to be active")
+	}
+}
+
+func TestDropdownsAndFaviconHeadRender(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	login := httptest.NewRecorder()
+	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/login", nil))
+	loginBody := login.Body.String()
+	for _, expected := range []string{
+		`rel="icon" href="/favicon.ico?v=20260422"`,
+		`rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png?v=20260422"`,
+		`rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=20260422"`,
+		`rel="manifest" href="/static/site.webmanifest?v=20260422"`,
+		`<script src="/static/menu.js" defer>`,
+	} {
+		if strings.Count(loginBody, expected) != 1 {
+			t.Fatalf("expected one %q in login head", expected)
+		}
+	}
+
+	body := getWithCookie(app, "/", cookie).Body.String()
+	for _, expected := range []string{
+		`data-dropdown="account"`,
+		`data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"`,
+		`id="account-menu" role="menu" hidden data-dropdown-menu`,
+		`role="menuitem" href="/timesheets"`,
+		`role="menuitem" type="submit">Logout</button>`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("dashboard missing dropdown markup %q", expected)
+		}
+	}
+}
+
+func TestSavedReportsDropdownRendersMenuLinks(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	user, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || user == nil {
+		t.Fatal("missing admin")
+	}
+	if err := store.CreateSavedReport(ctx, &domain.SavedReport{
+		WorkspaceID: 1,
+		UserID:      user.ID,
+		Name:        "Task focus",
+		GroupBy:     "task",
+		FiltersJSON: `{"task_id":"7","project_id":"2"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/reports?group=task", cookie).Body.String()
+	for _, expected := range []string{
+		`data-dropdown="saved-reports"`,
+		`aria-controls="saved-reports-menu"`,
+		`href="/reports?group=task&amp;project_id=2&amp;task_id=7"`,
+		`Task focus`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("reports missing saved-report dropdown markup %q", expected)
+		}
+	}
+}
+
+func TestFaviconAssetsAreServed(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cases := []struct {
+		path        string
+		contentType string
+	}{
+		{"/favicon.ico", "image/x-icon"},
+		{"/favicon-16x16.png", "image/png"},
+		{"/favicon-32x32.png", "image/png"},
+		{"/apple-touch-icon.png", "image/png"},
+		{"/static/icon-192.png", "image/png"},
+		{"/static/menu.js", "text/javascript"},
+		{"/site.webmanifest", "application/manifest+json"},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s returned %d", tc.path, rec.Code)
+		}
+		if !strings.HasPrefix(rec.Header().Get("Content-Type"), tc.contentType) {
+			t.Fatalf("%s content-type %q, want prefix %q", tc.path, rec.Header().Get("Content-Type"), tc.contentType)
+		}
+		if rec.Body.Len() == 0 {
+			t.Fatalf("%s returned empty body", tc.path)
+		}
+		if !strings.Contains(rec.Header().Get("Cache-Control"), "max-age") {
+			t.Fatalf("%s missing cache header", tc.path)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/site.webmanifest", nil))
+	var manifest map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatalf("manifest is not valid json: %v", err)
+	}
+	if manifest["short_name"] != "Tockr" {
+		t.Fatalf("unexpected manifest: %#v", manifest)
 	}
 }
 

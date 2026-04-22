@@ -52,7 +52,11 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Use(middleware.Recoverer)
 	r.Use(s.sessionMiddleware)
 	r.Use(s.csrfMiddleware)
-	r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	r.Get("/favicon.ico", s.iconAsset("favicon.ico"))
+	r.Get("/favicon-16x16.png", s.iconAsset("favicon-16x16.png"))
+	r.Get("/favicon-32x32.png", s.iconAsset("favicon-32x32.png"))
+	r.Get("/apple-touch-icon.png", s.iconAsset("apple-touch-icon.png"))
+	r.Get("/site.webmanifest", s.iconAsset("site.webmanifest"))
 	r.Get("/static/*", s.static)
 	r.Get("/healthz", s.health)
 	r.Get("/login", s.loginPage)
@@ -115,7 +119,54 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/static/")
-	http.ServeFile(w, r, filepath.Join("web", "static", filepath.Clean(path)))
+	setStaticHeaders(w, path)
+	http.ServeFile(w, r, staticFile(path))
+}
+
+func (s *Server) iconAsset(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		setStaticHeaders(w, name)
+		http.ServeFile(w, r, staticFile(name))
+	}
+}
+
+func staticFile(name string) string {
+	clean := filepath.Clean(strings.TrimPrefix(name, "/"))
+	if clean == "." || strings.HasPrefix(clean, "..") {
+		return filepath.Join("web", "static", "__missing__")
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return filepath.Join("web", "static", clean)
+	}
+	for {
+		candidate := filepath.Join(wd, "web", "static", clean)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(wd)
+		if parent == wd {
+			break
+		}
+		wd = parent
+	}
+	return filepath.Join("web", "static", clean)
+}
+
+func setStaticHeaders(w http.ResponseWriter, path string) {
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	switch {
+	case strings.HasSuffix(path, ".webmanifest"):
+		w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
+	case strings.HasSuffix(path, ".ico"):
+		w.Header().Set("Content-Type", "image/x-icon")
+	case strings.HasSuffix(path, ".png"):
+		w.Header().Set("Content-Type", "image/png")
+	case strings.HasSuffix(path, ".js"):
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	case strings.HasSuffix(path, ".css"):
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

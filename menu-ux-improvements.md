@@ -1,21 +1,24 @@
 # Menu UX Improvements
 
-## Design Direction
+## Implemented Direction
 
-The menu should remain Kimai-inspired: persistent left navigation, grouped business workflows, admin tools separated from daily work, and server-rendered pages. The improvement is polish, not reinvention.
+- Keep the sidebar visible and grouped because it is the fastest route map for the app.
+- Move account/logout into an accessible dropdown to clean up the topbar.
+- Move saved reports into an accessible dropdown to reduce report-page clutter.
+- Use restrained styling: compact shadow, strong focus ring, clear hover state, and no heavy animation.
+- Use a tiny dependency-free script for menu state.
 
-## Improvements
+## Accessibility
 
-- Use permission-aware groups so users never see destinations that fail immediately.
-- Add active indicators that are visible but restrained.
-- Improve group spacing and link touch targets.
-- Add consistent hover and focus states for links, buttons, and tabs.
-- Separate account identity from the logout button.
-- Add accessible labels to sidebar, primary navigation, topbar, and report tabs.
-- Keep mobile navigation lightweight with wrapping groups instead of JavaScript drawers.
+- Dropdown triggers are buttons with `aria-haspopup`, `aria-controls`, and `aria-expanded`.
+- Menus are hidden by default and become visible only when open.
+- Escape closes menus.
+- Outside click closes menus.
+- ArrowDown opens and focuses the first menu item.
+- Links and form buttons remain keyboard reachable.
 
-## Tradeoffs
+## Mobile
 
-- No icon dependency is added. The app stays dependency-light and Raspberry Pi friendly.
-- No dropdown account menu is added. A direct logout action is faster, clearer, and avoids JavaScript for now.
-- No collapsible sidebar is added. The current information architecture is small enough that a persistent rail is simpler and more reliable.
+- Menus are positioned within the viewport and switch to full-width alignment where needed.
+- Touch targets remain at least 36px high.
+- Sidebar navigation remains a simple two-column layout on small screens.
