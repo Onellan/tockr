@@ -13,10 +13,6 @@ on:
       - main
     tags:
       - "v*.*.*"
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "deployment/**"
   workflow_dispatch:
 
 concurrency:
