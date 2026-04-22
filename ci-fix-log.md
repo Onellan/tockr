@@ -22,5 +22,7 @@
   - Validate Go application: passed.
   - Build and smoke test container: passed.
   - Build and publish Docker image: passed.
-- Anonymous pull of `ghcr.io/onellan/tockr:latest` is currently blocked by
-  GHCR package visibility returning `unauthorized`.
+- Anonymous pull of `ghcr.io/onellan/tockr:latest` passed after the package
+  was made public.
+- Published image install validation passed with generated bootstrap password,
+  health check, login, and restart persistence.

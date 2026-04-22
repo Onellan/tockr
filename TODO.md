@@ -89,6 +89,6 @@
 - [x] Run local Go and Docker validation.
 - [x] Push changes to GitHub.
 - [x] Iterate GitHub Actions until CI succeeds.
-- [ ] Make GHCR package public so end users can pull without auth.
-- [ ] Pull the GHCR image produced by GitHub.
-- [ ] Validate install from the published image.
+- [x] Make GHCR package public so end users can pull without auth.
+- [x] Pull the GHCR image produced by GitHub.
+- [x] Validate install from the published image.

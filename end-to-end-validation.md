@@ -28,15 +28,18 @@ install flow.
 
 ## Published Image Validation
 
-- `docker pull ghcr.io/onellan/tockr:latest` currently returns
-  `unauthorized`.
-- The CI publish job succeeded, so the image exists, but GHCR package
-  visibility is private. Anonymous end-user pull requires the package to be
-  changed to public in GitHub package settings.
+- Anonymous pull passed after the GHCR package was made public:
+
+```sh
+docker logout ghcr.io
+docker pull ghcr.io/onellan/tockr:latest
+```
+
+- Pulled digest: `sha256:5b43a03b19bd97507c1e6a185fd6554d599a69eb3cecf5af6baed62a2fc2c2ea`.
 
 ## Final Install Flow Confirmed
 
-Blocked until GHCR package visibility is public, then rerun:
+Confirmed with a fresh volume and the published GHCR image:
 
 ```sh
 docker pull ghcr.io/onellan/tockr:latest
@@ -48,3 +51,12 @@ docker run -d --name tockr-published-e2e \
 curl -fsS http://localhost:18082/healthz
 docker exec tockr-published-e2e cat /app/data/.admin_password
 ```
+
+Validation results:
+
+- `/healthz` returned healthy.
+- `/app/data/.session_secret` was generated.
+- `/app/data/.admin_password` was generated.
+- Login with `admin@example.com` and the generated password returned `303 See Other`.
+- Restart preserved the generated admin password.
+- `/healthz` stayed healthy after restart.
