@@ -17,4 +17,10 @@
 ## Validation Log
 
 - Local validation results are recorded in `end-to-end-validation.md`.
-- GitHub Actions results must be added after pushing and iterating CI.
+- GitHub Actions run `24803564445` for commit `04e7434` completed
+  successfully:
+  - Validate Go application: passed.
+  - Build and smoke test container: passed.
+  - Build and publish Docker image: passed.
+- Anonymous pull of `ghcr.io/onellan/tockr:latest` is currently blocked by
+  GHCR package visibility returning `unauthorized`.

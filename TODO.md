@@ -87,7 +87,8 @@
 - [x] Remove fixed Docker admin password from Compose defaults.
 - [x] Rewrite canonical Docker setup documentation.
 - [x] Run local Go and Docker validation.
-- [ ] Push changes to GitHub.
-- [ ] Iterate GitHub Actions until CI succeeds.
+- [x] Push changes to GitHub.
+- [x] Iterate GitHub Actions until CI succeeds.
+- [ ] Make GHCR package public so end users can pull without auth.
 - [ ] Pull the GHCR image produced by GitHub.
 - [ ] Validate install from the published image.
