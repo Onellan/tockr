@@ -1082,69 +1082,127 @@ label > .field-hint {
   height: var(--space-5);
 }
 
-.calendar-grid {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(150px, 1fr));
+/* ── Calendar: vertical stacked day layout ── */
+.calendar-stack {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-3);
 }
 
-.calendar-day {
-  min-height: 220px;
+.calendar-day-row {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
-  padding: var(--space-3);
+  overflow: hidden;
 }
 
 .calendar-day-missing {
-  border-color: rgba(217, 119, 6, 0.28);
-  background: linear-gradient(180deg, rgba(255, 244, 229, 0.9) 0%, var(--surface) 100%);
+  border-color: rgba(217, 119, 6, 0.35);
+  background: linear-gradient(135deg, rgba(255, 244, 229, 0.85) 0%, var(--surface) 100%);
 }
 
-.calendar-day-head {
+.calendar-day-weekend {
+  opacity: 0.7;
+}
+
+.calendar-day-info {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding-bottom: var(--space-2);
-  margin-bottom: var(--space-2);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
 }
 
-.calendar-day-head span,
-.calendar-entry small {
-  color: var(--muted);
-  font-size: 12px;
+.calendar-day-name {
+  flex: 1;
+  font-size: 14px;
 }
 
-.calendar-entry {
-  display: grid;
-  gap: 2px;
-  margin-bottom: var(--space-2);
-  border-left: 3px solid var(--primary);
-  border-radius: var(--radius-sm);
-  background: var(--primary-soft);
-  padding: var(--space-2);
-}
-
-.calendar-entry span {
+.calendar-day-total {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
   color: var(--text-soft);
+  font-weight: 600;
+}
+
+.calendar-log-link {
+  font-size: 12px;
+  color: var(--primary);
+  text-decoration: none;
+  padding: 3px 10px;
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.calendar-log-link:hover {
+  background: var(--primary-soft);
+}
+
+.calendar-day-entries {
+  padding: var(--space-2) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.calendar-no-entries {
+  color: var(--muted);
+  font-size: 12px;
+  padding: var(--space-2) 0;
+}
+
+.calendar-entry-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 70px;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.calendar-entry-row:last-child {
+  border-bottom: none;
+}
+
+.entry-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
 }
 
-.calendar-empty {
-  display: grid;
-  place-items: center;
-  min-height: 150px;
-  color: var(--muted);
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--radius-sm);
+.entry-label {
+  color: var(--text);
+  font-weight: 500;
 }
 
-.calendar-entry-actions {
-  margin-top: auto;
-  padding-top: var(--space-2);
+.entry-duration {
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.entry-desc {
+  grid-column: 2 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ── Day checkboxes (work schedule) ── */
+.day-checkboxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+/* ── Warn cell (utilization table) ── */
+.warn-cell {
+  color: rgba(217, 119, 6, 1);
+  font-weight: 600;
 }
 
 .recovery-box {
@@ -1246,7 +1304,6 @@ label > .field-hint {
 
   .metric-grid,
   .two-col,
-  .calendar-grid,
   .form-grid,
   .login-shell {
     grid-template-columns: 1fr;

@@ -149,6 +149,43 @@ type Customer struct {
 	CreatedAt   time.Time
 }
 
+// Workstream represents a discipline or phase category within a project (e.g. Civil, Mechanical, Electrical).
+// Workstreams are workspace-level entities that can be assigned to projects.
+type Workstream struct {
+	ID          int64
+	WorkspaceID int64
+	Name        string
+	Code        string // e.g. "WS-000001"
+	Description string
+	Visible     bool
+	CreatedAt   time.Time
+}
+
+// ProjectWorkstream associates a workstream to a project with optional budget allocation.
+type ProjectWorkstream struct {
+	ID             int64
+	ProjectID      int64
+	WorkstreamID   int64
+	WorkstreamName string
+	BudgetCents    int64
+	Active         bool
+	CreatedAt      time.Time
+}
+
+// WorkSchedule holds configurable working-time expectations for a workspace.
+type WorkSchedule struct {
+	// WorkingDays is a bitmask: bit 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7=Sun
+	WorkingDaysOfWeek  []time.Weekday // e.g. [Mon, Tue, Wed, Thu, Fri]
+	WorkingHoursPerDay float64        // e.g. 8.0
+}
+
+// MonthOverride stores an admin-set working-day count for a specific year/month.
+type MonthOverride struct {
+	Year  int
+	Month time.Month
+	Days  int
+}
+
 type Project struct {
 	ID                 int64
 	WorkspaceID        int64
@@ -343,12 +380,15 @@ type RecalcPreviewRow struct {
 }
 
 type UtilizationRow struct {
-	UserID          int64
-	DisplayName     string
-	TotalSeconds    int64
-	BillableSeconds int64
-	EntryCents      int64
-	EntryCount      int64
+	UserID             int64
+	DisplayName        string
+	TotalSeconds       int64
+	BillableSeconds    int64
+	NonBillableSeconds int64
+	ExpectedSeconds    int64
+	MissingSeconds     int64
+	EntryCents         int64
+	EntryCount         int64
 }
 
 type ReportFilter struct {
@@ -392,11 +432,12 @@ type DashboardProjectWatch struct {
 }
 
 type DashboardSummary struct {
-	Stats            map[string]int64
-	WeekTracked      int64
-	MissingSeconds   int64
-	RecentWork       []DashboardRecentWork
-	ProjectWatchlist []DashboardProjectWatch
+	Stats               map[string]int64
+	WeekTracked         int64
+	MissingSeconds      int64
+	ExpectedWeekSeconds int64
+	RecentWork          []DashboardRecentWork
+	ProjectWatchlist    []DashboardProjectWatch
 }
 
 type ProjectTaskSummary struct {

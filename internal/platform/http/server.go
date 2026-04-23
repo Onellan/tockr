@@ -89,6 +89,13 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/projects/{id}/groups/remove", s.projectGroupRemove)
 		r.Get("/activities", s.activities)
 		r.Post("/activities", s.requirePermission(auth.PermManageMaster, s.saveActivity))
+		r.Get("/workstreams", s.requirePermission(auth.PermManageMaster, s.workstreams))
+		r.Post("/workstreams", s.requirePermission(auth.PermManageMaster, s.saveWorkstream))
+		r.Post("/workstreams/{id}", s.requirePermission(auth.PermManageMaster, s.saveWorkstream))
+		r.Post("/workstreams/{id}/delete", s.requirePermission(auth.PermManageMaster, s.deleteWorkstream))
+		r.Get("/projects/{id}/workstreams", s.requirePermission(auth.PermManageProjects, s.projectWorkstreams))
+		r.Post("/projects/{id}/workstreams", s.requirePermission(auth.PermManageProjects, s.saveProjectWorkstream))
+		r.Post("/projects/{id}/workstreams/{wsid}/remove", s.requirePermission(auth.PermManageProjects, s.removeProjectWorkstream))
 		r.Get("/tasks", s.tasks)
 		r.Post("/tasks", s.requirePermission(auth.PermManageMaster, s.saveTask))
 		r.Post("/tasks/{id}", s.requirePermission(auth.PermManageMaster, s.saveTask))
@@ -107,11 +114,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/calendar", s.calendar)
 		r.Post("/timesheets", s.saveTimesheet)
 		r.Post("/timesheets/start", s.startTimer)
-		r.Post("/favorites", s.saveFavorite)
-		r.Post("/favorites/{id}/start", s.startFavorite)
-		r.Post("/favorites/{id}", s.editFavorite)
-		r.Post("/favorites/{id}/delete", s.deleteFavorite)
 		r.Post("/timesheets/stop", s.stopTimer)
+		r.Get("/admin/schedule", s.requirePermission(auth.PermManageOrg, s.workScheduleSettings))
+		r.Post("/admin/schedule", s.requirePermission(auth.PermManageOrg, s.saveWorkScheduleSettings))
 		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
 		r.Post("/reports/saved", s.requirePermission(auth.PermViewReports, s.saveReport))
 		r.Post("/reports/saved/{id}", s.requirePermission(auth.PermViewReports, s.editSavedReport))
@@ -400,17 +405,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	favorites, err := s.store.ListFavorites(r.Context(), state.Access.WorkspaceID, state.User.ID)
-	if err != nil {
-		s.serverError(w, r, err)
-		return
-	}
 	selectors, err := s.selectorData(r, false, false)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Dashboard(s.nav(r), summary, active, favorites, selectors))
+	s.render(w, r, templates.Dashboard(s.nav(r), summary, active, selectors))
 }
 
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
@@ -1020,63 +1020,6 @@ func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "start", "timesheet", &t.ID, "")
-	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.started", t)
-	redirectOrJSON(w, r, "/")
-}
-
-func (s *Server) saveFavorite(w http.ResponseWriter, r *http.Request) {
-	_ = r.ParseForm()
-	projectID := formInt(r, "project_id")
-	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "task_id")); err != nil {
-		s.badRequest(w, r, err)
-		return
-	}
-	favorite := &domain.Favorite{
-		WorkspaceID: s.access(r).WorkspaceID,
-		UserID:      s.state(r).User.ID,
-		Name:        strings.TrimSpace(r.FormValue("name")),
-		CustomerID:  formInt(r, "customer_id"),
-		ProjectID:   projectID,
-		ActivityID:  formInt(r, "activity_id"),
-		TaskID:      formOptionalInt(r, "task_id"),
-		Description: r.FormValue("description"),
-		Tags:        r.FormValue("tags"),
-	}
-	if favorite.Name == "" {
-		s.badRequest(w, r, errors.New("favorite name is required"))
-		return
-	}
-	if err := s.store.CreateFavorite(r.Context(), favorite); err != nil {
-		s.serverError(w, r, err)
-		return
-	}
-	uid := s.state(r).User.ID
-	s.store.Audit(r.Context(), &uid, "create", "favorite", &favorite.ID, favorite.Name)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func (s *Server) startFavorite(w http.ResponseWriter, r *http.Request) {
-	favorite, err := s.store.Favorite(r.Context(), s.access(r).WorkspaceID, s.state(r).User.ID, pathID(r))
-	if err != nil {
-		s.serverError(w, r, err)
-		return
-	}
-	if favorite == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if !s.canTrackProject(r, favorite.ProjectID) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	start := time.Now().UTC()
-	t := &domain.Timesheet{WorkspaceID: favorite.WorkspaceID, UserID: s.state(r).User.ID, CustomerID: favorite.CustomerID, ProjectID: favorite.ProjectID, ActivityID: favorite.ActivityID, TaskID: favorite.TaskID, StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: favorite.Description}
-	if err := s.store.StartTimer(r.Context(), t, splitCSV(favorite.Tags)); err != nil {
-		s.badRequest(w, r, err)
-		return
-	}
-	uid := s.state(r).User.ID
-	s.store.Audit(r.Context(), &uid, "start", "favorite", &favorite.ID, favorite.Name)
 	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.started", t)
 	redirectOrJSON(w, r, "/")
 }
@@ -1828,32 +1771,19 @@ func (s *Server) selectorData(r *http.Request, includeUsers, includeGroups bool)
 }
 
 func customerLabel(customer domain.Customer) string {
-	parts := []string{customer.Name}
-	if customer.Number != "" {
-		parts = append(parts, customer.Number)
-	}
-	if customer.Company != "" {
-		parts = append(parts, customer.Company)
-	}
-	return strings.Join(parts, " - ")
+	return strings.TrimSpace(customer.Name)
 }
 
 func projectLabel(project domain.Project, customers map[int64]string) string {
-	if customer := labelValue(customers, project.CustomerID); customer != "" {
-		return project.Name + " - " + customer
-	}
 	return project.Name
 }
 
 func activityLabel(activity domain.Activity, projects map[int64]string) string {
-	if activity.ProjectID != nil {
-		return activity.Name + " - " + labelValue(projects, *activity.ProjectID)
-	}
-	return activity.Name + " - Global"
+	return activity.Name
 }
 
 func taskLabel(task domain.Task, projects map[int64]string) string {
-	return task.Name + " - " + labelValue(projects, task.ProjectID)
+	return task.Name
 }
 
 func userLabel(user domain.User) string {
@@ -2100,45 +2030,151 @@ func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) 
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
-// ─── Favorite edit/delete ──────────────────────────────────────────────────────
+// ─── Workstream handlers ──────────────────────────────────────────────────────
 
-func (s *Server) editFavorite(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r)
-	if id == 0 {
-		http.NotFound(w, r)
-		return
-	}
-	_ = r.ParseForm()
-	access := s.access(r)
-	userID := s.state(r).User.ID
-	var taskID *int64
-	if v := r.FormValue("task_id"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			taskID = &n
-		}
-	}
-	if err := s.store.UpdateFavorite(r.Context(), access.WorkspaceID, userID, id,
-		r.FormValue("name"), formInt(r, "project_id"), formInt(r, "activity_id"),
-		taskID, r.FormValue("description"), r.FormValue("tags")); err != nil {
+func (s *Server) workstreams(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListWorkstreams(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	s.render(w, r, templates.Workstreams(s.nav(r), items))
 }
 
-func (s *Server) deleteFavorite(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r)
-	if id == 0 {
-		http.NotFound(w, r)
+func (s *Server) saveWorkstream(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	ws := &domain.Workstream{
+		WorkspaceID: s.access(r).WorkspaceID,
+		Name:        strings.TrimSpace(r.FormValue("name")),
+		Description: r.FormValue("description"),
+		Visible:     checkbox(r, "visible"),
+	}
+	if id := pathID(r); id > 0 {
+		ws.ID = id
+		ws.Code = r.FormValue("code")
+	}
+	if ws.Name == "" {
+		s.badRequest(w, r, errors.New("workstream name is required"))
 		return
 	}
-	access := s.access(r)
-	userID := s.state(r).User.ID
-	if err := s.store.DeleteFavorite(r.Context(), access.WorkspaceID, userID, id); err != nil {
+	if err := s.store.UpsertWorkstream(r.Context(), ws); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "upsert", "workstream", &ws.ID, ws.Name)
+	http.Redirect(w, r, "/workstreams", http.StatusSeeOther)
+}
+
+func (s *Server) deleteWorkstream(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if err := s.store.DeleteWorkstream(r.Context(), s.access(r).WorkspaceID, id); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/workstreams", http.StatusSeeOther)
+}
+
+func (s *Server) projectWorkstreams(w http.ResponseWriter, r *http.Request) {
+	projectID := pathID(r)
+	project, err := s.store.Project(r.Context(), projectID)
+	if err != nil || project == nil || project.WorkspaceID != s.access(r).WorkspaceID {
+		http.NotFound(w, r)
+		return
+	}
+	assigned, err := s.store.ListProjectWorkstreams(r.Context(), projectID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	all, err := s.store.ListWorkstreams(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.ProjectWorkstreams(s.nav(r), project, assigned, all))
+}
+
+func (s *Server) saveProjectWorkstream(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	projectID := pathID(r)
+	project, err := s.store.Project(r.Context(), projectID)
+	if err != nil || project == nil || project.WorkspaceID != s.access(r).WorkspaceID {
+		http.NotFound(w, r)
+		return
+	}
+	wsID := formInt(r, "workstream_id")
+	if wsID == 0 {
+		s.badRequest(w, r, errors.New("workstream is required"))
+		return
+	}
+	pw := &domain.ProjectWorkstream{
+		ProjectID:    projectID,
+		WorkstreamID: wsID,
+		BudgetCents:  formInt(r, "budget_cents"),
+		Active:       true,
+	}
+	if err := s.store.UpsertProjectWorkstream(r.Context(), pw); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/workstreams", projectID), http.StatusSeeOther)
+}
+
+func (s *Server) removeProjectWorkstream(w http.ResponseWriter, r *http.Request) {
+	projectID := pathID(r)
+	project, err := s.store.Project(r.Context(), projectID)
+	if err != nil || project == nil || project.WorkspaceID != s.access(r).WorkspaceID {
+		http.NotFound(w, r)
+		return
+	}
+	wsIDStr := chi.URLParam(r, "wsid")
+	wsID, _ := strconv.ParseInt(wsIDStr, 10, 64)
+	if wsID == 0 {
+		s.badRequest(w, r, errors.New("invalid workstream id"))
+		return
+	}
+	if err := s.store.RemoveProjectWorkstream(r.Context(), projectID, wsID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d/workstreams", projectID), http.StatusSeeOther)
+}
+
+// ─── Work schedule settings ────────────────────────────────────────────────────
+
+func (s *Server) workScheduleSettings(w http.ResponseWriter, r *http.Request) {
+	schedule := s.store.WorkSchedulePublic(r.Context())
+	s.render(w, r, templates.WorkScheduleSettings(s.nav(r), schedule))
+}
+
+func (s *Server) saveWorkScheduleSettings(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	hoursStr := r.FormValue("hours_per_day")
+	hoursPerDay := 8.0
+	if h, err := strconv.ParseFloat(hoursStr, 64); err == nil && h > 0 {
+		hoursPerDay = h
+	}
+	// Parse working days checkboxes: mon=1,tue=2,...,sun=0
+	dayNames := map[string]time.Weekday{
+		"sun": time.Sunday, "mon": time.Monday, "tue": time.Tuesday,
+		"wed": time.Wednesday, "thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday,
+	}
+	var days []time.Weekday
+	for name, weekday := range dayNames {
+		if r.FormValue("day_"+name) == "1" {
+			days = append(days, weekday)
+		}
+	}
+	if len(days) == 0 {
+		days = []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday}
+	}
+	schedule := domain.WorkSchedule{WorkingDaysOfWeek: days, WorkingHoursPerDay: hoursPerDay}
+	if err := s.store.UpsertWorkSchedule(r.Context(), schedule); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	http.Redirect(w, r, "/admin/schedule", http.StatusSeeOther)
 }
 
 // ─── Saved report edit/delete/share ───────────────────────────────────────────

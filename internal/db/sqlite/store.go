@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -910,6 +911,9 @@ func (s *Store) UpsertCustomer(ctx context.Context, c *domain.Customer) error {
 		c.WorkspaceID = 1
 	}
 	if c.ID == 0 {
+		if c.Number == "" {
+			c.Number = s.generateEntityID(ctx, "customers", "CL", c.WorkspaceID)
+		}
 		res, err := s.db.ExecContext(ctx, `INSERT INTO customers(workspace_id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			c.WorkspaceID, c.Name, c.Number, c.Company, c.Contact, c.Email, defaultString(c.Currency, "USD"), defaultString(c.Timezone, "UTC"), boolInt(c.Visible), boolInt(c.Billable), c.Comment, c.LegacyJSON, now)
 		if err != nil {
@@ -979,6 +983,9 @@ func (s *Store) UpsertProject(ctx context.Context, p *domain.Project) error {
 	if p.ID == 0 {
 		if p.BudgetAlertPercent == 0 {
 			p.BudgetAlertPercent = 80
+		}
+		if p.Number == "" {
+			p.Number = s.generateEntityID(ctx, "projects", "PR", p.WorkspaceID)
 		}
 		res, err := s.db.ExecContext(ctx, `INSERT INTO projects(workspace_id, customer_id, name, number, order_number, visible, private, billable, estimate_seconds, budget_cents, budget_alert_percent, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			p.WorkspaceID, p.CustomerID, p.Name, p.Number, p.OrderNo, boolInt(p.Visible), boolInt(p.Private), boolInt(p.Billable), p.EstimateSeconds, p.BudgetCents, p.BudgetAlertPercent, p.Comment, p.LegacyJSON, now)
@@ -1054,6 +1061,9 @@ func (s *Store) UpsertActivity(ctx context.Context, a *domain.Activity) error {
 		a.WorkspaceID = 1
 	}
 	if a.ID == 0 {
+		if a.Number == "" {
+			a.Number = s.generateEntityID(ctx, "activities", "WT", a.WorkspaceID)
+		}
 		res, err := s.db.ExecContext(ctx, `INSERT INTO activities(workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 			a.WorkspaceID, a.ProjectID, a.Name, a.Number, boolInt(a.Visible), boolInt(a.Billable), a.Comment, a.LegacyJSON, now)
 		if err != nil {
@@ -1133,6 +1143,9 @@ func (s *Store) UpsertTask(ctx context.Context, t *domain.Task) error {
 	}
 	now := utcNow()
 	if t.ID == 0 {
+		if t.Number == "" {
+			t.Number = s.generateEntityID(ctx, "tasks", "TSK", t.WorkspaceID)
+		}
 		res, err := s.db.ExecContext(ctx, `INSERT INTO tasks(workspace_id, project_id, name, number, visible, billable, estimate_seconds, created_at) VALUES(?,?,?,?,?,?,?,?)`,
 			t.WorkspaceID, t.ProjectID, t.Name, t.Number, boolInt(t.Visible), boolInt(t.Billable), t.EstimateSeconds, now)
 		if err != nil {
@@ -2002,7 +2015,9 @@ func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (dom
 		access.WorkspaceID, access.UserID, formatTime(weekStart)).Scan(&summary.WeekTracked); err != nil {
 		return summary, err
 	}
-	expectedWeekSeconds := expectedWeekSecondsToDate(time.Now().UTC())
+	schedule := s.workSchedule(ctx)
+	summary.ExpectedWeekSeconds = expectedSecondsToDateWithSchedule(time.Now().UTC(), schedule)
+	expectedWeekSeconds := summary.ExpectedWeekSeconds
 	if expectedWeekSeconds > summary.WeekTracked {
 		summary.MissingSeconds = expectedWeekSeconds - summary.WeekTracked
 	}
@@ -2518,6 +2533,100 @@ func utcNow() string {
 	return formatTime(time.Now().UTC())
 }
 
+// generateEntityID produces a sequential prefixed ID (e.g. "CL-000001") for a given table.
+// It is called on insert when the entity's Number field is blank.
+func (s *Store) generateEntityID(ctx context.Context, table, prefix string, workspaceID int64) string {
+	var n int64
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE workspace_id=?`, workspaceID).Scan(&n)
+	return fmt.Sprintf("%s-%06d", prefix, n+1)
+}
+
+// workSchedule reads working schedule settings from the settings table.
+// Returns default Mon-Fri 8h/day if not configured.
+func (s *Store) workSchedule(ctx context.Context) domain.WorkSchedule {
+	schedule := domain.WorkSchedule{
+		WorkingDaysOfWeek:  []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday},
+		WorkingHoursPerDay: 8.0,
+	}
+	var daysStr, hoursStr string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='working_days'`).Scan(&daysStr)
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='working_hours_per_day'`).Scan(&hoursStr)
+	if daysStr != "" {
+		var days []time.Weekday
+		for _, part := range strings.Split(daysStr, ",") {
+			part = strings.TrimSpace(part)
+			if n, err := strconv.Atoi(part); err == nil && n >= 0 && n <= 6 {
+				days = append(days, time.Weekday(n))
+			}
+		}
+		if len(days) > 0 {
+			schedule.WorkingDaysOfWeek = days
+		}
+	}
+	if hoursStr != "" {
+		if h, err := strconv.ParseFloat(hoursStr, 64); err == nil && h > 0 {
+			schedule.WorkingHoursPerDay = h
+		}
+	}
+	return schedule
+}
+
+// isWorkingDay returns true if the weekday is in the schedule's working days.
+func isWorkingDay(weekday time.Weekday, workingDays []time.Weekday) bool {
+	for _, d := range workingDays {
+		if d == weekday {
+			return true
+		}
+	}
+	return false
+}
+
+// expectedSecondsToDate returns total expected work seconds from the start of the current week to today.
+func expectedSecondsToDateWithSchedule(value time.Time, schedule domain.WorkSchedule) int64 {
+	start := startOfWeek(value)
+	current := time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+	var days int64
+	for day := start; !day.After(current); day = day.AddDate(0, 0, 1) {
+		if isWorkingDay(day.Weekday(), schedule.WorkingDaysOfWeek) {
+			days++
+		}
+	}
+	return int64(float64(days) * schedule.WorkingHoursPerDay * 3600)
+}
+
+// expectedSecondsForDateRange returns total expected work seconds in a date range.
+func expectedSecondsForDateRangeWithSchedule(begin, end time.Time, schedule domain.WorkSchedule) int64 {
+	var days int64
+	for day := begin; day.Before(end); day = day.AddDate(0, 0, 1) {
+		if isWorkingDay(day.Weekday(), schedule.WorkingDaysOfWeek) {
+			days++
+		}
+	}
+	return int64(float64(days) * schedule.WorkingHoursPerDay * 3600)
+}
+
+// UpsertWorkSchedule saves working schedule settings.
+func (s *Store) UpsertWorkSchedule(ctx context.Context, schedule domain.WorkSchedule) error {
+	days := make([]string, len(schedule.WorkingDaysOfWeek))
+	for i, d := range schedule.WorkingDaysOfWeek {
+		days[i] = strconv.Itoa(int(d))
+	}
+	daysStr := strings.Join(days, ",")
+	hoursStr := strconv.FormatFloat(schedule.WorkingHoursPerDay, 'f', -1, 64)
+	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('working_days',?)`, daysStr); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('working_hours_per_day',?)`, hoursStr); err != nil {
+		return err
+	}
+	return nil
+}
+
+// WorkSchedulePublic returns the current work schedule settings as a domain.WorkSchedule.
+func (s *Store) WorkSchedulePublic(ctx context.Context) domain.WorkSchedule {
+	return s.workSchedule(ctx)
+}
+
 func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
@@ -2590,8 +2699,9 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 			"effective_to":   "TEXT",
 		},
 		"timesheets": {
-			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
-			"task_id":      "INTEGER",
+			"workspace_id":  "INTEGER NOT NULL DEFAULT 1",
+			"task_id":       "INTEGER",
+			"workstream_id": "INTEGER",
 		},
 		"invoices": {
 			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
@@ -2613,6 +2723,15 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO workspaces(id, organization_id, name, slug, default_currency, timezone, created_at) VALUES(1,1,'Default Workspace','default','USD','UTC',?)`, now); err != nil {
 		return err
+	}
+	// Seed default working-schedule settings (Mon-Fri, 8h/day)
+	for _, setting := range []struct{ name, value string }{
+		{"working_days", "1,2,3,4,5"},
+		{"working_hours_per_day", "8"},
+	} {
+		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO settings(name, value) VALUES(?,?)`, setting.name, setting.value); err != nil {
+			return err
+		}
 	}
 	backfills := []string{
 		`UPDATE users SET organization_id=1 WHERE organization_id IS NULL OR organization_id=0`,
@@ -2665,6 +2784,9 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_rates_workspace_task_effective ON rates(workspace_id, task_id, effective_from DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_user_cost_rates_effective ON user_cost_rates(workspace_id, user_id, effective_from DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_project_templates_workspace_name ON project_templates(workspace_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_workstreams_workspace_name ON workstreams(workspace_id, name)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_workstreams_project ON project_workstreams(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_timesheets_workstream ON timesheets(workstream_id, started_at)`,
 	}
 	for _, query := range indexes {
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
@@ -2723,6 +2845,127 @@ func (s *Store) ListExchangeRates(ctx context.Context, workspaceID int64) ([]dom
 	return rates, rows.Err()
 }
 
+// ─── Workstreams ──────────────────────────────────────────────────────────────
+
+func (s *Store) UpsertWorkstream(ctx context.Context, w *domain.Workstream) error {
+	now := utcNow()
+	if w.WorkspaceID == 0 {
+		w.WorkspaceID = 1
+	}
+	if w.ID == 0 {
+		if w.Code == "" {
+			w.Code = s.generateEntityID(ctx, "workstreams", "WS", w.WorkspaceID)
+		}
+		res, err := s.db.ExecContext(ctx,
+			`INSERT INTO workstreams(workspace_id, name, code, description, visible, created_at) VALUES(?,?,?,?,?,?)`,
+			w.WorkspaceID, w.Name, w.Code, w.Description, boolInt(w.Visible), now)
+		if err != nil {
+			return err
+		}
+		w.ID, err = res.LastInsertId()
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE workstreams SET name=?, code=?, description=?, visible=? WHERE id=? AND workspace_id=?`,
+		w.Name, w.Code, w.Description, boolInt(w.Visible), w.ID, w.WorkspaceID)
+	return err
+}
+
+func (s *Store) DeleteWorkstream(ctx context.Context, workspaceID, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM workstreams WHERE id=? AND workspace_id=?`, id, workspaceID)
+	return err
+}
+
+func (s *Store) ListWorkstreams(ctx context.Context, workspaceID int64) ([]domain.Workstream, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, workspace_id, name, code, description, visible, created_at FROM workstreams WHERE workspace_id=? ORDER BY name`,
+		workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []domain.Workstream
+	for rows.Next() {
+		var w domain.Workstream
+		var created string
+		if err := rows.Scan(&w.ID, &w.WorkspaceID, &w.Name, &w.Code, &w.Description, &w.Visible, &created); err != nil {
+			return nil, err
+		}
+		w.CreatedAt = parseTime(created)
+		items = append(items, w)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) Workstream(ctx context.Context, workspaceID, id int64) (*domain.Workstream, error) {
+	var w domain.Workstream
+	var created string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, workspace_id, name, code, description, visible, created_at FROM workstreams WHERE id=? AND workspace_id=?`,
+		id, workspaceID).Scan(&w.ID, &w.WorkspaceID, &w.Name, &w.Code, &w.Description, &w.Visible, &created)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	w.CreatedAt = parseTime(created)
+	return &w, nil
+}
+
+// ListProjectWorkstreams lists workstreams assigned to a project with budget info.
+func (s *Store) ListProjectWorkstreams(ctx context.Context, projectID int64) ([]domain.ProjectWorkstream, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT pw.id, pw.project_id, pw.workstream_id, w.name, pw.budget_cents, pw.active, pw.created_at
+		FROM project_workstreams pw
+		JOIN workstreams w ON w.id=pw.workstream_id
+		WHERE pw.project_id=?
+		ORDER BY w.name`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []domain.ProjectWorkstream
+	for rows.Next() {
+		var pw domain.ProjectWorkstream
+		var created string
+		if err := rows.Scan(&pw.ID, &pw.ProjectID, &pw.WorkstreamID, &pw.WorkstreamName, &pw.BudgetCents, &pw.Active, &created); err != nil {
+			return nil, err
+		}
+		pw.CreatedAt = parseTime(created)
+		items = append(items, pw)
+	}
+	return items, rows.Err()
+}
+
+// UpsertProjectWorkstream assigns a workstream to a project (or updates its budget).
+func (s *Store) UpsertProjectWorkstream(ctx context.Context, pw *domain.ProjectWorkstream) error {
+	now := utcNow()
+	if pw.ID == 0 {
+		res, err := s.db.ExecContext(ctx,
+			`INSERT INTO project_workstreams(project_id, workstream_id, budget_cents, active, created_at) VALUES(?,?,?,?,?)
+			 ON CONFLICT(project_id, workstream_id) DO UPDATE SET budget_cents=excluded.budget_cents, active=excluded.active`,
+			pw.ProjectID, pw.WorkstreamID, pw.BudgetCents, boolInt(pw.Active), now)
+		if err != nil {
+			return err
+		}
+		pw.ID, err = res.LastInsertId()
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE project_workstreams SET budget_cents=?, active=? WHERE id=? AND project_id=?`,
+		pw.BudgetCents, boolInt(pw.Active), pw.ID, pw.ProjectID)
+	return err
+}
+
+// RemoveProjectWorkstream removes a workstream from a project.
+func (s *Store) RemoveProjectWorkstream(ctx context.Context, projectID, workstreamID int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM project_workstreams WHERE project_id=? AND workstream_id=?`,
+		projectID, workstreamID)
+	return err
+}
+
 // ─── Utilization Report ───────────────────────────────────────────────────────
 
 func (s *Store) UtilizationReport(ctx context.Context, access domain.AccessContext, begin, end *time.Time) ([]domain.UtilizationRow, error) {
@@ -2744,6 +2987,7 @@ func (s *Store) UtilizationReport(ctx context.Context, access domain.AccessConte
 SELECT t.user_id, u.display_name,
        COALESCE(SUM(COALESCE(t.duration_seconds,0)),0) AS total_sec,
        COALESCE(SUM(CASE WHEN t.billable=1 THEN COALESCE(t.duration_seconds,0) ELSE 0 END),0) AS bill_sec,
+       COALESCE(SUM(CASE WHEN t.billable=0 THEN COALESCE(t.duration_seconds,0) ELSE 0 END),0) AS non_bill_sec,
        COALESCE(SUM(CASE WHEN t.billable=1 THEN ROUND(COALESCE(t.duration_seconds,0)*r.amount_cents/3600.0) ELSE 0 END),0) AS entry_cents,
        COUNT(*) AS entry_count
 FROM timesheets t
@@ -2760,11 +3004,24 @@ ORDER BY total_sec DESC`, where)
 		return nil, err
 	}
 	defer rows.Close()
+	// Calculate expected seconds for the report period
+	schedule := s.workSchedule(ctx)
+	var expectedSeconds int64
+	if begin != nil && end != nil {
+		expectedSeconds = expectedSecondsForDateRangeWithSchedule(*begin, *end, schedule)
+	} else {
+		// Default: current week to date
+		expectedSeconds = expectedSecondsToDateWithSchedule(time.Now().UTC(), schedule)
+	}
 	var result []domain.UtilizationRow
 	for rows.Next() {
 		var row domain.UtilizationRow
-		if err := rows.Scan(&row.UserID, &row.DisplayName, &row.TotalSeconds, &row.BillableSeconds, &row.EntryCents, &row.EntryCount); err != nil {
+		if err := rows.Scan(&row.UserID, &row.DisplayName, &row.TotalSeconds, &row.BillableSeconds, &row.NonBillableSeconds, &row.EntryCents, &row.EntryCount); err != nil {
 			return nil, err
+		}
+		row.ExpectedSeconds = expectedSeconds
+		if expectedSeconds > row.TotalSeconds {
+			row.MissingSeconds = expectedSeconds - row.TotalSeconds
 		}
 		result = append(result, row)
 	}
@@ -3096,6 +3353,25 @@ CREATE TABLE IF NOT EXISTS webhook_endpoints(id INTEGER PRIMARY KEY AUTOINCREMEN
 CREATE TABLE IF NOT EXISTS webhook_deliveries(id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_id INTEGER NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE, event TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', next_attempt_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS exchange_rates(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, from_currency TEXT NOT NULL, to_currency TEXT NOT NULL, rate_thousandths INTEGER NOT NULL, effective_from TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workstreams(
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	name TEXT NOT NULL,
+	code TEXT NOT NULL DEFAULT '',
+	description TEXT NOT NULL DEFAULT '',
+	visible INTEGER NOT NULL DEFAULT 1,
+	created_at TEXT NOT NULL,
+	UNIQUE(workspace_id, name)
+);
+CREATE TABLE IF NOT EXISTS project_workstreams(
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	workstream_id INTEGER NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+	budget_cents INTEGER NOT NULL DEFAULT 0,
+	active INTEGER NOT NULL DEFAULT 1,
+	created_at TEXT NOT NULL,
+	UNIQUE(project_id, workstream_id)
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_projects_customer_visible ON projects(customer_id, visible);
 CREATE INDEX IF NOT EXISTS idx_activities_project_visible ON activities(project_id, visible);
