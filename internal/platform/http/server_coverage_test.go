@@ -416,9 +416,9 @@ func TestProjectWorkstreamAssignment(t *testing.T) {
 	body = rec.Body.String()
 	csrf = csrfFromBody(t, body)
 	rec = postFormWithCookie(app, "/projects/"+pid+"/workstreams", cookie, url.Values{
-		"csrf":         {csrf},
+		"csrf":          {csrf},
 		"workstream_id": {strconv.FormatInt(wsID, 10)},
-		"budget_cents": {"50000"},
+		"budget_cents":  {"50000"},
 	})
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /projects/%s/workstreams returned %d: %s", pid, rec.Code, rec.Body.String())
@@ -454,7 +454,7 @@ func TestProjectWorkstreamRequiresWorkstreamID(t *testing.T) {
 	body := getWithCookie(app, "/projects/"+pid+"/workstreams", cookie).Body.String()
 	csrf := csrfFromBody(t, body)
 	rec := postFormWithCookie(app, "/projects/"+pid+"/workstreams", cookie, url.Values{
-		"csrf":         {csrf},
+		"csrf":          {csrf},
 		"workstream_id": {"0"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -1412,5 +1412,309 @@ func TestRecalculatePreviewWithProjectFilter(t *testing.T) {
 	rec := getWithCookie(app, url, cookie)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /admin/recalculate with filter returned %d", rec.Code)
+	}
+}
+
+// ─── Admin Home ─────────────────────────────────────────────────────────────
+
+func TestAdminHomeLoads(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/admin", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin returned %d, want 200", rec.Code)
+	}
+}
+
+func TestAdminHomeForbiddenForRegularUser(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, domain.User{
+		Email: "regular@example.com", Username: "regular", DisplayName: "Regular", Timezone: "UTC", Enabled: true,
+	}, "reg12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "regular@example.com", "reg12345")
+	rec := getWithCookie(app, "/admin", cookie)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /admin for regular user returned %d, want 403", rec.Code)
+	}
+}
+
+// ─── Calendar ────────────────────────────────────────────────────────────────
+
+func TestCalendarLoads(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/calendar", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /calendar returned %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "calendar") && !strings.Contains(rec.Body.String(), "Calendar") {
+		t.Fatal("GET /calendar body missing expected content")
+	}
+}
+
+func TestCalendarWithDateParam(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/calendar?date=2026-04-01", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /calendar?date= returned %d, want 200", rec.Code)
+	}
+}
+
+// ─── Invoices Page ───────────────────────────────────────────────────────────
+
+func TestInvoicesPageLoads(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/invoices", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /invoices returned %d, want 200", rec.Code)
+	}
+}
+
+// ─── Webhooks Page ───────────────────────────────────────────────────────────
+
+func TestWebhooksPageLoads(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/webhooks", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /webhooks returned %d, want 200", rec.Code)
+	}
+}
+
+// ─── Edit Task ───────────────────────────────────────────────────────────────
+
+func TestEditExistingTask(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	_, _, _, task := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/tasks", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+	rec := postFormWithCookie(app, "/tasks/"+strconv.FormatInt(task.ID, 10), cookie, url.Values{
+		"csrf":       {csrf},
+		"project_id": {strconv.FormatInt(task.ProjectID, 10)},
+		"name":       {"Renamed Task"},
+		"number":     {"T-99"},
+		"visible":    {"on"},
+		"billable":   {"on"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /tasks/{id} returned %d, want 303", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/tasks" {
+		t.Fatalf("redirect to %q, want /tasks", loc)
+	}
+}
+
+// ─── Groups CRUD ─────────────────────────────────────────────────────────────
+
+func TestCreateGroupAndManageMembers(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/groups", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	// Create a group
+	rec := postFormWithCookie(app, "/groups", cookie, url.Values{
+		"csrf":        {csrf},
+		"name":        {"QA Team"},
+		"description": {"Quality assurance"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /groups returned %d, want 303", rec.Code)
+	}
+
+	// Verify it appears in the list
+	list := getWithCookie(app, "/groups", cookie).Body.String()
+	if !strings.Contains(list, "QA Team") {
+		t.Fatal("newly created group not visible on /groups")
+	}
+}
+
+func TestGroupMemberAddAndRemove(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	// Seed a second user
+	if err := store.CreateUser(ctx, domain.User{
+		Email: "member2@example.com", Username: "member2", DisplayName: "Member Two", Timezone: "UTC", Enabled: true,
+	}, "mem12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	var member2ID int64
+	_ = store.DB().QueryRowContext(ctx, `SELECT id FROM users WHERE email='member2@example.com'`).Scan(&member2ID)
+	// Add member2 to workspace
+	if _, err := store.DB().ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(1,?,'member',?)`, member2ID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/groups", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	// Create group
+	postFormWithCookie(app, "/groups", cookie, url.Values{"csrf": {csrf}, "name": {"Dev Team"}, "description": {""}})
+
+	var groupID int64
+	_ = store.DB().QueryRowContext(ctx, `SELECT id FROM groups WHERE name='Dev Team'`).Scan(&groupID)
+	if groupID == 0 {
+		t.Fatal("group not created")
+	}
+
+	groupURL := "/groups/" + strconv.FormatInt(groupID, 10) + "/members"
+	membersBody := getWithCookie(app, groupURL, cookie).Body.String()
+	csrf = csrfFromBody(t, membersBody)
+
+	// Add member
+	rec := postFormWithCookie(app, groupURL, cookie, url.Values{
+		"csrf":    {csrf},
+		"user_id": {strconv.FormatInt(member2ID, 10)},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /groups/{id}/members returned %d, want 303", rec.Code)
+	}
+
+	// Remove member
+	membersBody = getWithCookie(app, groupURL, cookie).Body.String()
+	csrf = csrfFromBody(t, membersBody)
+	rec = postFormWithCookie(app, groupURL+"/remove", cookie, url.Values{
+		"csrf":    {csrf},
+		"user_id": {strconv.FormatInt(member2ID, 10)},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /groups/{id}/members/remove returned %d, want 303", rec.Code)
+	}
+}
+
+// ─── User Cost Rate ──────────────────────────────────────────────────────────
+
+func TestSaveUserCostRate(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	// Get admin user ID
+	var adminID int64
+	_ = store.DB().QueryRowContext(ctx, `SELECT id FROM users WHERE email='admin@example.com'`).Scan(&adminID)
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/rates", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	rec := postFormWithCookie(app, "/rates/costs", cookie, url.Values{
+		"csrf":           {csrf},
+		"user_id":        {strconv.FormatInt(adminID, 10)},
+		"amount_cents":   {"10000"},
+		"effective_from": {"2026-01-01"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /rates/costs returned %d, want 303", rec.Code)
+	}
+}
+
+// ─── Remove Project Workstream ───────────────────────────────────────────────
+
+func TestRemoveProjectWorkstream(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	_, project, _, _ := seedSelectorFixtures(t, store)
+
+	// Create a workstream and assign it
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO workstreams(workspace_id, name, created_at) VALUES(1,'WS-Remove',?)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	var wsID int64
+	_ = store.DB().QueryRowContext(ctx, `SELECT id FROM workstreams WHERE name='WS-Remove'`).Scan(&wsID)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO project_workstreams(project_id, workstream_id, created_at) VALUES(?,?,?)`, project.ID, wsID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	wsURL := "/projects/" + strconv.FormatInt(project.ID, 10) + "/workstreams"
+	body := getWithCookie(app, wsURL, cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	removeURL := wsURL + "/" + strconv.FormatInt(wsID, 10) + "/remove"
+	rec := postFormWithCookie(app, removeURL, cookie, url.Values{"csrf": {csrf}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /projects/{id}/workstreams/{wsid}/remove returned %d, want 303", rec.Code)
+	}
+}
+
+// ─── API Endpoints: customers, projects, activities, timesheets ──────────────
+
+func TestAPICustomers(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/api/customers", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/customers returned %d, want 200", rec.Code)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("GET /api/customers returned non-JSON: %v", err)
+	}
+	if _, ok := result["data"]; !ok {
+		t.Fatal("GET /api/customers response missing 'data' key")
+	}
+}
+
+func TestAPIProjects(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/api/projects", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/projects returned %d, want 200", rec.Code)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("GET /api/projects returned non-JSON: %v", err)
+	}
+}
+
+func TestAPIActivities(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/api/activities", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/activities returned %d, want 200", rec.Code)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("GET /api/activities returned non-JSON: %v", err)
+	}
+}
+
+func TestAPITimesheets(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/api/timesheets", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/timesheets returned %d, want 200", rec.Code)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("GET /api/timesheets returned non-JSON: %v", err)
 	}
 }
