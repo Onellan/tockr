@@ -1,6 +1,6 @@
 # Tockr Product Tracker
 
-This file replaces the scattered planning, audit, impact, and follow-up markdown files that used to live at the repository root and under `docs/`. Keep this file current when features are added, deferred, or intentionally dropped.
+This file consolidates all planning, design, audit, and feature-tracking content. Operational how-to documentation (install, configure, deploy, backup, troubleshoot) lives in README.md. Keep this file current when features are added, deferred, or intentionally dropped.
 
 ## Product Principles
 
@@ -108,7 +108,56 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 - Docker first-run session secret and bootstrap admin password generation.
 - Published `latest` image is rebuilt for every push to `main` so GHCR does not lag behind documentation or small repo changes.
 - Published GHCR image has been anonymously pulled and validated from a fresh Docker volume.
-- Raspberry Pi Docker install documentation.
+- Raspberry Pi Docker install documentation and Cloudflare Tunnel deployment guide.
+
+## CI/CD Pipeline Design
+
+### Workflow Structure
+
+The workflow in `.github/workflows/ci.yml` has three jobs:
+
+1. `validate` — checkout, set up Go from `go.mod`, run `go test ./...`, build the app binary.
+2. `container-smoke` — build a local `linux/amd64` Docker image, start it without supplied secrets, verify `/healthz`, verify generated bootstrap files, check login with the generated admin password.
+3. `docker-image` — build `linux/amd64,linux/arm64` with Buildx and publish to GHCR on non-PR events.
+
+Publication only runs after validation and smoke testing pass.
+
+### Container Smoke Test Design
+
+Smoke tests intentionally omit `TOCKR_SESSION_SECRET` and `TOCKR_ADMIN_PASSWORD` so CI proves the automated first-run bootstrap path.
+
+### Registry and Tagging
+
+Registry: GitHub Container Registry (`ghcr.io/onellan/tockr`).
+
+Tags:
+- `latest` for the default branch.
+- `sha-<short-sha>` for traceable builds.
+- `vX.Y.Z`, `X.Y`, and `X` for semantic release tags.
+
+Uses `GITHUB_TOKEN` with `packages: write`. No PAT required. Public packages can be pulled anonymously.
+
+### Build Efficiency
+
+- Concurrency cancellation so outdated branch runs stop.
+- Validation, smoke, and publish jobs are gated.
+- Buildx `type=gha` cache with a stable scope.
+- Cross-compile Go using `$BUILDPLATFORM`, `$TARGETOS`, `$TARGETARCH` — no QEMU for `RUN` instructions.
+- Markdown and deployment-only changes skip CI on branches and PRs.
+
+### Raspberry Pi Image Strategy
+
+- Build `linux/arm64` for Raspberry Pi OS 64-bit.
+- Build `linux/amd64` for local/server installs.
+- Do not build `linux/arm/v7` — project requires 64-bit OS and adding 32-bit ARM increases CI time without a current requirement.
+
+### Security
+
+- Job-level permissions.
+- Publish with `GITHUB_TOKEN`, not a PAT.
+- Non-root UID/GID `65532` in container.
+- Secrets excluded from Docker build args and image layers.
+- Validation and smoke tests required before publish.
 
 ## Backlog
 
@@ -288,3 +337,18 @@ The later feature, finance, export, Docker automation, and validation planning f
 - `schema-changes.md`
 - `setup-audit.md`
 - `TODO.md`
+
+The operational documentation files below were consolidated into README.md:
+
+- `docs/ci-cd.md` (CI/CD pipeline design → TRACKER.md)
+- `docs/configuration.md`
+- `docs/docker-setup.md`
+- `docs/raspberry-pi.md`
+- `docs/raspberry-pi-setup.md`
+- `docs/backup-and-restore.md`
+- `docs/updating.md`
+- `docs/troubleshooting.md`
+- `deployment/docker.md`
+- `deployment/raspberry-pi.md`
+- `deployment/environment.md`
+- `deployment/systemd.md`

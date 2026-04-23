@@ -1,6 +1,7 @@
 # Docker Deployment
 
-See the full step-by-step guide at [docs/docker-setup.md](../docs/docker-setup.md).
+See [README.md](../README.md#docker-install).
+
 
 ## Pull the published image
 

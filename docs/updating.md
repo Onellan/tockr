@@ -1,8 +1,7 @@
 # Updating, Backup, And Restore
 
-Tockr stores all Docker data in the `tockr-data` volume. Updating the container
-does not delete the database, generated session secret, generated bootstrap
-password, or app files.
+See [README.md](../README.md#update) for update steps and [README.md](../README.md#backup-and-restore) for backup and restore procedures.
+
 
 ## Update A Docker Run Install
 

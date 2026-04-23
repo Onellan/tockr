@@ -1,0 +1,62 @@
+# Tockr — Raspberry Pi Production Deployment
+# ─────────────────────────────────────────────────────────────────────────────
+# Runs Tockr in Docker. External access is handled by a Cloudflare Tunnel
+# configured separately on the host (not part of this Compose stack).
+# All persistent data lives at /srv/tockr/data on the host so it survives
+# container restarts, image updates, and Pi reboots unchanged.
+#
+# See docs/raspberry-pi-setup.md for the full install guide.
+# See docs/backup-and-restore.md for backup procedures.
+#
+# Quick start:
+#   sudo mkdir -p /srv/tockr/data && sudo chown 65532:65532 /srv/tockr/data
+#   cp deployment/.env.example deployment/.env   # then edit .env
+#   docker compose -f deployment/docker-compose.yml --env-file deployment/.env up -d
+#   docker compose -f deployment/docker-compose.yml exec tockr cat /app/data/.admin_password
+
+services:
+  tockr:
+    image: ghcr.io/onellan/tockr:latest
+    restart: unless-stopped
+    environment:
+      # Internal listen address. Never change this.
+      TOCKR_ADDR: :8080
+      # Database and data directory inside the container. Never change these.
+      TOCKR_DB_PATH: /app/data/tockr.db
+      TOCKR_DATA_DIR: /app/data
+      # Must be "true" when accessed via HTTPS (Cloudflare Tunnel serves HTTPS).
+      # Session cookies require Secure=true for the browser to honour them.
+      # Only set to "false" for local HTTP-only debugging.
+      TOCKR_COOKIE_SECURE: ${TOCKR_COOKIE_SECURE:-true}
+      # Admin account seeded on first start only (if no users exist yet).
+      # The password is auto-generated and stored in /app/data/.admin_password.
+      TOCKR_ADMIN_EMAIL: ${TOCKR_ADMIN_EMAIL:-admin@example.com}
+      # Regional defaults applied to newly created workspaces.
+      TOCKR_DEFAULT_TIMEZONE: ${TOCKR_DEFAULT_TIMEZONE:-UTC}
+      TOCKR_DEFAULT_CURRENCY: ${TOCKR_DEFAULT_CURRENCY:-USD}
+      TOCKR_FUTURE_TIME_POLICY: ${TOCKR_FUTURE_TIME_POLICY:-end_of_day}
+      # Two-factor authentication: disabled | optional | required
+      TOCKR_TOTP_MODE: ${TOCKR_TOTP_MODE:-disabled}
+    volumes:
+      # ── Persistent data ──────────────────────────────────────────────────
+      # Bind mount to /srv/tockr/data on the Pi host.
+      # This directory holds everything that must survive container recreation:
+      #   tockr.db            — SQLite database (ALL user data)
+      #   tockr.db-wal        — SQLite WAL file (part of the database)
+      #   tockr.db-shm        — SQLite shared memory (part of the database)
+      #   .session_secret     — HMAC key; losing it logs out all users
+      #   .admin_password     — Bootstrap admin password (informational after first run)
+      #   invoices/           — Generated invoice HTML files
+      # Never delete this directory. Back it up regularly.
+      - /srv/tockr/data:/app/data
+    ports:
+      # Exposes Tockr on localhost only so cloudflared (running on the host)
+      # can route requests to http://localhost:8080.
+      # Not accessible from other machines on the network.
+      - 127.0.0.1:8080:8080
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/healthz]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

@@ -1,8 +1,7 @@
 # Configuration Reference
 
-Tockr is configured with environment variables. Docker installs work without
-setting any variables because secrets and the bootstrap admin password are
-generated automatically when missing.
+See [README.md](../README.md#configuration).
+
 
 ## Docker Defaults
 

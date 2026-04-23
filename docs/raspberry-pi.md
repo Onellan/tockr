@@ -1,7 +1,7 @@
 # Raspberry Pi Docker Install
 
-Tockr publishes a Raspberry Pi friendly Docker image to GitHub Container
-Registry.
+See [README.md](../README.md#raspberry-pi).
+
 
 ## Supported Platform
 

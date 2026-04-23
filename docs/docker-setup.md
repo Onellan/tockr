@@ -1,9 +1,7 @@
-# Docker Setup Guide
+# Docker Setup
 
-This is the canonical Docker install path for Tockr. It starts from a machine
-with Docker installed and ends with a running app, persistent data, and a
-generated admin password. You do not need to create secrets or edit an
-environment file.
+See [README.md](../README.md#docker-install).
+
 
 ## What Docker Runs
 

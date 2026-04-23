@@ -1,6 +1,7 @@
 # Environment Variables
 
-| Variable | Default | Description |
+See [README.md](../README.md#configuration).
+
 |---|---|---|
 | `TOCKR_ADDR` | `:8029` | HTTP listen address for local app runs. Docker overrides this to `:8080` inside the container and publishes host port `8029`. |
 | `TOCKR_DB_PATH` | `data/tockr.db` | SQLite database path. |

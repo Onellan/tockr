@@ -1,6 +1,7 @@
 # systemd Deployment
 
-Install the binary at `/opt/tockr/tockr` and static assets at `/opt/tockr/web/static`.
+See [README.md](../README.md#systemd).
+
 
 Create a stable session secret once:
 

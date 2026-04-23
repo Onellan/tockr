@@ -1,0 +1,54 @@
+# Cloudflare Tunnel — credentials-file configuration (alternative approach)
+# ─────────────────────────────────────────────────────────────────────────────
+# This file is for the ADVANCED credentials-file deployment method.
+# Most Raspberry Pi deployments should use the simpler token approach instead.
+# See docs/cloudflare-tunnel.md for a comparison of both methods.
+#
+# To use this file:
+#
+#   1. Create a tunnel in Cloudflare Zero Trust → Access → Tunnels.
+#
+#   2. Download or create the credentials JSON for the tunnel.
+#      With cloudflared installed on your machine:
+#        cloudflared tunnel create tockr
+#        # Credentials are saved to ~/.cloudflared/<tunnel-id>.json
+#
+#   3. Copy the credentials JSON here:
+#        cp ~/.cloudflared/<tunnel-id>.json deployment/cloudflared/tunnel.json
+#
+#   4. Replace YOUR_TUNNEL_ID and tockr.example.com below.
+#
+#   5. Update the cloudflared service in deployment/docker-compose.yml
+#      to use this config file. Replace the cloudflared service with:
+#
+#        cloudflared:
+#          image: cloudflare/cloudflared:latest
+#          restart: unless-stopped
+#          command: tunnel --config /etc/cloudflared/config.yml run
+#          volumes:
+#            - ./cloudflared:/etc/cloudflared:ro
+#          depends_on:
+#            tockr:
+#              condition: service_healthy
+#
+#   6. Create the DNS route:
+#        cloudflared tunnel route dns YOUR_TUNNEL_ID tockr.example.com
+#
+#   7. Remove TUNNEL_TOKEN from deployment/.env (not used with this approach).
+#
+# Note: Keep deployment/cloudflared/tunnel.json secret. Add it to .gitignore.
+
+tunnel: YOUR_TUNNEL_ID
+credentials-file: /etc/cloudflared/tunnel.json
+
+ingress:
+  - hostname: tockr.example.com
+    service: http://tockr:8080
+    # Cloudflare Tunnel connects to Tockr over plain HTTP inside Docker.
+    # TLS is terminated at Cloudflare before the tunnel. This is correct
+    # and safe — the traffic between cloudflared and tockr is within the
+    # Docker bridge network on the Pi (not public).
+
+  # Required catch-all rule. Requests that do not match any hostname above
+  # return a 404. Do not remove this line.
+  - service: http_status:404

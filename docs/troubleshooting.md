@@ -1,6 +1,7 @@
 # Troubleshooting
 
-Start every diagnosis with:
+See [README.md](../README.md#troubleshooting).
+
 
 ```sh
 docker ps --filter name=tockr

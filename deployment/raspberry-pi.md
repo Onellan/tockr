@@ -1,6 +1,7 @@
-# Raspberry Pi 4B Notes
+# Raspberry Pi Notes
 
-Recommended:
+See [README.md](../README.md#raspberry-pi).
+
 
 - Raspberry Pi OS 64-bit.
 - Use the native binary or published Docker image. See `docs/raspberry-pi.md` for GHCR pull and Compose examples.

@@ -1,6 +1,7 @@
 # CI/CD Pipeline
 
-## Current-state audit
+See [TRACKER.md](../TRACKER.md#cicd-pipeline-design).
+
 
 - Stack: Go 1.26 server-rendered web app with SQLite via `modernc.org/sqlite`.
 - Validation command: `go test ./...`.
