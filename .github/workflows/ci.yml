@@ -5,14 +5,14 @@ on:
     branches:
       - main
     paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "deployment/**"
+      - '**/*.md'
+      - docs/**
+      - deployment/**
   push:
     branches:
       - main
     tags:
-      - "v*.*.*"
+      - v*.*.*
   workflow_dispatch:
 
 concurrency:
