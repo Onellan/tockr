@@ -3,10 +3,10 @@
   "short_name": "Tockr",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f4f6f8",
-  "theme_color": "#0f766e",
+  "background_color": "#F6FAFF",
+  "theme_color": "#2F80ED",
   "icons": [
-    { "src": "/static/icon-192.png?v=20260422", "sizes": "192x192", "type": "image/png" },
-    { "src": "/static/icon-512.png?v=20260422", "sizes": "512x512", "type": "image/png" }
+    { "src": "/static/icon-192.png?v=20260423-brand", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png?v=20260423-brand", "sizes": "512x512", "type": "image/png" }
   ]
 }

@@ -40,7 +40,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/admin/users", "/webhooks", "/api/tasks"}
+	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/admin", "/admin/users", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -113,9 +113,9 @@ func TestWorkspaceSwitcherChangesSessionScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
-	body := getWithCookie(app, "/", cookie).Body.String()
+	body := getWithCookie(app, "/account", cookie).Body.String()
 	if !strings.Contains(body, `class="workspace-switcher"`) || !strings.Contains(body, "Alt Workspace") {
-		t.Fatal("workspace switcher should render when user has multiple workspaces")
+		t.Fatal("workspace switcher should render on the account page when user has multiple workspaces")
 	}
 	csrf := csrfFromBody(t, body)
 	form := strings.NewReader("csrf=" + csrf + "&workspace_id=" + strconv.FormatInt(workspaceID, 10))
@@ -127,8 +127,11 @@ func TestWorkspaceSwitcherChangesSessionScope(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("workspace switch returned %d", rec.Code)
 	}
-	if body := getWithCookie(app, "/", cookie).Body.String(); !strings.Contains(body, `<option value="`+strconv.FormatInt(workspaceID, 10)+`" selected>Alt Workspace</option>`) {
+	if body := getWithCookie(app, "/account", cookie).Body.String(); !strings.Contains(body, `<option value="`+strconv.FormatInt(workspaceID, 10)+`" selected>Alt Workspace</option>`) {
 		t.Fatal("selected workspace was not persisted on the session")
+	}
+	if body := getWithCookie(app, "/", cookie).Body.String(); strings.Contains(body, `class="workspace-switcher"`) || strings.Contains(body, "Alt Workspace</option>") {
+		t.Fatal("workspace switcher should not render in the shared topbar")
 	}
 }
 
@@ -175,10 +178,12 @@ func TestDropdownsAndFaviconHeadRender(t *testing.T) {
 	app.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodGet, "/login", nil))
 	loginBody := login.Body.String()
 	for _, expected := range []string{
-		`rel="icon" href="/favicon.ico?v=20260422"`,
-		`rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png?v=20260422"`,
-		`rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=20260422"`,
-		`rel="manifest" href="/static/site.webmanifest?v=20260422"`,
+		`rel="icon" href="/favicon.ico?v=20260423-brand"`,
+		`rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png?v=20260423-brand"`,
+		`rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=20260423-brand"`,
+		`rel="manifest" href="/static/site.webmanifest?v=20260423-brand"`,
+		`<meta name="theme-color" content="#2F80ED">`,
+		`/static/style.css?v=20260423-brand`,
 		`<script src="/static/menu.js?v=20260422-navfix" defer>`,
 	} {
 		if strings.Count(loginBody, expected) != 1 {
@@ -195,10 +200,34 @@ func TestDropdownsAndFaviconHeadRender(t *testing.T) {
 		`data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"`,
 		`id="account-menu" role="menu" hidden data-dropdown-menu`,
 		`role="menuitem" href="/timesheets"`,
+		`role="menuitem" href="/admin"`,
 		`role="menuitem" type="submit">Logout</button>`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("dashboard missing dropdown markup %q", expected)
+		}
+	}
+
+	accountBody := getWithCookie(app, "/account", cookie).Body.String()
+	for _, expected := range []string{
+		`<select name="timezone">`,
+		`<option value="UTC" selected>UTC</option>`,
+		`<option value="Africa/Johannesburg">Africa/Johannesburg</option>`,
+	} {
+		if !strings.Contains(accountBody, expected) {
+			t.Fatalf("account page missing timezone selector markup %q", expected)
+		}
+	}
+
+	adminBody := getWithCookie(app, "/admin", cookie).Body.String()
+	for _, expected := range []string{
+		`<h1>Admin</h1>`,
+		`href="/admin/workspaces"`,
+		`href="/rates"`,
+		`href="/admin/users"`,
+	} {
+		if !strings.Contains(adminBody, expected) {
+			t.Fatalf("admin hub missing %q", expected)
 		}
 	}
 }
@@ -412,6 +441,12 @@ func TestFaviconAssetsAreServed(t *testing.T) {
 	if manifest["short_name"] != "Tockr" {
 		t.Fatalf("unexpected manifest: %#v", manifest)
 	}
+	if manifest["background_color"] != "#F6FAFF" {
+		t.Fatalf("unexpected manifest background color: %#v", manifest["background_color"])
+	}
+	if manifest["theme_color"] != "#2F80ED" {
+		t.Fatalf("unexpected manifest theme color: %#v", manifest["theme_color"])
+	}
 }
 
 func TestUserNavigationHidesForbiddenItems(t *testing.T) {
@@ -434,6 +469,9 @@ func TestUserNavigationHidesForbiddenItems(t *testing.T) {
 			t.Fatalf("normal user should not see %s", forbiddenLink)
 		}
 	}
+	if strings.Contains(body, `href="/admin"`) {
+		t.Fatal("normal user should not see admin hub link")
+	}
 	for _, visibleLink := range []string{`href="/"`, `href="/timesheets"`, `href="/customers"`, `href="/projects"`, `href="/tasks"`, `href="/activities"`, `href="/tags"`, `href="/reports"`} {
 		if !strings.Contains(body, visibleLink) {
 			t.Fatalf("normal user should see %s", visibleLink)
@@ -448,7 +486,7 @@ func TestUserNavigationHidesForbiddenItems(t *testing.T) {
 		t.Fatal("normal user should not see customer create form")
 	}
 
-	for _, route := range []string{"/invoices", "/rates", "/admin/users", "/webhooks", "/groups"} {
+	for _, route := range []string{"/admin", "/invoices", "/rates", "/admin/users", "/webhooks", "/groups"} {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("%s returned %d, want 403", route, rec.Code)

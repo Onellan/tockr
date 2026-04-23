@@ -70,6 +70,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireLoginMiddleware)
 		r.Get("/", s.dashboard)
+		r.Get("/admin", s.adminHome)
 		r.Get("/account", s.account)
 		r.Post("/account", s.updateAccount)
 		r.Post("/account/password", s.updatePassword)
@@ -284,6 +285,14 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 		uri = auth.TOTPURI("Tockr", state.User.Email, secret)
 	}
 	s.render(w, r, templates.Account(s.nav(r), *state.User, s.cfg.TOTPMode, secret, uri, nil, r.URL.Query().Get("message")))
+}
+
+func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
+	if !s.hasAnyAdminAccess(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	s.render(w, r, templates.AdminHome(s.nav(r)))
 }
 
 func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
@@ -2004,6 +2013,21 @@ func (s *Server) nav(r *http.Request) *templates.NavUser {
 		currentName = "Workspace"
 	}
 	return &templates.NavUser{DisplayName: state.User.DisplayName, Email: state.User.Email, CSRF: state.Session.CSRFToken, CurrentPath: r.URL.Path, Permissions: permissions, CurrentWorkspaceID: state.Access.WorkspaceID, CurrentWorkspaceName: currentName, Workspaces: workspaces}
+}
+
+func (s *Server) hasAnyAdminAccess(r *http.Request) bool {
+	for _, permission := range []string{
+		auth.PermManageOrg,
+		auth.PermManageRates,
+		auth.PermManageProjects,
+		auth.PermManageUsers,
+		auth.PermManageWebhooks,
+	} {
+		if s.hasPermission(r, permission) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) cookie(sessionID string) *http.Cookie {

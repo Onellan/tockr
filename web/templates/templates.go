@@ -36,6 +36,11 @@ type navItem struct {
 	Permission string
 }
 
+type timezoneOption struct {
+	Value string
+	Label string
+}
+
 type SelectOption struct {
 	Value int64
 	Label string
@@ -83,9 +88,42 @@ var adminNav = []navItem{
 	{"Webhooks", "/webhooks", "Admin", auth.PermManageWebhooks},
 }
 
+var timezoneOptions = []timezoneOption{
+	{"UTC", "UTC"},
+	{"Africa/Johannesburg", "Africa/Johannesburg"},
+	{"Africa/Nairobi", "Africa/Nairobi"},
+	{"Africa/Lagos", "Africa/Lagos"},
+	{"Europe/London", "Europe/London"},
+	{"Europe/Berlin", "Europe/Berlin"},
+	{"Europe/Paris", "Europe/Paris"},
+	{"Europe/Amsterdam", "Europe/Amsterdam"},
+	{"Europe/Madrid", "Europe/Madrid"},
+	{"Europe/Rome", "Europe/Rome"},
+	{"Europe/Zurich", "Europe/Zurich"},
+	{"Europe/Athens", "Europe/Athens"},
+	{"Europe/Helsinki", "Europe/Helsinki"},
+	{"Europe/Moscow", "Europe/Moscow"},
+	{"Asia/Dubai", "Asia/Dubai"},
+	{"Asia/Kolkata", "Asia/Kolkata"},
+	{"Asia/Singapore", "Asia/Singapore"},
+	{"Asia/Hong_Kong", "Asia/Hong_Kong"},
+	{"Asia/Tokyo", "Asia/Tokyo"},
+	{"Asia/Seoul", "Asia/Seoul"},
+	{"Australia/Perth", "Australia/Perth"},
+	{"Australia/Sydney", "Australia/Sydney"},
+	{"Pacific/Auckland", "Pacific/Auckland"},
+	{"America/Sao_Paulo", "America/Sao_Paulo"},
+	{"America/New_York", "America/New_York"},
+	{"America/Chicago", "America/Chicago"},
+	{"America/Denver", "America/Denver"},
+	{"America/Phoenix", "America/Phoenix"},
+	{"America/Los_Angeles", "America/Los_Angeles"},
+	{"America/Toronto", "America/Toronto"},
+}
+
 func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s</title><link rel=\"icon\" href=\"/favicon.ico?v=20260422\" sizes=\"any\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/favicon-32x32.png?v=20260422\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/favicon-16x16.png?v=20260422\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/apple-touch-icon.png?v=20260422\"><link rel=\"manifest\" href=\"/static/site.webmanifest?v=20260422\"><meta name=\"theme-color\" content=\"#0f766e\"><link rel=\"stylesheet\" href=\"/static/style.css?v=20260422-selectors\"><script src=\"/static/menu.js?v=20260422-navfix\" defer></script></head><body>", esc(title))
+		_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s</title><link rel=\"icon\" href=\"/favicon.ico?v=20260423-brand\" sizes=\"any\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/favicon-32x32.png?v=20260423-brand\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/favicon-16x16.png?v=20260423-brand\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/apple-touch-icon.png?v=20260423-brand\"><link rel=\"manifest\" href=\"/static/site.webmanifest?v=20260423-brand\"><meta name=\"theme-color\" content=\"#2F80ED\"><link rel=\"stylesheet\" href=\"/static/style.css?v=20260423-brand\"><script src=\"/static/menu.js?v=20260422-navfix\" defer></script></head><body>", esc(title))
 		if user == nil {
 			_, _ = fmt.Fprint(w, `<main class="auth-main">`)
 			if err := body.Render(ctx, w); err != nil {
@@ -96,9 +134,7 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 		}
 		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><nav class="side-nav" aria-label="Primary navigation">`)
 		renderNav(w, user, primaryNav)
-		renderNav(w, user, adminNav)
 		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
-		renderWorkspaceSwitcher(w, user)
 		renderAccountDropdown(w, user)
 		_, _ = fmt.Fprint(w, `</div></header><main class="content" id="main-content" tabindex="-1">`)
 		if err := body.Render(ctx, w); err != nil {
@@ -190,8 +226,11 @@ func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 		if c != nil && c.ID > 0 {
 			action = fmt.Sprintf("/customers/%d", c.ID)
 		}
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Company<input name="company" value="%s"></label><label>Email<input name="email" value="%s"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="currency" value="%s" placeholder="ZAR" maxlength="3"></label><label>Timezone<input name="timezone" value="%s"></label><label>Reference number<input name="number" value="%s"></label><label class="wide">Comment<textarea name="comment">%s</textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save customer</button></div></form>`,
-			action, esc(user.CSRF), val(c, "Name"), val(c, "Company"), val(c, "Email"), defaultVal(val(c, "Currency"), "ZAR"), defaultVal(val(c, "Timezone"), "UTC"), val(c, "Number"), val(c, "Comment"))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Company<input name="company" value="%s"></label><label>Email<input name="email" value="%s"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="currency" value="%s" placeholder="ZAR" maxlength="3"></label>`,
+			action, esc(user.CSRF), val(c, "Name"), val(c, "Company"), val(c, "Email"), defaultVal(val(c, "Currency"), "ZAR"))
+		renderTimezoneSelect(w, "Timezone", "timezone", defaultVal(val(c, "Timezone"), "UTC"), false)
+		_, _ = fmt.Fprintf(w, `<label>Reference number<input name="number" value="%s"></label><label class="wide">Comment<textarea name="comment">%s</textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save customer</button></div></form>`,
+			val(c, "Number"), val(c, "Comment"))
 		return nil
 	})
 }
@@ -414,7 +453,9 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 		if message != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
 		}
-		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Profile</h2><p>Name and local display preferences.</p></div></div><form method="post" action="/account" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Display name<input name="display_name" value="%s" required></label><label>Email<input value="%s" disabled></label><label>Timezone<input name="timezone" value="%s"></label><div class="form-actions"><button class="primary">Save profile</button></div></form></div>`, esc(user.CSRF), esc(account.DisplayName), esc(account.Email), esc(account.Timezone))
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Profile</h2><p>Name and local display preferences.</p></div></div><form method="post" action="/account" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Display name<input name="display_name" value="%s" required></label><label>Email<input value="%s" disabled></label>`, esc(user.CSRF), esc(account.DisplayName), esc(account.Email))
+		renderTimezoneSelect(w, "Timezone", "timezone", account.Timezone, false)
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save profile</button></div></form></div>`)
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Workspace</h2><p>Your current workspace and how to switch.</p></div></div><div class="form-grid">`)
 		renderWorkspaceSwitcher(w, user)
 		if len(user.Workspaces) <= 1 {
@@ -438,6 +479,24 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 			_, _ = fmt.Fprint(w, `</code></div>`)
 		}
 		_, _ = fmt.Fprint(w, `</section>`)
+		return nil
+	}))
+}
+
+func AdminHome(user *NavUser) templ.Component {
+	return Layout("Admin", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Admin", "Administration", "Choose an admin area to manage workspaces, billing controls, users, templates, and integrations.")
+		links := adminLinksFor(user)
+		if len(links) == 0 {
+			_, _ = fmt.Fprint(w, `<section class="panel"><div class="empty-state"><strong>No admin access</strong><span>Your account does not currently have any admin capabilities.</span></div></section>`)
+			return nil
+		}
+		_, _ = fmt.Fprint(w, `<section class="table-card"><div class="table-scroll"><table><thead><tr><th>Area</th><th>Purpose</th><th></th></tr></thead><tbody>`)
+		for _, item := range links {
+			_, _ = fmt.Fprintf(w, `<tr><td class="muted-cell">%s</td><td>%s</td><td><a class="table-action" href="%s">Open</a></td></tr>`,
+				esc(item.Label), esc(adminDescription(item.Path)), esc(item.Path))
+		}
+		_, _ = fmt.Fprint(w, `</tbody></table></div></section>`)
 		return nil
 	}))
 }
@@ -478,7 +537,9 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 func WorkspaceAdmin(user *NavUser, workspaces []domain.WorkspaceSummary) templ.Component {
 	return Layout("Workspaces", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Workspaces", "Organization admin", "Create and manage organization workspaces.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create workspace</h2><p>Only organization admins can add workspaces.</p></div></div><form method="post" action="/admin/workspaces" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label>Slug <span class="field-hint">URL-safe ID, auto-generated if blank</span><input name="slug" placeholder="e.g. my-team"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="ZAR" placeholder="ZAR" maxlength="3"></label><label>Timezone<input name="timezone" value="UTC"></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Create workspace</button></div></form></section>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create workspace</h2><p>Only organization admins can add workspaces.</p></div></div><form method="post" action="/admin/workspaces" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label>Slug <span class="field-hint">URL-safe ID, auto-generated if blank</span><input name="slug" placeholder="e.g. my-team"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="ZAR" placeholder="ZAR" maxlength="3"></label>`, esc(user.CSRF))
+		renderTimezoneSelect(w, "Timezone", "timezone", "UTC", true)
+		_, _ = fmt.Fprint(w, `<label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Create workspace</button></div></form></section>`)
 		rows := [][]string{}
 		for _, workspace := range workspaces {
 			status := "Active"
@@ -499,7 +560,9 @@ func WorkspaceDetail(user *NavUser, workspace domain.Workspace, members []domain
 		if workspace.Archived {
 			checked = " checked"
 		}
-		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Settings</h2><p>Changes apply only inside this organization.</p></div></div><form method="post" action="/admin/workspaces/%d" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Slug <span class="field-hint">URL-safe ID</span><input name="slug" value="%s" required></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="%s" placeholder="ZAR" maxlength="3"></label><label>Timezone<input name="timezone" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, workspace.ID, esc(user.CSRF), esc(workspace.Name), esc(workspace.Slug), esc(workspace.DefaultCurrency), esc(workspace.Timezone), esc(workspace.Description), checked)
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Settings</h2><p>Changes apply only inside this organization.</p></div></div><form method="post" action="/admin/workspaces/%d" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Slug <span class="field-hint">URL-safe ID</span><input name="slug" value="%s" required></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="%s" placeholder="ZAR" maxlength="3"></label>`, workspace.ID, esc(user.CSRF), esc(workspace.Name), esc(workspace.Slug), esc(workspace.DefaultCurrency))
+		renderTimezoneSelect(w, "Timezone", "timezone", workspace.Timezone, true)
+		_, _ = fmt.Fprintf(w, `<label class="wide">Description<textarea name="description">%s</textarea></label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, esc(workspace.Description), checked)
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Add or update member</h2><p>Member: track time · Analyst: track time + view reports · Admin: full workspace management</p></div></div><form method="post" action="/admin/workspaces/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>User<select name="user_id">`, workspace.ID, esc(user.CSRF))
 		for _, user := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, user.ID, esc(userLabel(user)))
@@ -637,7 +700,9 @@ func Webhooks(user *NavUser, hooks []domain.WebhookEndpoint) templ.Component {
 
 func UserForm(user *NavUser) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/admin/users"><input type="hidden" name="csrf" value="%s"><label>Email<input name="email" type="email" required></label><label>Username <span class="field-hint">used for login</span><input name="username" required></label><label>Display name<input name="display_name" required></label><label>Password<input name="password" type="password" required></label><label>Timezone<input name="timezone" value="UTC"></label><label>Role<select name="role"><option value="user">User</option><option value="teamlead">Team lead</option><option value="admin">Admin</option><option value="superadmin">Super admin</option></select></label><div class="form-actions"><button class="primary">Create user</button></div></form>`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/admin/users"><input type="hidden" name="csrf" value="%s"><label>Email<input name="email" type="email" required></label><label>Username <span class="field-hint">used for login</span><input name="username" required></label><label>Display name<input name="display_name" required></label><label>Password<input name="password" type="password" required></label>`, esc(user.CSRF))
+		renderTimezoneSelect(w, "Timezone", "timezone", "UTC", true)
+		_, _ = fmt.Fprint(w, `<label>Role<select name="role"><option value="user">User</option><option value="teamlead">Team lead</option><option value="admin">Admin</option><option value="superadmin">Super admin</option></select></label><div class="form-actions"><button class="primary">Create user</button></div></form>`)
 		if user.Permissions["manage_users"] {
 			_, _ = fmt.Fprint(w,
 				`<div class="role-guide">`+
@@ -865,7 +930,11 @@ func renderAccountDropdown(w io.Writer, user *NavUser) {
 	if name != "" {
 		initial = strings.ToUpper(string([]rune(name)[0]))
 	}
-	_, _ = fmt.Fprintf(w, `<div class="dropdown account-menu" data-dropdown="account"><button class="account-trigger" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><span class="avatar" aria-hidden="true">%s</span><span class="account-name">%s</span><span class="chevron" aria-hidden="true">▾</span></button><div class="dropdown-menu dropdown-menu-right" id="account-menu" role="menu" hidden data-dropdown-menu><a role="menuitem" href="/">Dashboard</a><a role="menuitem" href="/timesheets">Timesheets</a><a role="menuitem" href="/account">Account settings</a><form method="post" action="/logout" role="none"><input type="hidden" name="csrf" value="%s"><button role="menuitem" type="submit">Logout</button></form></div></div>`, esc(initial), esc(user.DisplayName), esc(user.CSRF))
+	_, _ = fmt.Fprintf(w, `<div class="dropdown account-menu" data-dropdown="account"><button class="account-trigger" type="button" data-dropdown-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu"><span class="avatar" aria-hidden="true">%s</span><span class="account-name">%s</span><span class="chevron" aria-hidden="true">▾</span></button><div class="dropdown-menu dropdown-menu-right" id="account-menu" role="menu" hidden data-dropdown-menu><a role="menuitem" href="/">Dashboard</a><a role="menuitem" href="/timesheets">Timesheets</a><a role="menuitem" href="/account">Account settings</a>`, esc(initial), esc(user.DisplayName))
+	if user != nil && len(adminLinksFor(user)) > 0 {
+		_, _ = fmt.Fprint(w, `<a role="menuitem" href="/admin">Admin</a>`)
+	}
+	_, _ = fmt.Fprintf(w, `<form method="post" action="/logout" role="none"><input type="hidden" name="csrf" value="%s"><button role="menuitem" type="submit">Logout</button></form></div></div>`, esc(user.CSRF))
 }
 
 func renderWorkspaceSwitcher(w io.Writer, user *NavUser) {
@@ -884,6 +953,59 @@ func renderWorkspaceSwitcher(w io.Writer, user *NavUser) {
 		_, _ = fmt.Fprintf(w, `<option value="%d"%s>%s</option>`, workspace.ID, selected, esc(workspace.Name))
 	}
 	_, _ = fmt.Fprint(w, `</select></label></form>`)
+}
+
+func renderTimezoneSelect(w io.Writer, label, name, selected string, required bool) {
+	if selected == "" {
+		selected = "UTC"
+	}
+	requiredAttr := ""
+	if required {
+		requiredAttr = " required"
+	}
+	_, _ = fmt.Fprintf(w, `<label>%s<select name="%s"%s>`, esc(label), esc(name), requiredAttr)
+	for _, option := range timezoneOptions {
+		sel := ""
+		if option.Value == selected {
+			sel = " selected"
+		}
+		_, _ = fmt.Fprintf(w, `<option value="%s"%s>%s</option>`, esc(option.Value), sel, esc(option.Label))
+	}
+	_, _ = fmt.Fprint(w, `</select></label>`)
+}
+
+func adminLinksFor(user *NavUser) []navItem {
+	if user == nil {
+		return nil
+	}
+	links := make([]navItem, 0, len(adminNav))
+	for _, item := range adminNav {
+		if user.can(item.Permission) {
+			links = append(links, item)
+		}
+	}
+	return links
+}
+
+func adminDescription(path string) string {
+	switch path {
+	case "/admin/workspaces":
+		return "Create workspaces, update workspace settings, and manage workspace membership."
+	case "/rates":
+		return "Maintain billable rates and user cost rates for auditable reporting."
+	case "/admin/exchange-rates":
+		return "Manage currency conversion rules for reporting across billing units."
+	case "/admin/recalculate":
+		return "Preview and apply retroactive rate recalculations for historical timesheets."
+	case "/project-templates":
+		return "Create and reuse project templates for repeatable workspace setups."
+	case "/admin/users":
+		return "Create users and manage platform-level user access."
+	case "/webhooks":
+		return "Configure signed outbound webhook integrations."
+	default:
+		return "Open this admin area."
+	}
 }
 
 type MenuAction struct {
