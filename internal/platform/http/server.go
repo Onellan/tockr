@@ -510,7 +510,7 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) projectDashboard(w http.ResponseWriter, r *http.Request) {
 	dashboard, err := s.store.ProjectDashboard(r.Context(), s.access(r), pathID(r))
-	if err != nil {
+	if err != nil || dashboard.Project.ID == 0 {
 		http.NotFound(w, r)
 		return
 	}
