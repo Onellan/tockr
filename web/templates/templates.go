@@ -132,8 +132,20 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 			_, _ = fmt.Fprint(w, `</main></body></html>`)
 			return nil
 		}
-		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><nav class="side-nav" aria-label="Primary navigation">`)
-		renderNav(w, user, primaryNav)
+		navItems := primaryNav
+		navLabel := "Primary navigation"
+		showBackToDashboard := false
+		if isAdminArea(user) {
+			navItems = adminSidebarNav(user)
+			navLabel = "Admin navigation"
+			showBackToDashboard = true
+		}
+		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a>`)
+		_, _ = fmt.Fprintf(w, `<nav class="side-nav" aria-label="%s">`, esc(navLabel))
+		renderNav(w, user, navItems)
+		if showBackToDashboard {
+			_, _ = fmt.Fprint(w, `<div class="sidebar-back-link"><a class="nav-link nav-link-back" href="/">Back to dashboard</a></div>`)
+		}
 		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
 		renderAccountDropdown(w, user)
 		_, _ = fmt.Fprint(w, `</div></header><main class="content" id="main-content" tabindex="-1">`)
@@ -985,6 +997,24 @@ func adminLinksFor(user *NavUser) []navItem {
 		}
 	}
 	return links
+}
+
+func adminSidebarNav(user *NavUser) []navItem {
+	links := []navItem{{Label: "Overview", Path: "/admin", Group: "Admin"}}
+	links = append(links, adminLinksFor(user)...)
+	return links
+}
+
+func isAdminArea(user *NavUser) bool {
+	if user == nil {
+		return false
+	}
+	for _, item := range adminSidebarNav(user) {
+		if isActivePath(user.CurrentPath, item.Path) {
+			return true
+		}
+	}
+	return false
 }
 
 func adminDescription(path string) string {

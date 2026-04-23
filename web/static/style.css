@@ -243,6 +243,25 @@ select {
   background: var(--accent);
 }
 
+.sidebar-back-link {
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.nav-link-back {
+  justify-content: center;
+  color: var(--sidebar-ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.nav-link-back:hover,
+.nav-link-back:focus-visible {
+  background: var(--surface);
+  color: var(--text);
+}
+
 .workspace {
   min-width: 0;
 }

@@ -57,6 +57,27 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	if !strings.Contains(body, `class="tab-link active" aria-current="page" href="/reports?group=customer"`) {
 		t.Fatal("expected customer report tab to be active")
 	}
+
+	adminBody := getWithCookie(app, "/admin/users", cookie).Body.String()
+	for _, expected := range []string{
+		`aria-label="Admin navigation"`,
+		`class="nav-link active" aria-current="page" href="/admin/users"`,
+		`href="/admin/workspaces"`,
+		`href="/admin"`,
+		`href="/">Back to dashboard</a>`,
+	} {
+		if !strings.Contains(adminBody, expected) {
+			t.Fatalf("admin page missing %q", expected)
+		}
+	}
+	for _, unexpected := range []string{
+		`aria-label="Primary navigation"`,
+		`href="/timesheets" class="nav-link active"`,
+	} {
+		if strings.Contains(adminBody, unexpected) {
+			t.Fatalf("admin page should not contain %q", unexpected)
+		}
+	}
 }
 
 func TestProjectRowOverflowAndMembershipPage(t *testing.T) {
