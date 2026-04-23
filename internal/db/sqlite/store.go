@@ -2969,6 +2969,16 @@ func (s *Store) RemoveProjectWorkstream(ctx context.Context, projectID, workstre
 // ─── Utilization Report ───────────────────────────────────────────────────────
 
 func (s *Store) UtilizationReport(ctx context.Context, access domain.AccessContext, begin, end *time.Time) ([]domain.UtilizationRow, error) {
+	// Fetch schedule BEFORE opening the result set — MaxOpenConns=1 means any
+	// query issued while rows is open would deadlock.
+	schedule := s.workSchedule(ctx)
+	var expectedSeconds int64
+	if begin != nil && end != nil {
+		expectedSeconds = expectedSecondsForDateRangeWithSchedule(*begin, *end, schedule)
+	} else {
+		expectedSeconds = expectedSecondsToDateWithSchedule(time.Now().UTC(), schedule)
+	}
+
 	args := []any{access.WorkspaceID}
 	where := "t.workspace_id=?"
 	if begin != nil {
@@ -3004,15 +3014,6 @@ ORDER BY total_sec DESC`, where)
 		return nil, err
 	}
 	defer rows.Close()
-	// Calculate expected seconds for the report period
-	schedule := s.workSchedule(ctx)
-	var expectedSeconds int64
-	if begin != nil && end != nil {
-		expectedSeconds = expectedSecondsForDateRangeWithSchedule(*begin, *end, schedule)
-	} else {
-		// Default: current week to date
-		expectedSeconds = expectedSecondsToDateWithSchedule(time.Now().UTC(), schedule)
-	}
 	var result []domain.UtilizationRow
 	for rows.Next() {
 		var row domain.UtilizationRow
