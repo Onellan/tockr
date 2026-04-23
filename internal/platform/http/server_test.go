@@ -651,7 +651,7 @@ func TestBulkGroupAndProjectMembershipEditors(t *testing.T) {
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
 	body := getWithCookie(app, "/groups/"+strconv.FormatInt(groupID, 10)+"/members", cookie).Body.String()
-	if !strings.Contains(body, "Bulk add or remove workspace users") {
+	if !strings.Contains(body, "Use groups for team-level project assignment") {
 		t.Fatal("group bulk editor did not render")
 	}
 	csrf := csrfFromBody(t, body)
@@ -700,6 +700,109 @@ func TestBulkGroupAndProjectMembershipEditors(t *testing.T) {
 	}
 	if len(groups) != 1 {
 		t.Fatalf("project group count = %d, want 1", len(groups))
+	}
+}
+
+func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	customer, project, activity, task := seedSelectorFixtures(t, store)
+	project.EstimateSeconds = 16 * 3600
+	project.BudgetCents = 150000
+	project.BudgetAlertPercent = 50
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || admin == nil {
+		t.Fatal("missing admin")
+	}
+	start := time.Now().UTC().Add(-6 * time.Hour)
+	end := start.Add(2 * time.Hour)
+	entry := &domain.Timesheet{
+		WorkspaceID: 1,
+		UserID:      admin.ID,
+		CustomerID:  customer.ID,
+		ProjectID:   project.ID,
+		ActivityID:  activity.ID,
+		TaskID:      &task.ID,
+		StartedAt:   start,
+		EndedAt:     &end,
+		Timezone:    "UTC",
+		Billable:    true,
+		Description: "Pump sizing review",
+	}
+	if err := store.CreateTimesheet(ctx, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	favorite := &domain.Favorite{
+		WorkspaceID: 1,
+		UserID:      admin.ID,
+		Name:        "Repeat pump sizing",
+		CustomerID:  customer.ID,
+		ProjectID:   project.ID,
+		ActivityID:  activity.ID,
+		TaskID:      &task.ID,
+		Description: "Pump sizing review",
+	}
+	if err := store.CreateFavorite(ctx, favorite); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	dashboard := getWithCookie(app, "/", cookie).Body.String()
+	for _, expected := range []string{
+		"Engineering operations",
+		"Continue recent work",
+		"Project watchlist",
+		"Billing attention",
+		"Pump sizing review",
+	} {
+		if !strings.Contains(dashboard, expected) {
+			t.Fatalf("dashboard missing %q", expected)
+		}
+	}
+
+	timesheets := getWithCookie(app, "/timesheets?customer_id="+strconv.FormatInt(customer.ID, 10)+"&project_id="+strconv.FormatInt(project.ID, 10)+"&activity_id="+strconv.FormatInt(activity.ID, 10)+"&task_id="+strconv.FormatInt(task.ID, 10)+"&date=2026-04-23&description=Pump+sizing+review", cookie).Body.String()
+	for _, expected := range []string{
+		`<h2>Log engineering time</h2>`,
+		`name="customer_id"`,
+		`name="activity_id"`,
+		`Pump sizing review`,
+		`Use again`,
+		`Use favorite`,
+		`Billable`,
+		`Exported`,
+	} {
+		if !strings.Contains(timesheets, expected) {
+			t.Fatalf("timesheets missing %q", expected)
+		}
+	}
+
+	calendar := getWithCookie(app, "/calendar", cookie).Body.String()
+	for _, expected := range []string{
+		"Weekly review",
+		"Buildout",
+		"Implementation",
+		"Launch task",
+		"Add more time",
+	} {
+		if !strings.Contains(calendar, expected) {
+			t.Fatalf("calendar missing %q", expected)
+		}
+	}
+
+	reports := getWithCookie(app, "/reports?group=activity&billable=true", cookie).Body.String()
+	for _, expected := range []string{
+		"Billing class",
+		"Billable only",
+		"Work Type",
+	} {
+		if !strings.Contains(reports, expected) {
+			t.Fatalf("reports missing %q", expected)
+		}
 	}
 }
 

@@ -361,17 +361,74 @@ type ReportFilter struct {
 	TaskID     int64
 	UserID     int64
 	GroupID    int64
+	Billable   *bool
+}
+
+type DashboardRecentWork struct {
+	TimesheetID     int64
+	CustomerID      int64
+	ProjectID       int64
+	ActivityID      int64
+	TaskID          *int64
+	Description     string
+	DurationSeconds int64
+	StartedAt       time.Time
+	Billable        bool
+	Exported        bool
+}
+
+type DashboardProjectWatch struct {
+	ProjectID          int64
+	Name               string
+	CustomerID         int64
+	TrackedSeconds     int64
+	BillableCents      int64
+	EstimatePercent    int64
+	BudgetPercent      int64
+	UnbilledSeconds    int64
+	UnbilledCents      int64
+	NeedsEstimateAlert bool
+	NeedsBudgetAlert   bool
+}
+
+type DashboardSummary struct {
+	Stats            map[string]int64
+	WeekTracked      int64
+	MissingSeconds   int64
+	RecentWork       []DashboardRecentWork
+	ProjectWatchlist []DashboardProjectWatch
+}
+
+type ProjectTaskSummary struct {
+	TaskID          int64
+	Name            string
+	TrackedSeconds  int64
+	UnbilledSeconds int64
+	Billable        bool
+}
+
+type ProjectContributorSummary struct {
+	UserID          int64
+	DisplayName     string
+	TrackedSeconds  int64
+	BillableSeconds int64
 }
 
 type ProjectDashboard struct {
-	Project         Project
-	TrackedSeconds  int64
-	BillableCents   int64
-	EstimatePercent int64
-	BudgetPercent   int64
-	OverEstimate    bool
-	OverBudget      bool
-	Alert           bool
+	Project            Project
+	TrackedSeconds     int64
+	BillableCents      int64
+	UnbilledSeconds    int64
+	UnbilledCents      int64
+	BillableSeconds    int64
+	NonBillableSeconds int64
+	EstimatePercent    int64
+	BudgetPercent      int64
+	OverEstimate       bool
+	OverBudget         bool
+	Alert              bool
+	TaskSummaries      []ProjectTaskSummary
+	Contributors       []ProjectContributorSummary
 }
 
 type ProjectTemplate struct {

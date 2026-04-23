@@ -1953,8 +1953,8 @@ func (s *Store) ListReports(ctx context.Context, access domain.AccessContext, fi
 	}
 }
 
-func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (map[string]int64, error) {
-	stats := map[string]int64{}
+func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (domain.DashboardSummary, error) {
+	summary := domain.DashboardSummary{Stats: map[string]int64{}}
 	projectIDs := accessibleProjectIDs(access)
 	projectWhere := ""
 	projectArgs := []any{}
@@ -1992,11 +1992,92 @@ func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (map
 			err = s.db.QueryRowContext(ctx, query, access.WorkspaceID).Scan(&value)
 		}
 		if err != nil {
-			return nil, err
+			return summary, err
 		}
-		stats[key] = value
+		summary.Stats[key] = value
 	}
-	return stats, nil
+
+	weekStart := startOfWeek(time.Now().UTC())
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(duration_seconds),0) FROM timesheets WHERE workspace_id=? AND user_id=? AND started_at>=? AND ended_at IS NOT NULL`,
+		access.WorkspaceID, access.UserID, formatTime(weekStart)).Scan(&summary.WeekTracked); err != nil {
+		return summary, err
+	}
+	expectedWeekSeconds := expectedWeekSecondsToDate(time.Now().UTC())
+	if expectedWeekSeconds > summary.WeekTracked {
+		summary.MissingSeconds = expectedWeekSeconds - summary.WeekTracked
+	}
+
+	recentRows, err := s.db.QueryContext(ctx, `SELECT id, customer_id, project_id, activity_id, task_id, description, duration_seconds, started_at, billable, exported
+		FROM timesheets
+		WHERE workspace_id=? AND user_id=? AND ended_at IS NOT NULL
+		ORDER BY started_at DESC
+		LIMIT 8`, access.WorkspaceID, access.UserID)
+	if err != nil {
+		return summary, err
+	}
+	defer recentRows.Close()
+	for recentRows.Next() {
+		var item domain.DashboardRecentWork
+		var started string
+		if err := recentRows.Scan(&item.TimesheetID, &item.CustomerID, &item.ProjectID, &item.ActivityID, &item.TaskID, &item.Description, &item.DurationSeconds, &started, &item.Billable, &item.Exported); err != nil {
+			return summary, err
+		}
+		item.StartedAt = parseTime(started)
+		summary.RecentWork = append(summary.RecentWork, item)
+	}
+	if err := recentRows.Err(); err != nil {
+		return summary, err
+	}
+
+	watchWhere := `p.workspace_id=? AND (p.estimate_seconds>0 OR p.budget_cents>0)`
+	watchArgs := []any{access.WorkspaceID}
+	if !access.IsWorkspaceAdmin() && access.WorkspaceRole != domain.WorkspaceRoleAnalyst {
+		if len(projectIDs) == 0 {
+			return summary, nil
+		}
+		placeholders := make([]string, len(projectIDs))
+		for i, id := range projectIDs {
+			placeholders[i] = "?"
+			watchArgs = append(watchArgs, id)
+		}
+		watchWhere += ` AND p.id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	watchRows, err := s.db.QueryContext(ctx, `SELECT p.id, p.name, p.customer_id,
+		COALESCE(SUM(t.duration_seconds),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 THEN t.rate_cents*t.duration_seconds/3600 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.rate_cents*t.duration_seconds/3600 ELSE 0 END),0),
+		p.estimate_seconds, p.budget_cents, p.budget_alert_percent
+		FROM projects p
+		LEFT JOIN timesheets t ON t.project_id=p.id AND t.workspace_id=p.workspace_id
+		WHERE `+watchWhere+`
+		GROUP BY p.id
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, p.name
+		LIMIT 8`, watchArgs...)
+	if err != nil {
+		return summary, err
+	}
+	defer watchRows.Close()
+	for watchRows.Next() {
+		var item domain.DashboardProjectWatch
+		var estimateSeconds, budgetCents, budgetAlertPercent int64
+		if err := watchRows.Scan(&item.ProjectID, &item.Name, &item.CustomerID, &item.TrackedSeconds, &item.BillableCents, &item.UnbilledSeconds, &item.UnbilledCents, &estimateSeconds, &budgetCents, &budgetAlertPercent); err != nil {
+			return summary, err
+		}
+		if estimateSeconds > 0 {
+			item.EstimatePercent = item.TrackedSeconds * 100 / estimateSeconds
+		}
+		if budgetCents > 0 {
+			item.BudgetPercent = item.BillableCents * 100 / budgetCents
+		}
+		if budgetAlertPercent == 0 {
+			budgetAlertPercent = 80
+		}
+		item.NeedsEstimateAlert = estimateSeconds > 0 && item.EstimatePercent >= budgetAlertPercent
+		item.NeedsBudgetAlert = budgetCents > 0 && item.BudgetPercent >= budgetAlertPercent
+		summary.ProjectWatchlist = append(summary.ProjectWatchlist, item)
+	}
+	return summary, watchRows.Err()
 }
 
 func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContext, projectID int64) (domain.ProjectDashboard, error) {
@@ -2009,8 +2090,15 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, sql.ErrNoRows
 	}
 	dashboard.Project = *project
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(duration_seconds),0), COALESCE(SUM(rate_cents*duration_seconds/3600),0) FROM timesheets WHERE workspace_id=? AND project_id=?`, access.WorkspaceID, projectID).
-		Scan(&dashboard.TrackedSeconds, &dashboard.BillableCents)
+	err = s.db.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(duration_seconds),0),
+		COALESCE(SUM(CASE WHEN billable=1 THEN rate_cents*duration_seconds/3600 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN billable=1 AND exported=0 THEN duration_seconds ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN billable=1 AND exported=0 THEN rate_cents*duration_seconds/3600 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN billable=1 THEN duration_seconds ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN billable=0 THEN duration_seconds ELSE 0 END),0)
+		FROM timesheets WHERE workspace_id=? AND project_id=?`, access.WorkspaceID, projectID).
+		Scan(&dashboard.TrackedSeconds, &dashboard.BillableCents, &dashboard.UnbilledSeconds, &dashboard.UnbilledCents, &dashboard.BillableSeconds, &dashboard.NonBillableSeconds)
 	if err != nil {
 		return dashboard, err
 	}
@@ -2027,6 +2115,55 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		threshold = 80
 	}
 	dashboard.Alert = (project.EstimateSeconds > 0 && dashboard.EstimatePercent >= threshold) || (project.BudgetCents > 0 && dashboard.BudgetPercent >= threshold)
+
+	taskRows, err := s.db.QueryContext(ctx, `SELECT ta.id, ta.name,
+		COALESCE(SUM(t.duration_seconds),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0),
+		ta.billable
+		FROM tasks ta
+		LEFT JOIN timesheets t ON t.task_id=ta.id AND t.workspace_id=ta.workspace_id
+		WHERE ta.workspace_id=? AND ta.project_id=?
+		GROUP BY ta.id
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, ta.name
+		LIMIT 6`, access.WorkspaceID, projectID)
+	if err != nil {
+		return dashboard, err
+	}
+	defer taskRows.Close()
+	for taskRows.Next() {
+		var item domain.ProjectTaskSummary
+		if err := taskRows.Scan(&item.TaskID, &item.Name, &item.TrackedSeconds, &item.UnbilledSeconds, &item.Billable); err != nil {
+			return dashboard, err
+		}
+		dashboard.TaskSummaries = append(dashboard.TaskSummaries, item)
+	}
+	if err := taskRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	contributorRows, err := s.db.QueryContext(ctx, `SELECT u.id, u.display_name,
+		COALESCE(SUM(t.duration_seconds),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 THEN t.duration_seconds ELSE 0 END),0)
+		FROM users u
+		JOIN timesheets t ON t.user_id=u.id
+		WHERE t.workspace_id=? AND t.project_id=?
+		GROUP BY u.id
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, u.display_name
+		LIMIT 6`, access.WorkspaceID, projectID)
+	if err != nil {
+		return dashboard, err
+	}
+	defer contributorRows.Close()
+	for contributorRows.Next() {
+		var item domain.ProjectContributorSummary
+		if err := contributorRows.Scan(&item.UserID, &item.DisplayName, &item.TrackedSeconds, &item.BillableSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.Contributors = append(dashboard.Contributors, item)
+	}
+	if err := contributorRows.Err(); err != nil {
+		return dashboard, err
+	}
 	return dashboard, nil
 }
 
@@ -2174,7 +2311,33 @@ func reportFilterSQL(filter domain.ReportFilter) (string, []any) {
 		where += " AND (t.id IS NULL OR t.user_id IN (SELECT user_id FROM group_members WHERE group_id=?))"
 		args = append(args, filter.GroupID)
 	}
+	if filter.Billable != nil {
+		where += " AND (t.id IS NULL OR t.billable=?)"
+		args = append(args, boolInt(*filter.Billable))
+	}
 	return where, args
+}
+
+func startOfWeek(value time.Time) time.Time {
+	value = value.UTC()
+	weekday := int(value.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	day := time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+	return day.AddDate(0, 0, 1-weekday)
+}
+
+func expectedWeekSecondsToDate(value time.Time) int64 {
+	start := startOfWeek(value)
+	current := time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+	var days int64
+	for day := start; !day.After(current); day = day.AddDate(0, 0, 1) {
+		if weekday := day.Weekday(); weekday != time.Saturday && weekday != time.Sunday {
+			days++
+		}
+	}
+	return days * 8 * 3600
 }
 
 func accessibleProjectIDs(access domain.AccessContext) []int64 {

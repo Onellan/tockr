@@ -390,7 +390,7 @@ func (s *Server) switchWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	state := s.state(r)
-	stats, err := s.store.Dashboard(r.Context(), state.Access)
+	summary, err := s.store.Dashboard(r.Context(), state.Access)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
@@ -410,7 +410,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Dashboard(s.nav(r), stats, active, favorites, selectors))
+	s.render(w, r, templates.Dashboard(s.nav(r), summary, active, favorites, selectors))
 }
 
 func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
@@ -427,7 +427,7 @@ func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.CustomerForm(s.nav(r), nil)
 	}
-	s.render(w, r, templates.EntityList[domain.Customer]("Customers", s.nav(r), []string{"Name", "Company", "Email", "Currency", "Visible", "Billable"}, rows, form))
+	s.render(w, r, templates.EntityList[domain.Customer]("Clients", s.nav(r), []string{"Client", "Company", "Email", "Billing unit", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveCustomer(w http.ResponseWriter, r *http.Request) {
@@ -462,13 +462,33 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 		if s.access(r).ManagesProject(p.ID) {
 			actions += templates.RowActionMenu(fmt.Sprintf("project-%d-actions", p.ID), "Project actions", s.nav(r).CSRF, []templates.MenuAction{{Label: "Members", Href: fmt.Sprintf("/projects/%d/members", p.ID)}})
 		}
-		rows = append(rows, []string{p.Name, labelValue(selectors.CustomerLabels, p.CustomerID), p.Number, boolText(p.Visible), boolText(p.Private), boolText(p.Billable), `<div class="row-actions">` + actions + `</div>`})
+		estimateStatus := "Open-ended"
+		if p.EstimateSeconds > 0 {
+			estimateStatus = fmt.Sprintf("%dh planned", p.EstimateSeconds/3600)
+		}
+		budgetStatus := "No fixed fee"
+		if p.BudgetCents > 0 {
+			budgetStatus = templates.Money(p.BudgetCents)
+		}
+		flags := []string{}
+		if p.Private {
+			flags = append(flags, "Private")
+		}
+		if p.Billable {
+			flags = append(flags, "Billable")
+		} else {
+			flags = append(flags, "Internal")
+		}
+		if !p.Visible {
+			flags = append(flags, "Archived")
+		}
+		rows = append(rows, []string{p.Name, labelValue(selectors.CustomerLabels, p.CustomerID), p.Number, strings.Join(flags, " · "), estimateStatus, budgetStatus, `<div class="row-actions">` + actions + `</div>`})
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.ProjectForm(s.nav(r), selectors)
 	}
-	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"Name", "Customer", "Number", "Visible", "Private", "Billable", "Insights"}, rows, form))
+	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"Project", "Client", "Code", "Status", "Estimate", "Budget", "Actions"}, rows, form))
 }
 
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
@@ -702,7 +722,7 @@ func (s *Server) activities(w http.ResponseWriter, r *http.Request) {
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.ActivityForm(s.nav(r), selectors)
 	}
-	s.render(w, r, templates.EntityList[domain.Activity]("Activities", s.nav(r), []string{"Name", "Project", "Number", "Visible", "Billable"}, rows, form))
+	s.render(w, r, templates.EntityList[domain.Activity]("Work Types", s.nav(r), []string{"Work type", "Project", "Code", "Visible", "Billable"}, rows, form))
 }
 
 func (s *Server) saveActivity(w http.ResponseWriter, r *http.Request) {
@@ -922,7 +942,12 @@ func (s *Server) timesheets(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Timesheets(s.nav(r), timesheetRows(items, selectors), selectors))
+	favorites, err := s.store.ListFavorites(r.Context(), s.access(r).WorkspaceID, s.state(r).User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Timesheets(s.nav(r), items, selectors, favorites, dashboardRecentFromTimesheets(items), timesheetPrefillFromRequest(r)))
 }
 
 func (s *Server) calendar(w http.ResponseWriter, r *http.Request) {
@@ -941,7 +966,12 @@ func (s *Server) calendar(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Calendar(s.nav(r), start, items))
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.Calendar(s.nav(r), start, items, selectors))
 }
 
 func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
@@ -1077,6 +1107,7 @@ func (s *Server) reports(w http.ResponseWriter, r *http.Request) {
 	}
 	filter.Begin = parseDateParam(r, "begin")
 	filter.End = parseDateParam(r, "end")
+	filter.Billable = parseBoolFilter(r.URL.Query().Get("billable"))
 	rows, err := s.store.ListReports(r.Context(), s.access(r), filter)
 	if err != nil {
 		s.serverError(w, r, err)
@@ -1106,6 +1137,7 @@ func (s *Server) saveReport(w http.ResponseWriter, r *http.Request) {
 		"task_id":     r.FormValue("task_id"),
 		"user_id":     r.FormValue("user_id"),
 		"group_id":    r.FormValue("group_id"),
+		"billable":    r.FormValue("billable"),
 	}
 	body, err := json.Marshal(filter)
 	if err != nil {
@@ -2129,6 +2161,7 @@ func (s *Server) editSavedReport(w http.ResponseWriter, r *http.Request) {
 		"task_id":     r.FormValue("task_id"),
 		"user_id":     r.FormValue("user_id"),
 		"group_id":    r.FormValue("group_id"),
+		"billable":    r.FormValue("billable"),
 	}
 	body, err := json.Marshal(filter)
 	if err != nil {
@@ -2263,6 +2296,7 @@ func (s *Server) exportReports(w http.ResponseWriter, r *http.Request) {
 	}
 	filter.Begin = parseDateParam(r, "begin")
 	filter.End = parseDateParam(r, "end")
+	filter.Billable = parseBoolFilter(r.URL.Query().Get("billable"))
 	rows, err := s.store.ListReports(r.Context(), access, filter)
 	if err != nil {
 		s.serverError(w, r, err)
@@ -2792,29 +2826,73 @@ func checkFuturePolicy(policy string, start, end time.Time) error {
 	return nil
 }
 
-func timesheetRows(items []domain.Timesheet, selectors *templates.SelectorData) [][]string {
-	rows := [][]string{}
-	for _, t := range items {
-		end := ""
-		if t.EndedAt != nil {
-			end = templates.FormatTime(*t.EndedAt)
-		}
-		task := ""
-		if t.TaskID != nil {
-			task = labelValue(selectors.TaskLabels, *t.TaskID)
-		}
-		rows = append(rows, []string{
-			task,
-			templates.FormatTime(t.StartedAt),
-			end,
-			fmt.Sprintf("%dh %02dm", t.DurationSeconds/3600, (t.DurationSeconds%3600)/60),
-			fmt.Sprintf("%.2f", float64(t.RateCents)/100),
-			boolText(t.Billable),
-			boolText(t.Exported),
-			t.Description,
+func dashboardRecentFromTimesheets(items []domain.Timesheet) []domain.DashboardRecentWork {
+	recent := make([]domain.DashboardRecentWork, 0, minInt(len(items), 8))
+	for _, item := range items {
+		recent = append(recent, domain.DashboardRecentWork{
+			TimesheetID:     item.ID,
+			CustomerID:      item.CustomerID,
+			ProjectID:       item.ProjectID,
+			ActivityID:      item.ActivityID,
+			TaskID:          item.TaskID,
+			Description:     item.Description,
+			DurationSeconds: item.DurationSeconds,
+			StartedAt:       item.StartedAt,
+			Billable:        item.Billable,
+			Exported:        item.Exported,
 		})
+		if len(recent) == 8 {
+			break
+		}
 	}
-	return rows
+	return recent
+}
+
+func timesheetPrefillFromRequest(r *http.Request) templates.TimesheetPrefill {
+	q := r.URL.Query()
+	prefill := templates.TimesheetPrefill{
+		CustomerID:  int64Param(r, "customer_id"),
+		ProjectID:   int64Param(r, "project_id"),
+		ActivityID:  int64Param(r, "activity_id"),
+		TaskID:      int64Param(r, "task_id"),
+		Description: strings.TrimSpace(q.Get("description")),
+	}
+	if start := q.Get("start"); start != "" {
+		prefill.Start = start
+	}
+	if end := q.Get("end"); end != "" {
+		prefill.End = end
+	}
+	if date := q.Get("date"); date != "" {
+		prefill.Date = date
+		if prefill.Start == "" {
+			prefill.Start = date + "T08:00"
+		}
+		if prefill.End == "" {
+			prefill.End = date + "T17:00"
+		}
+	}
+	return prefill
+}
+
+func parseBoolFilter(value string) *bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "billable":
+		v := true
+		return &v
+	case "0", "false", "no", "nonbillable", "non-billable":
+		v := false
+		return &v
+	default:
+		return nil
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func boolText(value bool) string {

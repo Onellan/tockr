@@ -811,6 +811,11 @@ tr:last-child td {
   background: var(--surface-3);
 }
 
+.badge.warning {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
 .tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1092,6 +1097,11 @@ label > .field-hint {
   padding: var(--space-3);
 }
 
+.calendar-day-missing {
+  border-color: rgba(217, 119, 6, 0.28);
+  background: linear-gradient(180deg, rgba(255, 244, 229, 0.9) 0%, var(--surface) 100%);
+}
+
 .calendar-day-head {
   display: flex;
   align-items: center;
@@ -1130,6 +1140,11 @@ label > .field-hint {
   color: var(--muted);
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-sm);
+}
+
+.calendar-entry-actions {
+  margin-top: auto;
+  padding-top: var(--space-2);
 }
 
 .recovery-box {

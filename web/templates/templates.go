@@ -47,6 +47,17 @@ type SelectOption struct {
 	Attrs map[string]string
 }
 
+type TimesheetPrefill struct {
+	CustomerID  int64
+	ProjectID   int64
+	ActivityID  int64
+	TaskID      int64
+	Date        string
+	Start       string
+	End         string
+	Description string
+}
+
 type SelectorData struct {
 	Customers  []SelectOption
 	Projects   []SelectOption
@@ -67,25 +78,27 @@ var primaryNav = []navItem{
 	{"Dashboard", "/", "Work", ""},
 	{"Timesheets", "/timesheets", "Work", auth.PermTrackTime},
 	{"Calendar", "/calendar", "Work", auth.PermTrackTime},
-	{"Customers", "/customers", "Manage", ""},
-	{"Projects", "/projects", "Manage", ""},
-	{"Tasks", "/tasks", "Manage", ""},
-	{"Activities", "/activities", "Manage", ""},
-	{"Tags", "/tags", "Manage", auth.PermTrackTime},
-	{"Groups", "/groups", "Manage", auth.PermManageGroups},
-	{"Reports", "/reports", "Analyze", auth.PermViewReports},
-	{"Utilization", "/reports/utilization", "Analyze", auth.PermViewReports},
-	{"Invoices", "/invoices", "Analyze", auth.PermManageInvoices},
+	{"Clients", "/customers", "Projects / Delivery", ""},
+	{"Projects", "/projects", "Projects / Delivery", ""},
+	{"Tasks", "/tasks", "Projects / Delivery", ""},
+	{"Work Types", "/activities", "Projects / Delivery", ""},
+	{"Groups", "/groups", "Projects / Delivery", auth.PermManageGroups},
+	{"Templates", "/project-templates", "Projects / Delivery", auth.PermManageProjects},
+	{"Tags", "/tags", "Projects / Delivery", auth.PermTrackTime},
+	{"Reports", "/reports", "Billing / Analysis", auth.PermViewReports},
+	{"Utilization", "/reports/utilization", "Billing / Analysis", auth.PermViewReports},
+	{"Invoices", "/invoices", "Billing / Analysis", auth.PermManageInvoices},
+	{"Rates", "/rates", "Billing / Analysis", auth.PermManageRates},
 }
 
 var adminNav = []navItem{
-	{"Workspaces", "/admin/workspaces", "Admin", auth.PermManageOrg},
-	{"Rates", "/rates", "Admin", auth.PermManageRates},
-	{"Exchange Rates", "/admin/exchange-rates", "Admin", auth.PermManageRates},
-	{"Recalculate", "/admin/recalculate", "Admin", auth.PermManageRates},
-	{"Templates", "/project-templates", "Admin", auth.PermManageProjects},
-	{"Users", "/admin/users", "Admin", auth.PermManageUsers},
-	{"Webhooks", "/webhooks", "Admin", auth.PermManageWebhooks},
+	{"Admin Home", "/admin", "Administration", ""},
+	{"Workspaces", "/admin/workspaces", "Administration", auth.PermManageOrg},
+	{"Rates", "/rates", "Administration", auth.PermManageRates},
+	{"Exchange Rates", "/admin/exchange-rates", "Administration", auth.PermManageRates},
+	{"Recalculate", "/admin/recalculate", "Administration", auth.PermManageRates},
+	{"Users", "/admin/users", "Administration", auth.PermManageUsers},
+	{"Webhooks", "/webhooks", "Administration", auth.PermManageWebhooks},
 }
 
 var timezoneOptions = []timezoneOption{
@@ -168,27 +181,40 @@ func Login(message string) templ.Component {
 	}))
 }
 
-func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet, favorites []domain.Favorite, selectors *SelectorData) templ.Component {
+func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Timesheet, favorites []domain.Favorite, selectors *SelectorData) templ.Component {
 	return Layout("Dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Dashboard", "Live overview", "Track current work, unexported time, and billing movement.")
+		pageHeader(w, "Dashboard", "Engineering operations", "Start work quickly, stay on top of missing time, and keep billing risk visible.")
 		_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
-		metric(w, "Active timers", fmt.Sprint(stats["active_timers"]), "Running entries")
-		metric(w, "Today", duration(stats["today_seconds"]), "Tracked by you")
-		metric(w, "Unexported", fmt.Sprint(stats["unexported"]), "Not yet invoiced")
-		metric(w, "Invoices", fmt.Sprint(stats["invoices"]), "Created documents")
-		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Timer <span class="tooltip-icon" data-tooltip="Starts a live timer against the selected project and activity. When you stop it, a timesheet entry is created automatically.">i</span></h2><p>Start or stop the active work entry.</p></div></div>`)
+		metric(w, "Today tracked", duration(summary.Stats["today_seconds"]), "Logged by you today")
+		metric(w, "Week to date", duration(summary.WeekTracked), "Current consulting week")
+		metric(w, "Missing this week", duration(summary.MissingSeconds), "Hours still to capture")
+		metric(w, "Billing attention", fmt.Sprint(summary.Stats["unexported"]), "Billable entries not yet exported")
+		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Quick log and timer <span class="tooltip-icon" data-tooltip="Use this for the work package you are on right now. Choose the client, project, work type, and optional task before starting or logging time.">i</span></h2><p>Start a live timer or jump into manual entry with the same engineering work classification.</p></div></div>`)
 		if active != nil {
-			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Timer is active for this user.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
+			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Your current timer is active. Stop it when the work package is complete.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button><a class="ghost-button" href="/timesheets">Open weekly review</a></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
 		} else {
 			_, _ = fmt.Fprintf(w, `<form method="post" action="/timesheets/start" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 			renderWorkSelectors(w, selectors, true)
-			_, _ = fmt.Fprint(w, `<input name="description" placeholder="What are you working on?"><button class="primary">Start timer</button></form>`)
+			_, _ = fmt.Fprint(w, `<input name="description" placeholder="Describe the current engineering task or deliverable"><button class="primary">Start timer</button><a class="ghost-button" href="/timesheets">Manual entry</a></form>`)
 		}
-		_, _ = fmt.Fprintf(w, `</div><div class="panel"><div class="panel-head"><div><h2>Favorites <span class="tooltip-icon" data-tooltip="Save a preset combination of project, activity and task. Click Start next to any favorite to launch a timer with those settings instantly.">i</span></h2><p>Start repeated work without retyping IDs.</p></div></div><form method="post" action="/favorites" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Name" required>`, esc(user.CSRF))
+		_, _ = fmt.Fprint(w, `<div class="summary-list section-spacer">`)
+		if len(summary.RecentWork) == 0 {
+			_, _ = fmt.Fprint(w, `<div><span>No recent work yet</span><strong>Your recently tracked tasks will appear here for quick reuse.</strong></div>`)
+		}
+		for index, item := range summary.RecentWork {
+			if index == 0 {
+				_, _ = fmt.Fprint(w, `<div><span>Continue recent work</span><strong>Reuse your last client / project / work type combination in one click.</strong></div>`)
+			}
+			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong><a class="table-action" href="%s">Use again</a></div>`,
+				esc(recentWorkLabel(item, selectors)),
+				esc(duration(item.DurationSeconds)+" · "+item.StartedAt.Format("Mon 02 Jan 15:04")),
+				esc(timesheetPrefillHref(item)))
+		}
+		_, _ = fmt.Fprintf(w, `</div></div><div class="panel"><div class="panel-head"><div><h2>Favorites <span class="tooltip-icon" data-tooltip="Save a preset combination of client, project, work type and task. Use favorites for repeated engineering deliverables such as site visits, design reviews, or calculations.">i</span></h2><p>Start repeated work without rebuilding the full selection each time.</p></div></div><form method="post" action="/favorites" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Favorite name" required>`, esc(user.CSRF))
 		renderWorkSelectors(w, selectors, true)
-		_, _ = fmt.Fprint(w, `<input name="description" placeholder="Description"><input name="tags" placeholder="Tags"><button class="table-action">Save</button></form><div class="summary-list">`)
+		_, _ = fmt.Fprint(w, `<input name="description" placeholder="Task or deliverable note"><input name="tags" placeholder="Optional report tags"><button class="table-action">Save</button></form><div class="summary-list">`)
 		if len(favorites) == 0 {
-			_, _ = fmt.Fprint(w, `<div><span>No favorites yet</span><strong>Create one from repeated work</strong></div>`)
+			_, _ = fmt.Fprint(w, `<div><span>No favorites yet</span><strong>Create one from repeated engineering work you log every week.</strong></div>`)
 		}
 		for _, fav := range favorites {
 			_, _ = fmt.Fprintf(w, `<div class="favorite-row"><span class="fav-name">%s</span><div class="fav-actions"><form method="post" action="/favorites/%d/start"><input type="hidden" name="csrf" value="%s"><button class="table-action">Start</button></form><details class="dropdown inline-dropdown"><summary class="table-action">Edit</summary><form method="post" action="/favorites/%d" class="compact-form"><input type="hidden" name="csrf" value="%s"><input name="name" value="%s" required><input name="description" value="%s" placeholder="Description"><input name="tags" value="%s" placeholder="Tags"><button class="primary small">Save</button></form></details><form method="post" action="/favorites/%d/delete" onsubmit="return confirm('Delete this favorite?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">×</button></form></div></div>`,
@@ -196,6 +222,26 @@ func Dashboard(user *NavUser, stats map[string]int64, active *domain.Timesheet, 
 				fav.ID, esc(user.CSRF),
 				fav.ID, esc(user.CSRF), esc(fav.Name), esc(fav.Description), esc(fav.Tags),
 				fav.ID, esc(user.CSRF))
+		}
+		_, _ = fmt.Fprint(w, `</div></div></section><section class="two-col section-spacer"><div class="panel"><div class="panel-head"><div><h2>Project watchlist</h2><p>Projects nearing estimate or fixed-fee budget thresholds.</p></div></div>`)
+		if len(summary.ProjectWatchlist) == 0 {
+			_, _ = fmt.Fprint(w, `<div class="empty-state"><strong>No project watch items</strong><span>Projects with delivery risk or billing attention will appear here.</span></div>`)
+		} else {
+			_, _ = fmt.Fprint(w, `<div class="summary-list">`)
+			for _, item := range summary.ProjectWatchlist {
+				_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong><small>%s</small></div>`,
+					esc(label(selectors.ProjectLabels, item.ProjectID)),
+					esc(projectWatchSummary(item)),
+					esc(projectWatchMeta(item)))
+			}
+			_, _ = fmt.Fprint(w, `</div>`)
+		}
+		_, _ = fmt.Fprint(w, `</div><div class="panel"><div class="panel-head"><div><h2>Billing attention</h2><p>Signals that affect invoice readiness and review speed.</p></div></div><div class="summary-list">`)
+		_, _ = fmt.Fprintf(w, `<div><span>Unexported billable entries</span><strong>%d ready for billing review</strong></div>`, summary.Stats["unexported"])
+		_, _ = fmt.Fprintf(w, `<div><span>Active timers</span><strong>%d currently running</strong></div>`, summary.Stats["active_timers"])
+		_, _ = fmt.Fprintf(w, `<div><span>Created invoices</span><strong>%d invoice records created</strong></div>`, summary.Stats["invoices"])
+		if summary.MissingSeconds > 0 {
+			_, _ = fmt.Fprintf(w, `<div><span>Missing timesheet reminder</span><strong>%s still to classify this week</strong></div>`, esc(duration(summary.MissingSeconds)))
 		}
 		_, _ = fmt.Fprint(w, `</div></div></section>`)
 		return nil
@@ -238,10 +284,10 @@ func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 		if c != nil && c.ID > 0 {
 			action = fmt.Sprintf("/customers/%d", c.ID)
 		}
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Company<input name="company" value="%s"></label><label>Email<input name="email" value="%s"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="currency" value="%s" placeholder="ZAR" maxlength="3"></label>`,
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Client name<input name="name" value="%s" required></label><label>Company<input name="company" value="%s"></label><label>Billing email<input name="email" value="%s"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="currency" value="%s" placeholder="ZAR" maxlength="3"></label>`,
 			action, esc(user.CSRF), val(c, "Name"), val(c, "Company"), val(c, "Email"), defaultVal(val(c, "Currency"), "ZAR"))
 		renderTimezoneSelect(w, "Timezone", "timezone", defaultVal(val(c, "Timezone"), "UTC"), false)
-		_, _ = fmt.Fprintf(w, `<label>Reference number<input name="number" value="%s"></label><label class="wide">Comment<textarea name="comment">%s</textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save customer</button></div></form>`,
+		_, _ = fmt.Fprintf(w, `<label>Reference number<input name="number" value="%s"></label><label class="wide">Comment<textarea name="comment">%s</textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save client</button></div></form>`,
 			val(c, "Number"), val(c, "Comment"))
 		return nil
 	})
@@ -270,12 +316,12 @@ func ActivityForm(user *NavUser, selectors *SelectorData) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/activities"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderSelect(w, "Project"+tipHTML("Scope this activity to one project, or leave blank to make it available across all projects."), "project_id", optionList(selectors, "project"), 0, false, "Global activity", nil)
-		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" required></label>`, tipHTML("Activity type shown in timesheets (e.g. Development, Design, Testing)."))
+		_, _ = fmt.Fprintf(w, `<label>Work type %s<input name="name" required></label>`, tipHTML("Work type shown in timesheets (e.g. design review, site visit, coordination, QA/rework)."))
 		_, _ = fmt.Fprintf(w, `<label>Number %s<input name="number"></label>`, tipHTML("Optional reference code. Useful for matching against external project management tools."))
 		_, _ = fmt.Fprint(w, `<label class="wide">Comment<textarea name="comment"></textarea></label>`)
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible" checked> Visible %s</label>`, tipHTML("Visible activities appear in timesheet selectors. Uncheck to retire an activity without deleting it."))
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable" checked> Billable %s</label>`, tipHTML("Billable activities are included in invoice and rate calculations."))
-		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save activity</button></div></form>`)
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save work type</button></div></form>`)
 		return nil
 	})
 }
@@ -362,13 +408,56 @@ func Rates(user *NavUser, rates []domain.Rate, costs []domain.UserCostRate, sele
 	}))
 }
 
-func Timesheets(user *NavUser, rows [][]string, selectors *SelectorData) templ.Component {
+func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorData, favorites []domain.Favorite, recent []domain.DashboardRecentWork, prefill TimesheetPrefill) templ.Component {
 	return Layout("Timesheets", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Timesheets", "Time entries", "Record work manually or use the timer from the dashboard.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create entry</h2><p>Select the related customer, project, activity, and optional task.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-		renderWorkSelectors(w, selectors, true)
-		_, _ = fmt.Fprint(w, `<label>Start<input type="datetime-local" name="start" required></label><label>End<input type="datetime-local" name="end" required></label><label>Break minutes <span class="field-hint">deducted from the total duration</span><input name="break_minutes" value="0"></label><label>Tags<input name="tags" placeholder="comma,separated"></label><label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></section>`)
-		dataTable(w, []string{"Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description"}, rows)
+		pageHeader(w, "Timesheets", "Time capture", "Manual entry first. Use recent work, favorites, and clear billing context to backfill quickly and accurately.")
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Log engineering time</h2><p>Choose the client, project, work type, and optional task before saving the entry.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
+		renderWorkSelectorsWithSelected(w, selectors, true, prefill)
+		_, _ = fmt.Fprintf(w, `<label>Start<input type="datetime-local" name="start" value="%s" required></label><label>End<input type="datetime-local" name="end" value="%s" required></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input name="break_minutes" value="0"></label><label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
+			esc(prefill.Start), esc(prefill.End), esc(prefill.Description))
+		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Recent and repeat work</h2><p>Reuse common consulting tasks without rebuilding the full selection.</p></div></div><div class="summary-list">`)
+		if len(recent) == 0 && len(favorites) == 0 {
+			_, _ = fmt.Fprint(w, `<div><span>No recent work yet</span><strong>Recent entries and favorites will appear here after you start logging time.</strong></div>`)
+		}
+		for _, item := range recent {
+			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong><a class="table-action" href="%s">Use again</a></div>`,
+				esc(recentWorkLabel(item, selectors)),
+				esc(duration(item.DurationSeconds)+" · "+item.StartedAt.Format("Mon 02 Jan 15:04")),
+				esc(timesheetPrefillHref(item)))
+		}
+		for _, favorite := range favorites {
+			_, _ = fmt.Fprintf(w, `<div><span>Favorite</span><strong>%s</strong><a class="table-action" href="%s">Use favorite</a></div>`,
+				esc(favorite.Name),
+				esc(favoritePrefillHref(favorite)))
+		}
+		_, _ = fmt.Fprint(w, `</div></div></section>`)
+		rows := [][]string{}
+		for _, entry := range entries {
+			task := ""
+			if entry.TaskID != nil {
+				task = label(selectors.TaskLabels, *entry.TaskID)
+			} else {
+				task = "No task"
+			}
+			end := "Running"
+			if entry.EndedAt != nil {
+				end = FormatTime(*entry.EndedAt)
+			}
+			rows = append(rows, []string{
+				label(selectors.CustomerLabels, entry.CustomerID),
+				label(selectors.ProjectLabels, entry.ProjectID),
+				label(selectors.ActivityLabels, entry.ActivityID),
+				task,
+				FormatTime(entry.StartedAt),
+				end,
+				duration(entry.DurationSeconds),
+				Money(entry.RateCents),
+				humanBillable(entry.Billable),
+				humanExport(entry.Exported),
+				esc(entry.Description) + ` <a class="table-action small" href="` + esc(timesheetPrefillHref(domain.DashboardRecentWork{CustomerID: entry.CustomerID, ProjectID: entry.ProjectID, ActivityID: entry.ActivityID, TaskID: entry.TaskID, Description: entry.Description, StartedAt: entry.StartedAt, DurationSeconds: entry.DurationSeconds, Billable: entry.Billable, Exported: entry.Exported})) + `">Duplicate</a>`,
+			})
+		}
+		dataTableRaw(w, []string{"Client", "Project", "Work Type", "Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description"}, rows)
 		_, _ = fmt.Fprint(w, `<div class="export-row"><a class="ghost-button" href="/timesheets/export">Export CSV</a></div>`)
 		return nil
 	}))
@@ -377,61 +466,80 @@ func Timesheets(user *NavUser, rows [][]string, selectors *SelectorData) templ.C
 func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, saved []domain.SavedReport, selectors *SelectorData) templ.Component {
 	return Layout("Reports", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		group := defaultVal(filter.Group, "user")
-		pageHeader(w, "Reports", "Analysis", "Filter, group, and save time-entry reports. Use \"Apply\" to view results and \"Save report\" to keep the current filters as a named shortcut.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Filters</h2><p>Save repeatable reporting views.</p></div></div><form method="get" action="/reports" class="toolbar-form selector-form"><label>Group by<select name="group">%s%s%s%s%s%s</select></label><label>Date from<input type="date" name="begin" value="%s"></label><label>Date to<input type="date" name="end" value="%s"></label>`,
-			reportOption(group, "user", "Users"), reportOption(group, "customer", "Customers"), reportOption(group, "project", "Projects"), reportOption(group, "activity", "Activities"), reportOption(group, "task", "Tasks"), reportOption(group, "group", "Groups"), dateInput(filter.Begin), dateInput(filter.End))
-		renderSelect(w, "Customer", "customer_id", optionList(selectors, "customer"), filter.CustomerID, false, "All customers", nil)
+		pageHeader(w, "Reports", "Billing and review", "Answer the questions engineering leads and billing admins ask most: who did the work, what was billable, and where projects are burning time.")
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Filters</h2><p>Build repeatable views for PM review, monthly billing, and discipline performance checks.</p></div></div><form method="get" action="/reports" class="toolbar-form selector-form"><label>Group by<select name="group">%s%s%s%s%s%s</select></label><label>Date from<input type="date" name="begin" value="%s"></label><label>Date to<input type="date" name="end" value="%s"></label>`,
+			reportOption(group, "user", "Engineer"), reportOption(group, "customer", "Client"), reportOption(group, "project", "Project"), reportOption(group, "activity", "Work Type"), reportOption(group, "task", "Task"), reportOption(group, "group", "Group"), dateInput(filter.Begin), dateInput(filter.End))
+		renderSelect(w, "Client", "customer_id", optionList(selectors, "customer"), filter.CustomerID, false, "All clients", nil)
 		renderSelect(w, "Project", "project_id", optionList(selectors, "project"), filter.ProjectID, false, "All projects", map[string]string{"data-filter-parent": "customer_id", "data-filter-attr": "customer-id"})
-		renderSelect(w, "Activity", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All activities", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+		renderSelect(w, "Work Type", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All work types", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "Task", "task_id", optionList(selectors, "task"), filter.TaskID, false, "All tasks", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
-		renderSelect(w, "User", "user_id", optionList(selectors, "user"), filter.UserID, false, "All users", nil)
+		renderSelect(w, "Engineer", "user_id", optionList(selectors, "user"), filter.UserID, false, "All engineers", nil)
 		renderSelect(w, "Group", "group_id", optionList(selectors, "group"), filter.GroupID, false, "All groups", nil)
-		_, _ = fmt.Fprintf(w, `<button class="primary">Apply</button></form><form method="post" action="/reports/saved" class="toolbar-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Saved report name" required><input type="hidden" name="group" value="%s"><input type="hidden" name="begin" value="%s"><input type="hidden" name="end" value="%s"><input type="hidden" name="customer_id" value="%s"><input type="hidden" name="project_id" value="%s"><input type="hidden" name="activity_id" value="%s"><input type="hidden" name="task_id" value="%s"><input type="hidden" name="user_id" value="%s"><input type="hidden" name="group_id" value="%s"><button class="table-action">Save report</button></form></section>`,
-			esc(user.CSRF), esc(group), dateInput(filter.Begin), dateInput(filter.End), idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID), idValue(filter.TaskID), idValue(filter.UserID), idValue(filter.GroupID))
+		renderBillableSelect(w, filter.Billable)
+		_, _ = fmt.Fprintf(w, `<button class="primary">Apply</button></form><form method="post" action="/reports/saved" class="toolbar-form"><input type="hidden" name="csrf" value="%s"><input name="name" placeholder="Saved report name" required><input type="hidden" name="group" value="%s"><input type="hidden" name="begin" value="%s"><input type="hidden" name="end" value="%s"><input type="hidden" name="customer_id" value="%s"><input type="hidden" name="project_id" value="%s"><input type="hidden" name="activity_id" value="%s"><input type="hidden" name="task_id" value="%s"><input type="hidden" name="user_id" value="%s"><input type="hidden" name="group_id" value="%s"><input type="hidden" name="billable" value="%s"><button class="table-action">Save report</button></form></section>`,
+			esc(user.CSRF), esc(group), dateInput(filter.Begin), dateInput(filter.End), idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID), idValue(filter.TaskID), idValue(filter.UserID), idValue(filter.GroupID), esc(billableValue(filter.Billable)))
 		renderSavedReportsDropdown(w, user, saved)
 		_, _ = fmt.Fprint(w, `<div class="tabs" aria-label="Report groups">`)
-		reportTab(w, group, "user", "Users")
-		reportTab(w, group, "customer", "Customers")
-		reportTab(w, group, "project", "Projects")
-		reportTab(w, group, "activity", "Activities")
-		reportTab(w, group, "task", "Tasks")
-		reportTab(w, group, "group", "Groups")
+		reportTab(w, group, "user", "Engineer")
+		reportTab(w, group, "customer", "Client")
+		reportTab(w, group, "project", "Project")
+		reportTab(w, group, "activity", "Work Type")
+		reportTab(w, group, "task", "Task")
+		reportTab(w, group, "group", "Group")
 		_, _ = fmt.Fprint(w, `</div>`)
 		out := [][]string{}
 		for _, row := range rows {
 			out = append(out, []string{fmt.Sprint(row["name"]), fmt.Sprint(row["count"]), duration(row["seconds"].(int64)), money(row["cents"].(int64))})
 		}
-		dataTable(w, []string{strings.Title(group), "Entries", "Duration", "Revenue"}, out)
-		_, _ = fmt.Fprintf(w, `<div class="export-row"><a class="ghost-button" href="/reports/export?group=%s&begin=%s&end=%s&customer_id=%s&project_id=%s&activity_id=%s&task_id=%s&user_id=%s&group_id=%s">Export CSV</a></div>`,
+		dataTable(w, []string{reportHeading(group), "Entries", "Duration", "Revenue"}, out)
+		_, _ = fmt.Fprintf(w, `<div class="export-row"><a class="ghost-button" href="/reports/export?group=%s&begin=%s&end=%s&customer_id=%s&project_id=%s&activity_id=%s&task_id=%s&user_id=%s&group_id=%s&billable=%s">Export CSV</a></div>`,
 			esc(group), dateInput(filter.Begin), dateInput(filter.End),
 			idValue(filter.CustomerID), idValue(filter.ProjectID), idValue(filter.ActivityID),
-			idValue(filter.TaskID), idValue(filter.UserID), idValue(filter.GroupID))
+			idValue(filter.TaskID), idValue(filter.UserID), idValue(filter.GroupID), esc(billableValue(filter.Billable)))
 		return nil
 	}))
 }
 
 func ProjectDashboard(user *NavUser, d domain.ProjectDashboard) templ.Component {
 	return Layout("Project dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, d.Project.Name, "Project dashboard", "Estimate, budget, and tracked work for this project.")
+		pageHeader(w, d.Project.Name, "Project dashboard", "Monitor delivery burn, invoice readiness, and who is doing the work.")
 		_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
 		metric(w, "Tracked", duration(d.TrackedSeconds), "Total project time")
 		metric(w, "Estimate used", fmt.Sprintf("%d%%", d.EstimatePercent), "Against estimate")
 		metric(w, "Billable value", money(d.BillableCents), "Tracked value")
 		metric(w, "Budget used", fmt.Sprintf("%d%%", d.BudgetPercent), "Against fixed fee")
+		metric(w, "Unbilled time", duration(d.UnbilledSeconds), "Billable hours not yet exported")
+		metric(w, "Unbilled value", money(d.UnbilledCents), "Potential invoice value")
+		metric(w, "Billable split", duration(d.BillableSeconds), "Direct billable effort")
+		metric(w, "Internal split", duration(d.NonBillableSeconds), "Non-billable effort")
 		_, _ = fmt.Fprint(w, `</section>`)
 		if d.Alert {
-			_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold.</div>`)
+			_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold. Review burn before approving more work or sending the next invoice.</div>`)
 		}
+		_, _ = fmt.Fprint(w, `<section class="two-col section-spacer"><div class="panel"><div class="panel-head"><div><h2>Active task mix</h2><p>Where the project effort is landing now.</p></div></div>`)
+		taskRows := [][]string{}
+		for _, task := range d.TaskSummaries {
+			taskRows = append(taskRows, []string{task.Name, duration(task.TrackedSeconds), duration(task.UnbilledSeconds), humanBillable(task.Billable)})
+		}
+		dataTable(w, []string{"Task", "Tracked", "Unbilled", "Billable"}, taskRows)
+		_, _ = fmt.Fprint(w, `</div><div class="panel"><div class="panel-head"><div><h2>Key contributors</h2><p>Who is carrying the billable load on this project.</p></div></div>`)
+		contributorRows := [][]string{}
+		for _, contributor := range d.Contributors {
+			contributorRows = append(contributorRows, []string{contributor.DisplayName, duration(contributor.TrackedSeconds), duration(contributor.BillableSeconds)})
+		}
+		dataTable(w, []string{"Engineer", "Tracked", "Billable"}, contributorRows)
+		_, _ = fmt.Fprint(w, `</div></section>`)
 		return nil
 	}))
 }
 
-func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet) templ.Component {
+func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, selectors *SelectorData) templ.Component {
 	return Layout("Calendar", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Calendar", "Time review", "A lightweight weekly view of time entries without drag-and-drop complexity.")
+		pageHeader(w, "Calendar", "Weekly review", "Review where the week went, spot missing days, and jump straight into backfill.")
 		prev := weekStart.AddDate(0, 0, -7).Format("2006-01-02")
 		next := weekStart.AddDate(0, 0, 7).Format("2006-01-02")
 		_, _ = fmt.Fprintf(w, `<div class="tabs"><a class="tab-link" href="/calendar?date=%s">Previous week</a><a class="tab-link active" aria-current="page" href="/calendar?date=%s">%s</a><a class="tab-link" href="/calendar?date=%s">Next week</a></div><section class="calendar-grid">`, esc(prev), esc(weekStart.Format("2006-01-02")), esc(weekStart.Format("Jan 2")+" - "+weekStart.AddDate(0, 0, 6).Format("Jan 2")), esc(next))
+		today := time.Now().UTC()
 		for day := 0; day < 7; day++ {
 			current := weekStart.AddDate(0, 0, day)
 			total := int64(0)
@@ -440,17 +548,27 @@ func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet) te
 					total += entry.DurationSeconds
 				}
 			}
-			_, _ = fmt.Fprintf(w, `<article class="calendar-day"><div class="calendar-day-head"><strong>%s</strong><span>%s</span></div>`, esc(current.Format("Mon 02")), esc(duration(total)))
+			dayClass := "calendar-day"
+			if total == 0 && !current.After(today) && current.Weekday() != time.Saturday && current.Weekday() != time.Sunday {
+				dayClass += " calendar-day-missing"
+			}
+			_, _ = fmt.Fprintf(w, `<article class="%s"><div class="calendar-day-head"><strong>%s</strong><span>%s</span></div>`, esc(dayClass), esc(current.Format("Mon 02")), esc(duration(total)))
 			empty := true
 			for _, entry := range entries {
 				if !sameDay(entry.StartedAt, current) {
 					continue
 				}
 				empty = false
-				_, _ = fmt.Fprintf(w, `<div class="calendar-entry"><strong>%s</strong><span>%s · Project %d</span><small>%s</small></div>`, esc(timeRange(entry)), esc(duration(entry.DurationSeconds)), entry.ProjectID, esc(entry.Description))
+				_, _ = fmt.Fprintf(w, `<div class="calendar-entry"><strong>%s</strong><span>%s · %s</span><small>%s</small></div>`,
+					esc(timeRange(entry)),
+					esc(duration(entry.DurationSeconds)),
+					esc(calendarEntryLabel(entry, selectors)),
+					esc(entry.Description))
 			}
 			if empty {
-				_, _ = fmt.Fprint(w, `<div class="calendar-empty">No entries</div>`)
+				_, _ = fmt.Fprintf(w, `<div class="calendar-empty">No entries</div><a class="table-action" href="/timesheets?date=%s">Log time for this day</a>`, esc(current.Format("2006-01-02")))
+			} else {
+				_, _ = fmt.Fprintf(w, `<div class="calendar-entry-actions"><a class="table-action" href="/timesheets?date=%s">Add more time</a></div>`, esc(current.Format("2006-01-02")))
 			}
 			_, _ = fmt.Fprint(w, `</article>`)
 		}
@@ -461,7 +579,7 @@ func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet) te
 
 func Account(user *NavUser, account domain.User, totpMode string, setupSecret, setupURI string, recoveryCodes []string, message string) templ.Component {
 	return Layout("Account", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Account", "Profile and security", "Manage personal settings without changing admin-only access.")
+		pageHeader(w, "Account", "Profile and security", "Keep your local profile, timezone, password, and workspace context up to date.")
 		if message != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
 		}
@@ -497,7 +615,7 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 
 func AdminHome(user *NavUser) templ.Component {
 	return Layout("Admin", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Admin", "Administration", "Choose an admin area to manage workspaces, billing controls, users, templates, and integrations.")
+		pageHeader(w, "Admin", "Administration", "Administration stays separate from day-to-day engineering time capture. Open the area you need without cluttering the main workflow.")
 		links := adminLinksFor(user)
 		if len(links) == 0 {
 			_, _ = fmt.Fprint(w, `<section class="panel"><div class="empty-state"><strong>No admin access</strong><span>Your account does not currently have any admin capabilities.</span></div></section>`)
@@ -517,7 +635,7 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 	return Layout("Project members", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		userLabels := userLabelMap(users)
 		groupLabels := groupLabelMap(groups)
-		pageHeader(w, project.Name, "Project access", "Manage direct project members and group access for private work.")
+		pageHeader(w, project.Name, "Project access", "Control who can log time to this project and who can manage project setup.")
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Add members</h2><p>Managers can administer this project; members can track time.</p></div></div><form method="post" action="/projects/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label class="wide">Users<select name="user_id" multiple size="8">`, project.ID, esc(user.CSRF))
 		for _, u := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, u.ID, esc(userLabel(u)))
@@ -548,7 +666,7 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 
 func WorkspaceAdmin(user *NavUser, workspaces []domain.WorkspaceSummary) templ.Component {
 	return Layout("Workspaces", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Workspaces", "Organization admin", "Create and manage organization workspaces.")
+		pageHeader(w, "Workspaces", "Organization admin", "Review workspace health, member counts, and workspace-level setup without leaving the organization view.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create workspace</h2><p>Only organization admins can add workspaces.</p></div></div><form method="post" action="/admin/workspaces" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label>Slug <span class="field-hint">URL-safe ID, auto-generated if blank</span><input name="slug" placeholder="e.g. my-team"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="ZAR" placeholder="ZAR" maxlength="3"></label>`, esc(user.CSRF))
 		renderTimezoneSelect(w, "Timezone", "timezone", "UTC", true)
 		_, _ = fmt.Fprint(w, `<label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Create workspace</button></div></form></section>`)
@@ -567,7 +685,7 @@ func WorkspaceAdmin(user *NavUser, workspaces []domain.WorkspaceSummary) templ.C
 
 func WorkspaceDetail(user *NavUser, workspace domain.Workspace, members []domain.WorkspaceMember, users []domain.User) templ.Component {
 	return Layout("Workspace admin", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, workspace.Name, "Workspace admin", "Edit settings and manage workspace members.")
+		pageHeader(w, workspace.Name, "Workspace admin", "Manage workspace settings, member roles, and reporting access cleanly.")
 		checked := ""
 		if workspace.Archived {
 			checked = " checked"
@@ -596,7 +714,7 @@ func WorkspaceDetail(user *NavUser, workspace domain.Workspace, members []domain
 func GroupMembers(user *NavUser, group domain.Group, members []domain.User, users []domain.User) templ.Component {
 	return Layout("Group members", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		memberLabels := userLabelMap(members)
-		pageHeader(w, group.Name, "Group membership", "Bulk add or remove workspace users from this group.")
+		pageHeader(w, group.Name, "Group membership", "Use groups for team-level project assignment and bulk access changes.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Add members</h2><p>Select one or more workspace users.</p></div></div><form method="post" action="/groups/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label class="wide">Users<select name="user_id" multiple size="10">`, group.ID, esc(user.CSRF))
 		for _, item := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, item.ID, esc(userLabel(item)))
@@ -615,8 +733,8 @@ func GroupMembers(user *NavUser, group domain.Group, members []domain.User, user
 
 func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selectors *SelectorData) templ.Component {
 	return Layout("Project templates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Project templates", "Admin", "Create reusable project blueprints for common work.")
-		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How templates work:</strong> Create a template once with your standard project settings, tasks, and activities. Then use <em>Use template</em> below to spin up a new project with all those defaults pre-applied.</div>`)
+		pageHeader(w, "Project templates", "Project setup", "Create repeatable engineering project blueprints with standard phases, tasks, and default controls.")
+		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How templates work:</strong> Capture your standard project setup once, including typical work types and task bundles, then reuse it whenever a similar engineering job starts.</div>`)
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create template</h2><p>Define defaults including tasks and activities (one per line).</p></div></div>`)
 		renderProjectTemplateForm(w, user, domain.ProjectTemplate{Visible: true, Billable: true, BudgetAlertPercent: 80}, "/project-templates")
 		_, _ = fmt.Fprint(w, `</section>`)
@@ -651,7 +769,7 @@ func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selecto
 
 func ProjectTemplateDetail(user *NavUser, template domain.ProjectTemplate, selectors *SelectorData) templ.Component {
 	return Layout("Edit template", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, template.Name, "Project template", "Edit template defaults or create a project from this template.")
+		pageHeader(w, template.Name, "Project template", "Refine a repeatable project setup or create a live project from this template.")
 		_, _ = fmt.Fprint(w, `<section class="panel form-panel">`)
 		renderProjectTemplateForm(w, user, template, fmt.Sprintf("/project-templates/%d", template.ID))
 		_, _ = fmt.Fprintf(w, `</section><section class="panel form-panel section-spacer"><div class="panel-head"><div><h2>Use template</h2><p>Create a project from this template.</p></div></div><form method="post" action="/project-templates/%d/use" class="form-grid"><input type="hidden" name="csrf" value="%s">`, template.ID, esc(user.CSRF))
@@ -684,7 +802,7 @@ func renderProjectTemplateForm(w io.Writer, user *NavUser, template domain.Proje
 
 func Invoices(user *NavUser, invoices []domain.Invoice, selectors *SelectorData) templ.Component {
 	return Layout("Invoices", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Invoices", "Billing", "Create lightweight invoice records from unexported billable time.")
+		pageHeader(w, "Invoices", "Billing", "Turn classified project time into invoice records with fewer surprises at billing time.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create invoice</h2><p>Pulls all unexported billable entries for the customer within the date range. Entries are marked as exported once included.</p></div></div><form method="post" action="/invoices" class="toolbar-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderSelect(w, "Customer", "customer_id", optionList(selectors, "customer"), 0, true, "Select a customer", nil)
 		_, _ = fmt.Fprint(w, `<label>Date from<input type="date" name="begin" required></label><label>Date to<input type="date" name="end" required></label><label>Tax (%)<input name="tax" value="0" placeholder="e.g. 20"></label><button class="primary">Create invoice</button></form></section>`)
@@ -699,7 +817,7 @@ func Invoices(user *NavUser, invoices []domain.Invoice, selectors *SelectorData)
 
 func Webhooks(user *NavUser, hooks []domain.WebhookEndpoint) templ.Component {
 	return Layout("Webhooks", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Webhooks", "Integrations", "Send signed JSON events without plugin infrastructure.")
+		pageHeader(w, "Webhooks", "Integrations", "Keep outbound integrations readable and operational for admins only.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Add endpoint</h2><p>Use '*' for all events or comma-separated event names.</p></div></div><form method="post" action="/webhooks" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label>URL<input name="url" required></label><label>Secret <span class="field-hint">signs each payload — store it securely</span><input name="secret" required></label><label>Events <span class="field-hint">use * for all, or comma-separate names</span><input name="events" value="*"></label><div class="form-actions"><button class="primary">Add webhook</button></div></form></section>`, esc(user.CSRF))
 		rows := [][]string{}
 		for _, hook := range hooks {
@@ -779,10 +897,14 @@ func ErrorPage(title, message string) templ.Component {
 }
 
 func renderWorkSelectors(w io.Writer, selectors *SelectorData, requireCore bool) {
-	renderSelect(w, "Customer", "customer_id", optionList(selectors, "customer"), 0, requireCore, "Select a customer", nil)
-	renderSelect(w, "Project", "project_id", optionList(selectors, "project"), 0, requireCore, "Select a project", map[string]string{"data-filter-parent": "customer_id", "data-filter-attr": "customer-id"})
-	renderSelect(w, "Activity", "activity_id", optionList(selectors, "activity"), 0, requireCore, "Select an activity", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
-	renderSelect(w, "Task", "task_id", optionList(selectors, "task"), 0, false, "No task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+	renderWorkSelectorsWithSelected(w, selectors, requireCore, TimesheetPrefill{})
+}
+
+func renderWorkSelectorsWithSelected(w io.Writer, selectors *SelectorData, requireCore bool, selected TimesheetPrefill) {
+	renderSelect(w, "Client"+tipHTML("The client that will ultimately be billed for the work."), "customer_id", optionList(selectors, "customer"), selected.CustomerID, requireCore, "Select a client", nil)
+	renderSelect(w, "Project"+tipHTML("The project or job number this time should land against."), "project_id", optionList(selectors, "project"), selected.ProjectID, requireCore, "Select a project", map[string]string{"data-filter-parent": "customer_id", "data-filter-attr": "customer-id"})
+	renderSelect(w, "Work Type"+tipHTML("Work type explains the kind of effort performed, such as design review, QA/rework, site visit, or coordination."), "activity_id", optionList(selectors, "activity"), selected.ActivityID, requireCore, "Select a work type", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+	renderSelect(w, "Task"+tipHTML("Task is the deliverable or work package being billed, such as pump sizing, P&ID review, or tender support."), "task_id", optionList(selectors, "task"), selected.TaskID, false, "No task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 }
 
 // tipHTML returns an inline tooltip icon span. text is escaped internally.
@@ -992,17 +1114,21 @@ func adminLinksFor(user *NavUser) []navItem {
 	}
 	links := make([]navItem, 0, len(adminNav))
 	for _, item := range adminNav {
+		if item.Path == "/admin" {
+			continue
+		}
 		if user.can(item.Permission) {
 			links = append(links, item)
 		}
 	}
-	return links
+	if len(links) == 0 {
+		return nil
+	}
+	return append([]navItem{{Label: "Admin Home", Path: "/admin", Group: "Administration"}}, links...)
 }
 
 func adminSidebarNav(user *NavUser) []navItem {
-	links := []navItem{{Label: "Overview", Path: "/admin", Group: "Admin"}}
-	links = append(links, adminLinksFor(user)...)
-	return links
+	return adminLinksFor(user)
 }
 
 func isAdminArea(user *NavUser) bool {
@@ -1019,18 +1145,18 @@ func isAdminArea(user *NavUser) bool {
 
 func adminDescription(path string) string {
 	switch path {
+	case "/admin":
+		return "Open the administration hub and choose the control area you need."
 	case "/admin/workspaces":
 		return "Create workspaces, update workspace settings, and manage workspace membership."
 	case "/rates":
-		return "Maintain billable rates and user cost rates for auditable reporting."
+		return "Maintain billable rates and user cost rates so invoices and profitability remain defensible."
 	case "/admin/exchange-rates":
-		return "Manage currency conversion rules for reporting across billing units."
+		return "Manage currency conversion rules used by billing and cross-currency reporting."
 	case "/admin/recalculate":
-		return "Preview and apply retroactive rate recalculations for historical timesheets."
-	case "/project-templates":
-		return "Create and reuse project templates for repeatable workspace setups."
+		return "Preview the financial impact before recalculating historical time entries."
 	case "/admin/users":
-		return "Create users and manage platform-level user access."
+		return "Create users and make sure engineers and admins have the right access."
 	case "/webhooks":
 		return "Configure signed outbound webhook integrations."
 	default:
@@ -1110,6 +1236,14 @@ func reportTab(w io.Writer, current, value, label string) {
 		currentAttr = ` aria-current="page"`
 	}
 	_, _ = fmt.Fprintf(w, `<a%s%s href="/reports?group=%s">%s</a>`, class, currentAttr, esc(value), esc(label))
+}
+
+func renderBillableSelect(w io.Writer, selected *bool) {
+	current := billableValue(selected)
+	_, _ = fmt.Fprintf(w, `<label>Billing class<select name="billable"><option value=""%s>All work</option><option value="true"%s>Billable only</option><option value="false"%s>Internal only</option></select></label>`,
+		selectedAttr(current == ""),
+		selectedAttr(current == "true"),
+		selectedAttr(current == "false"))
 }
 
 func reportOption(current, value, label string) string {
@@ -1199,6 +1333,10 @@ func money(cents int64) string {
 	return fmt.Sprintf("$%.2f", float64(cents)/100)
 }
 
+func Money(cents int64) string {
+	return money(cents)
+}
+
 func dateInput(value *time.Time) string {
 	if value == nil {
 		return ""
@@ -1224,6 +1362,37 @@ func duration(seconds int64) string {
 	h := seconds / 3600
 	m := seconds % 3600 / 60
 	return fmt.Sprintf("%dh %02dm", h, m)
+}
+
+func humanBillable(value bool) string {
+	if value {
+		return `<span class="badge success">Billable</span>`
+	}
+	return `<span class="badge muted">Internal</span>`
+}
+
+func humanExport(value bool) string {
+	if value {
+		return `<span class="badge">Exported</span>`
+	}
+	return `<span class="badge warning">Pending</span>`
+}
+
+func billableValue(value *bool) string {
+	if value == nil {
+		return ""
+	}
+	if *value {
+		return "true"
+	}
+	return "false"
+}
+
+func selectedAttr(value bool) string {
+	if value {
+		return ` selected`
+	}
+	return ""
 }
 
 func yesNo(value bool) string {
@@ -1301,6 +1470,8 @@ func singularTitle(title string) string {
 	switch title {
 	case "Activities":
 		return "Activity"
+	case "Clients":
+		return "Client"
 	case "Customers":
 		return "Customer"
 	case "Projects":
@@ -1325,11 +1496,117 @@ func FormatTime(t time.Time) string {
 	return t.Local().Format("2006-01-02 15:04")
 }
 
+func reportHeading(group string) string {
+	switch group {
+	case "user":
+		return "Engineer"
+	case "customer":
+		return "Client"
+	case "project":
+		return "Project"
+	case "activity":
+		return "Work Type"
+	case "task":
+		return "Task"
+	case "group":
+		return "Group"
+	default:
+		return strings.Title(group)
+	}
+}
+
+func calendarEntryLabel(entry domain.Timesheet, selectors *SelectorData) string {
+	parts := []string{label(selectors.ProjectLabels, entry.ProjectID), label(selectors.ActivityLabels, entry.ActivityID)}
+	if entry.TaskID != nil {
+		parts = append(parts, label(selectors.TaskLabels, *entry.TaskID))
+	}
+	out := []string{}
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			out = append(out, part)
+		}
+	}
+	return strings.Join(out, " · ")
+}
+
+func recentWorkLabel(item domain.DashboardRecentWork, selectors *SelectorData) string {
+	parts := []string{
+		label(selectors.CustomerLabels, item.CustomerID),
+		label(selectors.ProjectLabels, item.ProjectID),
+		label(selectors.ActivityLabels, item.ActivityID),
+	}
+	if item.TaskID != nil {
+		parts = append(parts, label(selectors.TaskLabels, *item.TaskID))
+	}
+	out := []string{}
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			out = append(out, part)
+		}
+	}
+	return strings.Join(out, " / ")
+}
+
+func timesheetPrefillHref(item domain.DashboardRecentWork) string {
+	values := url.Values{}
+	values.Set("customer_id", fmt.Sprint(item.CustomerID))
+	values.Set("project_id", fmt.Sprint(item.ProjectID))
+	values.Set("activity_id", fmt.Sprint(item.ActivityID))
+	if item.TaskID != nil {
+		values.Set("task_id", fmt.Sprint(*item.TaskID))
+	}
+	values.Set("date", time.Now().UTC().Format("2006-01-02"))
+	if item.Description != "" {
+		values.Set("description", item.Description)
+	}
+	return "/timesheets?" + values.Encode()
+}
+
+func favoritePrefillHref(item domain.Favorite) string {
+	values := url.Values{}
+	values.Set("customer_id", fmt.Sprint(item.CustomerID))
+	values.Set("project_id", fmt.Sprint(item.ProjectID))
+	values.Set("activity_id", fmt.Sprint(item.ActivityID))
+	if item.TaskID != nil {
+		values.Set("task_id", fmt.Sprint(*item.TaskID))
+	}
+	values.Set("date", time.Now().UTC().Format("2006-01-02"))
+	if item.Description != "" {
+		values.Set("description", item.Description)
+	}
+	return "/timesheets?" + values.Encode()
+}
+
+func projectWatchSummary(item domain.DashboardProjectWatch) string {
+	flags := []string{}
+	if item.EstimatePercent > 0 {
+		flags = append(flags, fmt.Sprintf("%d%% of estimate", item.EstimatePercent))
+	}
+	if item.BudgetPercent > 0 {
+		flags = append(flags, fmt.Sprintf("%d%% of budget", item.BudgetPercent))
+	}
+	if len(flags) == 0 {
+		return "Tracked work is underway"
+	}
+	return strings.Join(flags, " · ")
+}
+
+func projectWatchMeta(item domain.DashboardProjectWatch) string {
+	meta := []string{duration(item.TrackedSeconds) + " tracked"}
+	if item.UnbilledSeconds > 0 {
+		meta = append(meta, duration(item.UnbilledSeconds)+" unbilled")
+	}
+	if item.UnbilledCents > 0 {
+		meta = append(meta, money(item.UnbilledCents)+" pending")
+	}
+	return strings.Join(meta, " · ")
+}
+
 // ─── New feature templates ────────────────────────────────────────────────────
 
 func Tasks(user *NavUser, tasks []domain.Task, selectors *SelectorData, canManage bool) templ.Component {
 	return Layout("Tasks", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Tasks", "Work breakdown", "")
+		pageHeader(w, "Tasks", "Work breakdown", "Treat tasks as billable work packages such as calculations, reviews, inspections, coordination, and rework.")
 		if canManage {
 			_, _ = fmt.Fprintf(w, `<details class="panel collapsible"><summary>Create task</summary><form class="form-grid" method="post" action="/tasks"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 			renderSelect(w, "Project", "project_id", optionList(selectors, "project"), 0, true, "Select a project", nil)
@@ -1394,7 +1671,7 @@ func SharedReport(name string, rows []map[string]any) templ.Component {
 
 func Utilization(user *NavUser, rows []domain.UtilizationRow, beginStr, endStr string) templ.Component {
 	return Layout("Utilization", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprint(w, `<section class="content-shell"><header class="page-header"><h1>Utilization</h1><p class="page-desc">Shows how much time each team member tracked in the selected period and what percentage was billable. The bar chart is relative to the highest-tracked user.</p></header>`)
+		_, _ = fmt.Fprint(w, `<section class="content-shell"><header class="page-header"><h1>Utilization</h1><p class="page-desc">Review available effort versus logged time, with billable load highlighted for operational planning and profitability review.</p></header>`)
 		_, _ = fmt.Fprintf(w, `<form class="filter-bar" method="get" action="/reports/utilization"><label>From<input type="date" name="begin" value="%s"></label><label>To<input type="date" name="end" value="%s"></label><button class="primary">Apply</button>`, esc(beginStr), esc(endStr))
 		_, _ = fmt.Fprintf(w, ` <a class="button" href="/reports/export?begin=%s&end=%s">Export CSV</a></form>`, esc(beginStr), esc(endStr))
 		if len(rows) == 0 {

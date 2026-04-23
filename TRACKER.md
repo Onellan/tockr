@@ -77,7 +77,7 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 
 ### UI And UX
 
-- Grouped sidebar navigation: Work, Manage, Analyze, Admin.
+- Grouped sidebar navigation aligned to workflow: Work, Projects / Delivery, Billing / Analysis, Administration.
 - Collapsible sidebar groups, with Manage, Analyze, and Admin collapsed by default.
 - Account dropdown in the topbar.
 - Saved report dropdown.
@@ -91,6 +91,12 @@ This file replaces the scattered planning, audit, impact, and follow-up markdown
 - Dependent selectors for customer -> project and project -> activity/task.
 - Server-side relationship validation for manually posted selector IDs.
 - Responsive admin-style layout with panels, tables, badges, and clear focus states.
+- Engineering-focused workflow pass:
+  - dashboard recent work, missing-time, watchlist, and billing attention panels
+  - prefilled timesheet reuse flows
+  - readable calendar project/task/work-type context
+  - billable-filtered reporting
+  - richer project dashboard burn and contributor visibility
 
 ### CI And Deployment
 
