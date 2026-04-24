@@ -12,6 +12,7 @@ SECRET_FILE="${DATA_DIR}/.session_secret"
 ADMIN_PASSWORD_FILE="${DATA_DIR}/.admin_password"
 
 mkdir -p "$DATA_DIR"
+chown -R 65532:65532 "$DATA_DIR"
 umask 077
 
 if [ -z "$TOCKR_SESSION_SECRET" ]; then
@@ -37,4 +38,5 @@ fi
 printf '{"level":"INFO","msg":"container bootstrap ready","data_dir":"%s","db_path":"%s"}\n' \
   "$DATA_DIR" "$DB_PATH" >&2
 
-exec /app/tockr "$@"
+chown -R 65532:65532 "$DATA_DIR"
+exec su-exec 65532:65532 /app/tockr "$@"
