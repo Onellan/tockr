@@ -312,6 +312,9 @@ func TestWorkstreamCRUD(t *testing.T) {
 	if !strings.Contains(body, "Alpha Stream") {
 		t.Fatal("workstreams list should show created workstream")
 	}
+	if strings.Contains(body, `href="/workstreams/`) || !strings.Contains(body, `class="inline-edit"`) {
+		t.Fatal("workstream edit UI should be inline and must not link to a missing page")
+	}
 
 	// Get workstream ID
 	var wsID int64

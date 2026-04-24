@@ -40,7 +40,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/webhooks", "/api/tasks"}
+	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -81,6 +81,54 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	}
 }
 
+func TestUIOutlierPagesUseSharedPatternsAndNoDeadActions(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	_, _, _, _ = seedSelectorFixtures(t, store)
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO workstreams(workspace_id, name, code, description, visible, created_at) VALUES(1,'Civil Delivery','CIV','Long description that should wrap rather than break a table cell',1,?)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	workstreams := getWithCookie(app, "/workstreams", cookie).Body.String()
+	if strings.Contains(workstreams, `href="/workstreams/`) {
+		t.Fatal("workstreams page should not render dead edit links")
+	}
+	for _, expected := range []string{
+		`class="inline-edit"`,
+		`class="compact-form inline-edit-form" method="post" action="/workstreams/`,
+		`class="actions-cell"`,
+	} {
+		if !strings.Contains(workstreams, expected) {
+			t.Fatalf("workstreams page missing %q", expected)
+		}
+	}
+
+	for route, expected := range map[string][]string{
+		"/tasks":                {`class="panel form-panel"`, `class="table-card"`, `class="inline-edit"`},
+		"/reports/utilization":  {`class="panel form-panel"`, `class="toolbar-form"`, `class="empty-state"`},
+		"/admin/exchange-rates": {`class="page-head"`, `class="panel form-panel"`, `class="empty-state"`},
+		"/admin/recalculate":    {`class="page-head"`, `class="panel form-panel"`, `class="toolbar-form selector-form"`},
+	} {
+		rec := getWithCookie(app, route, cookie)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s returned %d", route, rec.Code)
+		}
+		body := rec.Body.String()
+		for _, snippet := range expected {
+			if !strings.Contains(body, snippet) {
+				t.Fatalf("%s missing shared UI snippet %q", route, snippet)
+			}
+		}
+		for _, stale := range []string{`class="filter-bar"`, `class="content-shell"`, `class="checkbox-label"`} {
+			if strings.Contains(body, stale) {
+				t.Fatalf("%s still contains stale UI class %q", route, stale)
+			}
+		}
+	}
+}
+
 func TestResponsiveNavigationMarkupAndAssets(t *testing.T) {
 	app, store := testApp(t)
 	defer store.Close()
@@ -106,6 +154,11 @@ func TestResponsiveNavigationMarkupAndAssets(t *testing.T) {
 		`transform: translateX(-105%)`,
 		`body.nav-open`,
 		`.section-spacer {` + "\n" + `  margin-top: var(--space-5);`,
+		`.actions-cell`,
+		`.inline-edit-form`,
+		`.action-menu-button`,
+		`.util-bar-wrap`,
+		`.table-card {` + "\n" + `  overflow: visible;`,
 	} {
 		if !strings.Contains(css, expected) {
 			t.Fatalf("responsive CSS missing %q", expected)
