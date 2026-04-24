@@ -199,6 +199,25 @@ func TestAuthEmailPagesRenderAndMisconfiguredSMTPIsClear(t *testing.T) {
 	}
 }
 
+func TestPublicAuthPagesRedirectTrailingSlash(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/login/", "/login"},
+		{"/forgot-password/", "/forgot-password"},
+		{"/reset-password/?token=abc", "/reset-password?token=abc"},
+	} {
+		rec := getPublic(app, tc.path)
+		if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != tc.want {
+			t.Fatalf("%s returned %d location %q, want %q", tc.path, rec.Code, rec.Header().Get("Location"), tc.want)
+		}
+	}
+}
+
 func postPublicForm(app *Server, target string, form url.Values) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

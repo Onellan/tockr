@@ -67,10 +67,13 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Get("/static/*", s.static)
 	r.Get("/healthz", s.health)
 	r.Get("/login", s.loginPage)
+	r.Get("/login/", redirectCanonical("/login"))
 	r.Post("/login", s.login)
 	r.Get("/forgot-password", s.forgotPasswordPage)
+	r.Get("/forgot-password/", redirectCanonical("/forgot-password"))
 	r.Post("/forgot-password", s.forgotPassword)
 	r.Get("/reset-password", s.resetPasswordPage)
+	r.Get("/reset-password/", redirectCanonical("/reset-password"))
 	r.Post("/reset-password", s.resetPassword)
 	r.Get("/reports/share/{token}", s.viewSharedReport)
 	r.Post("/logout", s.requireLogin(s.logout))
@@ -182,6 +185,16 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 
 func (s *Server) Handler() http.Handler {
 	return s.router
+}
+
+func redirectCanonical(path string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		target := path
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	}
 }
 
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {

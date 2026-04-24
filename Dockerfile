@@ -1,7 +1,14 @@
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS deps
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+
+FROM deps AS test-runner
+COPY . .
+ENV CGO_ENABLED=0
+CMD ["go", "test", "./..."]
+
+FROM deps AS build
 COPY . .
 ARG TARGETOS
 ARG TARGETARCH

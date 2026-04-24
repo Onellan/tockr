@@ -5,6 +5,7 @@ Tockr is a lightweight time tracking app for Raspberry Pi 4B and small teams.
 ## Contents
 
 - [Run Locally](#run-locally)
+- [Test](#test)
 - [Docker Install](#docker-install)
 - [Raspberry Pi](#raspberry-pi)
 - [Cloudflare Tunnel](#cloudflare-tunnel)
@@ -30,6 +31,31 @@ Default local seed login:
 
 The local development fallback is intentionally simple. Docker installs
 generate and persist the bootstrap password automatically.
+
+---
+
+## Test
+
+Tests are run through Docker so the build and test environment matches CI:
+
+```sh
+docker compose run --build --rm test
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\test.ps1
+```
+
+On macOS/Linux:
+
+```sh
+sh ./scripts/test.sh
+```
+
+The test service uses the `test-runner` Dockerfile target and does not start
+the local app or Mailpit services.
 
 ---
 

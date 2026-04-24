@@ -1,4 +1,13 @@
 services:
+  test:
+    build:
+      context: .
+      target: test-runner
+    image: tockr:test
+    profiles:
+      - test
+    command: go test ./...
+
   tockr:
     build: .
     image: tockr:local
