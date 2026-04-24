@@ -17,6 +17,13 @@ See [README.md](../README.md#configuration).
 | `TOCKR_DEFAULT_CURRENCY` | `USD` | Used for first-run seeded data. | Optional before first start. |
 | `TOCKR_FUTURE_TIME_POLICY` | `end_of_day` | Applied by the app. | Optional. |
 | `TOCKR_TOTP_MODE` | `disabled` | Applied by the app. | Set to `optional` or `required` for 2FA. |
+| `TOCKR_PUBLIC_URL` | empty | Used to build password reset links. | Set to the external HTTPS URL in production. |
+| `TOCKR_SMTP_HOST` | empty | Required for account email changes and password resets. | Set to your SMTP provider host. |
+| `TOCKR_SMTP_PORT` | `587` | SMTP port. | Use provider value, or `1025` for local Mailpit. |
+| `TOCKR_SMTP_FROM` | empty | Required sender address. | Set to a verified sender. |
+| `TOCKR_SMTP_USERNAME` | empty | SMTP auth username. | Set when your provider requires auth. |
+| `TOCKR_SMTP_PASSWORD` | empty | SMTP auth password. | Set as a secret when auth is required. |
+| `TOCKR_SMTP_STARTTLS` | `true` | Requires STARTTLS before auth/send. | Set `false` only for trusted local mail catchers. |
 | `TOCKR_COOKIE_SECURE` | `false` | Applied to session cookies. | Set `true` behind HTTPS. |
 | `TOCKR_WEBHOOK_MAX_RETRIES` | `5` | Applied by the webhook worker. | Rarely. |
 
@@ -59,6 +66,18 @@ Defaults are:
 
 Local defaults are for development only. Docker is the recommended self-hosted
 install path because it persists generated secrets automatically.
+
+For local email testing, `docker-compose.yml` includes Mailpit. Run `docker compose up`
+and use:
+
+| Variable | Local value |
+|---|---|
+| `TOCKR_SMTP_HOST` | `mailpit` |
+| `TOCKR_SMTP_PORT` | `1025` |
+| `TOCKR_SMTP_FROM` | `Tockr <noreply@localhost>` |
+| `TOCKR_SMTP_STARTTLS` | `false` |
+
+The local inbox is available at <http://localhost:8025>.
 
 ## Variable Details
 
@@ -125,6 +144,28 @@ Controls two-factor authentication:
 | `disabled` | TOTP is unavailable. |
 | `optional` | Users may enroll TOTP. |
 | `required` | Users must enroll TOTP before using the app. |
+
+### Email and SMTP
+
+SMTP is required for password resets and email-address changes. The Settings
+menu shows the current SMTP status under **Admin -> Email**, but provider
+credentials remain environment-backed so secrets are not stored or edited in
+the browser.
+
+Set `TOCKR_PUBLIC_URL` to the public HTTPS origin users open in their browser,
+for example `https://tockr.example.com`. If it is empty, reset links are derived
+from the incoming request host.
+
+Use these SMTP variables:
+
+| Variable | Purpose |
+|---|---|
+| `TOCKR_SMTP_HOST` | SMTP server host. |
+| `TOCKR_SMTP_PORT` | SMTP server port. Defaults to `587`. |
+| `TOCKR_SMTP_FROM` | Verified sender email, optionally with display name. |
+| `TOCKR_SMTP_USERNAME` | SMTP auth username, if required. |
+| `TOCKR_SMTP_PASSWORD` | SMTP auth password or provider token, if required. |
+| `TOCKR_SMTP_STARTTLS` | Defaults to `true`; set `false` for local Mailpit only. |
 
 ### `TOCKR_COOKIE_SECURE`
 

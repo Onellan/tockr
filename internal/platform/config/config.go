@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Addr              string
+	PublicURL         string
 	DatabasePath      string
 	DataDir           string
 	SessionSecret     string
@@ -23,11 +24,18 @@ type Config struct {
 	AdminPassword     string
 	ShutdownTimeout   time.Duration
 	WebhookMaxRetries int
+	SMTPHost          string
+	SMTPPort          int
+	SMTPUsername      string
+	SMTPPassword      string
+	SMTPFrom          string
+	SMTPStartTLS      bool
 }
 
 func Load() Config {
 	return Config{
 		Addr:              getenv("TOCKR_ADDR", ":8029"),
+		PublicURL:         getenv("TOCKR_PUBLIC_URL", ""),
 		DatabasePath:      getenv("TOCKR_DB_PATH", "data/tockr.db"),
 		DataDir:           getenv("TOCKR_DATA_DIR", "data"),
 		SessionSecret:     getenv("TOCKR_SESSION_SECRET", randomSecret()),
@@ -40,6 +48,12 @@ func Load() Config {
 		AdminPassword:     getenv("TOCKR_ADMIN_PASSWORD", "admin12345"),
 		ShutdownTimeout:   10 * time.Second,
 		WebhookMaxRetries: getenvInt("TOCKR_WEBHOOK_MAX_RETRIES", 5),
+		SMTPHost:          getenv("TOCKR_SMTP_HOST", ""),
+		SMTPPort:          getenvInt("TOCKR_SMTP_PORT", 587),
+		SMTPUsername:      getenv("TOCKR_SMTP_USERNAME", ""),
+		SMTPPassword:      getenv("TOCKR_SMTP_PASSWORD", ""),
+		SMTPFrom:          getenv("TOCKR_SMTP_FROM", ""),
+		SMTPStartTLS:      getenvBool("TOCKR_SMTP_STARTTLS", true),
 	}
 }
 

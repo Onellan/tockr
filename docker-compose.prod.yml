@@ -32,6 +32,15 @@ services:
       TOCKR_TOTP_MODE: "disabled"
       # Set TOCKR_COOKIE_SECURE=true when running behind HTTPS.
       # TOCKR_COOKIE_SECURE: "true"
+      # Email/password reset delivery. Keep credentials in your deployment
+      # secret store rather than committing them here.
+      # TOCKR_PUBLIC_URL: "https://tockr.example.com"
+      # TOCKR_SMTP_HOST: "smtp.example.com"
+      # TOCKR_SMTP_PORT: "587"
+      # TOCKR_SMTP_FROM: "Tockr <noreply@example.com>"
+      # TOCKR_SMTP_USERNAME: ""
+      # TOCKR_SMTP_PASSWORD: ""
+      # TOCKR_SMTP_STARTTLS: "true"
     volumes:
       - tockr-data:/app/data
     restart: unless-stopped

@@ -259,8 +259,18 @@ automatically on first start and stored in the data volume.
 | `TOCKR_DEFAULT_CURRENCY` | `USD` | `USD` | ISO 4217 currency for seeded data. |
 | `TOCKR_FUTURE_TIME_POLICY` | `end_of_day` | `end_of_day` | `allow` / `deny` / `end_of_day` / `end_of_week` |
 | `TOCKR_TOTP_MODE` | `disabled` | `disabled` | `disabled` / `optional` / `required` |
+| `TOCKR_PUBLIC_URL` | empty | empty | Public origin for password reset links. |
+| `TOCKR_SMTP_HOST` | empty | empty | Required for email change OTPs and password resets. |
+| `TOCKR_SMTP_PORT` | `587` | `587` | Use `1025` for local Mailpit. |
+| `TOCKR_SMTP_FROM` | empty | empty | Verified sender address. |
+| `TOCKR_SMTP_USERNAME` | empty | empty | SMTP auth username, if required. |
+| `TOCKR_SMTP_PASSWORD` | empty | empty | SMTP auth password or token, if required. |
+| `TOCKR_SMTP_STARTTLS` | `true` | `true` | Set `false` only for local mail catchers. |
 | `TOCKR_COOKIE_SECURE` | `false` | `false` | Set `true` behind HTTPS. |
 | `TOCKR_WEBHOOK_MAX_RETRIES` | `5` | `5` | Max webhook delivery attempts. |
+
+`docker-compose.yml` includes Mailpit for local email testing. Open
+<http://localhost:8025> to inspect password reset and email change messages.
 
 Retrieve generated values:
 

@@ -74,6 +74,19 @@ type SelectorData struct {
 	GroupLabels    map[int64]string
 }
 
+type SMTPSettingsView struct {
+	Host               string
+	Port               int
+	UsernameConfigured bool
+	PasswordConfigured bool
+	From               string
+	StartTLS           bool
+	PublicURL          string
+	Configured         bool
+	Valid              bool
+	Error              string
+}
+
 var primaryNav = []navItem{
 	{"Dashboard", "/", "Work", ""},
 	{"Timesheets", "/timesheets", "Work", auth.PermTrackTime},
@@ -96,6 +109,7 @@ var adminNav = []navItem{
 	{"Admin Home", "/admin", "Administration", ""},
 	{"Workspaces", "/admin/workspaces", "Administration", auth.PermManageOrg},
 	{"Work Schedule", "/admin/schedule", "Administration", auth.PermManageOrg},
+	{"Email", "/admin/email", "Administration", auth.PermManageOrg},
 	{"Rates", "/rates", "Administration", auth.PermManageRates},
 	{"Exchange Rates", "/admin/exchange-rates", "Administration", auth.PermManageRates},
 	{"Recalculate", "/admin/recalculate", "Administration", auth.PermManageRates},
@@ -178,7 +192,29 @@ func Login(message string) templ.Component {
 		if message != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
 		}
-		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><label>Two-factor code <input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Only if enabled"></label><button class="primary full">Login</button></form></section>`)
+		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><label>Two-factor code <input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Only if enabled"></label><button class="primary full">Login</button><a class="auth-link" href="/forgot-password">Forgot password?</a></form></section>`)
+		return nil
+	}))
+}
+
+func ForgotPassword(message string) templ.Component {
+	return Layout("Forgot password", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Reset access with a time-limited email link.</p></div><form method="post" action="/forgot-password" class="login-card"><div><h2>Forgot password</h2><p>Enter your account email and check your inbox.</p></div>`)
+		if message != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
+		}
+		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><button class="primary full">Send reset link</button><a class="auth-link" href="/login">Back to login</a></form></section>`)
+		return nil
+	}))
+}
+
+func ResetPassword(token, message string) templ.Component {
+	return Layout("Reset password", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Choose a new password for local authentication.</p></div><form method="post" action="/reset-password" class="login-card"><div><h2>Reset password</h2><p>Reset links expire and can be used once.</p></div>`)
+		if message != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
+		}
+		_, _ = fmt.Fprintf(w, `<input type="hidden" name="token" value="%s"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><label>Confirm password<input name="confirm" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary full">Update password</button><a class="auth-link" href="/login">Back to login</a></form></section>`, esc(token))
 		return nil
 	}))
 }
@@ -588,6 +624,7 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Profile</h2><p>Name and local display preferences.</p></div></div><form method="post" action="/account" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Display name<input name="display_name" value="%s" required></label><label>Email<input value="%s" disabled></label>`, esc(user.CSRF), esc(account.DisplayName), esc(account.Email))
 		renderTimezoneSelect(w, "Timezone", "timezone", account.Timezone, false)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save profile</button></div></form></div>`)
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Email address</h2><p>Send a one-time code to a new address before it becomes active.</p></div></div><form method="post" action="/account/email" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Current email<input value="%s" disabled></label><label>New email<input name="new_email" type="email" autocomplete="email" required></label><div class="form-actions"><button class="primary">Send verification code</button><a class="ghost-button" href="/account/email/verify">Enter code</a></div></form></div>`, esc(user.CSRF), esc(account.Email))
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Workspace</h2><p>Your current workspace and how to switch.</p></div></div><div class="form-grid">`)
 		renderWorkspaceSwitcher(w, user)
 		if len(user.Workspaces) <= 1 {
@@ -611,6 +648,22 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 			_, _ = fmt.Fprint(w, `</code></div>`)
 		}
 		_, _ = fmt.Fprint(w, `</section>`)
+		return nil
+	}))
+}
+
+func VerifyEmail(user *NavUser, pendingEmail string, expires time.Time, message string) templ.Component {
+	return Layout("Verify email", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Verify Email", "Profile and security", "Enter the one-time code sent to your new email address.")
+		if message != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
+		}
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Email verification</h2><p>Codes expire after 10 minutes and stop working after too many attempts.</p></div></div>`)
+		if pendingEmail == "" {
+			_, _ = fmt.Fprint(w, `<div class="empty-state"><strong>No pending email change</strong><span>Start a new email change from your account page.</span></div><div class="form-actions"><a class="ghost-button" href="/account">Back to account</a></div></section>`)
+			return nil
+		}
+		_, _ = fmt.Fprintf(w, `<p class="field-hint">Pending email: <strong>%s</strong>. Expires %s.</p><form method="post" action="/account/email/verify" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><div class="form-actions"><button class="primary">Verify email</button><a class="ghost-button" href="/account">Back</a></div></form></section>`, esc(pendingEmail), esc(expires.Format("15:04 MST")), esc(user.CSRF))
 		return nil
 	}))
 }
@@ -1151,6 +1204,8 @@ func adminDescription(path string) string {
 		return "Open the administration hub and choose the control area you need."
 	case "/admin/workspaces":
 		return "Create workspaces, update workspace settings, and manage workspace membership."
+	case "/admin/email":
+		return "Review SMTP configuration, send test email, and set account email-change policy."
 	case "/rates":
 		return "Maintain billable rates and user cost rates so invoices and profitability remain defensible."
 	case "/admin/exchange-rates":
@@ -1446,6 +1501,13 @@ func defaultVal(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func configuredText(configured bool) string {
+	if configured {
+		return "configured"
+	}
+	return "not set"
 }
 
 func defaultInt(value, fallback int64) int64 {
@@ -1831,6 +1893,44 @@ func WorkScheduleSettings(user *NavUser, schedule domain.WorkSchedule) templ.Com
 		_, _ = fmt.Fprint(w, `</div></div>`)
 		_, _ = fmt.Fprintf(w, `<label>Hours per day<input type="number" name="hours_per_day" value="%.1f" min="1" max="24" step="0.5" required></label>`, schedule.WorkingHoursPerDay)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save schedule</button></div></form></section>`)
+		return nil
+	}))
+}
+
+func EmailSettings(user *NavUser, smtp SMTPSettingsView, settings domain.EmailSettings, message string) templ.Component {
+	return Layout("Email Settings", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Email", "Administration", "Review SMTP delivery configuration and account email policy.")
+		if message != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
+		}
+		status := `<span class="badge success">Ready</span>`
+		if !smtp.Valid {
+			status = `<span class="badge warning">Needs configuration</span>`
+		}
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>SMTP transport</h2><p>Provider credentials are environment-backed and are not editable in the browser.</p></div>%s</div><div class="summary-list">`, status)
+		rows := [][2]string{
+			{"TOCKR_SMTP_HOST", smtp.Host},
+			{"TOCKR_SMTP_PORT", fmt.Sprint(smtp.Port)},
+			{"TOCKR_SMTP_FROM", smtp.From},
+			{"TOCKR_SMTP_USERNAME", configuredText(smtp.UsernameConfigured)},
+			{"TOCKR_SMTP_PASSWORD", configuredText(smtp.PasswordConfigured)},
+			{"TOCKR_SMTP_STARTTLS", fmt.Sprint(smtp.StartTLS)},
+			{"TOCKR_PUBLIC_URL", defaultVal(smtp.PublicURL, "derived from request")},
+		}
+		for _, row := range rows {
+			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong></div>`, esc(row[0]), esc(row[1]))
+		}
+		if smtp.Error != "" {
+			_, _ = fmt.Fprintf(w, `<div><span>Configuration check</span><strong>%s</strong></div>`, esc(smtp.Error))
+		}
+		_, _ = fmt.Fprint(w, `</div></div>`)
+		checked := ""
+		if settings.NotifyOldEmailOnChange {
+			checked = " checked"
+		}
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Email policy</h2><p>These app settings are stored in Tockr.</p></div></div><form method="post" action="/admin/email" class="form-grid"><input type="hidden" name="csrf" value="%s"><label class="check"><input type="checkbox" name="notify_old_email"%s> Notify old address after an email change</label><div class="form-actions"><button class="primary">Save email settings</button></div></form></div>`, esc(user.CSRF), checked)
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Test delivery</h2><p>Sends through the configured SMTP server.</p></div></div><form method="post" action="/admin/email/test" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Recipient<input name="to" type="email" required></label><div class="form-actions"><button class="primary">Send test email</button></div></form></div>`, esc(user.CSRF))
+		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Local testing</h2><p>Use the compose mail catcher for development: SMTP on port 1025 and inbox at http://localhost:8025.</p></div></div></div></section>`)
 		return nil
 	}))
 }
