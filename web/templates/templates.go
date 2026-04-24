@@ -169,13 +169,13 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 			navLabel = "Admin navigation"
 			showBackToDashboard = true
 		}
-		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="app-shell"><aside class="sidebar" aria-label="Application navigation"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a>`)
+		_, _ = fmt.Fprint(w, `<a class="skip-link" href="#main-content">Skip to content</a><div class="mobile-nav-backdrop" data-mobile-nav-close hidden></div><div class="app-shell" data-app-shell><aside class="sidebar" id="app-sidebar" aria-label="Application navigation"><div class="sidebar-head"><a class="brand" href="/" aria-label="Tockr dashboard"><span class="brand-mark">T</span><span><strong>Tockr</strong><small>Time operations</small></span></a><button class="mobile-nav-close" type="button" data-mobile-nav-close aria-label="Close menu">Close</button></div>`)
 		_, _ = fmt.Fprintf(w, `<nav class="side-nav" aria-label="%s">`, esc(navLabel))
 		renderNav(w, user, navItems)
 		if showBackToDashboard {
 			_, _ = fmt.Fprint(w, `<div class="sidebar-back-link"><a class="nav-link nav-link-back" href="/">Back to dashboard</a></div>`)
 		}
-		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><div><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
+		_, _ = fmt.Fprintf(w, `</nav></aside><div class="workspace"><header class="topbar"><button class="mobile-menu-toggle" type="button" data-mobile-nav-toggle aria-controls="app-sidebar" aria-expanded="false">Menu</button><div class="topbar-title"><span class="topbar-kicker">Workspace</span><strong>%s</strong></div><div class="account-area">`, esc(title))
 		renderAccountDropdown(w, user)
 		_, _ = fmt.Fprint(w, `</div></header><main class="content" id="main-content" tabindex="-1">`)
 		if err := body.Render(ctx, w); err != nil {

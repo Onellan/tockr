@@ -40,7 +40,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/admin", "/admin/users", "/webhooks", "/api/tasks"}
+	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/tags", "/groups", "/reports", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -63,6 +63,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 		`aria-label="Admin navigation"`,
 		`class="nav-link active" aria-current="page" href="/admin/users"`,
 		`href="/admin/workspaces"`,
+		`href="/admin/email"`,
 		`href="/admin"`,
 		`href="/">Back to dashboard</a>`,
 	} {
@@ -76,6 +77,49 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	} {
 		if strings.Contains(adminBody, unexpected) {
 			t.Fatalf("admin page should not contain %q", unexpected)
+		}
+	}
+}
+
+func TestResponsiveNavigationMarkupAndAssets(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/", cookie).Body.String()
+	for _, expected := range []string{
+		`class="mobile-nav-backdrop" data-mobile-nav-close hidden`,
+		`class="app-shell" data-app-shell`,
+		`<aside class="sidebar" id="app-sidebar"`,
+		`class="mobile-menu-toggle" type="button" data-mobile-nav-toggle aria-controls="app-sidebar" aria-expanded="false"`,
+		`class="mobile-nav-close" type="button" data-mobile-nav-close`,
+		`class="topbar-title"`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("responsive layout markup missing %q", expected)
+		}
+	}
+
+	css := getPublic(app, "/static/style.css").Body.String()
+	for _, expected := range []string{
+		`@media (max-width: 920px)`,
+		`.app-shell.nav-open .sidebar`,
+		`transform: translateX(-105%)`,
+		`body.nav-open`,
+		`.section-spacer {` + "\n" + `  margin-top: var(--space-5);`,
+	} {
+		if !strings.Contains(css, expected) {
+			t.Fatalf("responsive CSS missing %q", expected)
+		}
+	}
+
+	js := getPublic(app, "/static/menu.js").Body.String()
+	for _, expected := range []string{
+		`function setupMobileNav()`,
+		`[data-mobile-nav-toggle]`,
+		`nav-open`,
+	} {
+		if !strings.Contains(js, expected) {
+			t.Fatalf("mobile nav JS missing %q", expected)
 		}
 	}
 }
@@ -99,6 +143,7 @@ func TestProjectRowOverflowAndMembershipPage(t *testing.T) {
 		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/dashboard"`,
 		`data-dropdown="project-` + strconv.FormatInt(project.ID, 10) + `-actions"`,
 		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/members"`,
+		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/workstreams"`,
 	} {
 		if !strings.Contains(projects, expected) {
 			t.Fatalf("projects page missing %q", expected)

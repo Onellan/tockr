@@ -619,7 +619,10 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	for _, p := range items {
 		actions := `<a class="table-action" href="/projects/` + fmt.Sprint(p.ID) + `/dashboard">Dashboard</a>`
 		if s.access(r).ManagesProject(p.ID) {
-			actions += templates.RowActionMenu(fmt.Sprintf("project-%d-actions", p.ID), "Project actions", s.nav(r).CSRF, []templates.MenuAction{{Label: "Members", Href: fmt.Sprintf("/projects/%d/members", p.ID)}})
+			actions += templates.RowActionMenu(fmt.Sprintf("project-%d-actions", p.ID), "Project actions", s.nav(r).CSRF, []templates.MenuAction{
+				{Label: "Members", Href: fmt.Sprintf("/projects/%d/members", p.ID)},
+				{Label: "Workstreams", Href: fmt.Sprintf("/projects/%d/workstreams", p.ID)},
+			})
 		}
 		estimateStatus := "Open-ended"
 		if p.EstimateSeconds > 0 {
