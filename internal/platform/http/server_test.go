@@ -891,6 +891,17 @@ func testAppWithConfig(t *testing.T, overrides config.Config) (*Server, *sqlite.
 	if overrides.TOTPMode != "" {
 		cfg.TOTPMode = overrides.TOTPMode
 	}
+	if overrides.SMTPHost != "" {
+		cfg.SMTPHost = overrides.SMTPHost
+		cfg.SMTPPort = overrides.SMTPPort
+		cfg.SMTPUsername = overrides.SMTPUsername
+		cfg.SMTPPassword = overrides.SMTPPassword
+		cfg.SMTPFrom = overrides.SMTPFrom
+		cfg.SMTPStartTLS = overrides.SMTPStartTLS
+	}
+	if overrides.PublicURL != "" {
+		cfg.PublicURL = overrides.PublicURL
+	}
 	if err := store.SeedAdmin(ctx, "admin@example.com", "admin12345", "UTC", "USD"); err != nil {
 		_ = store.Close()
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -433,6 +434,138 @@ func (s *Store) UpdatePassword(ctx context.Context, userID int64, password strin
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE users SET password_hash=? WHERE id=?`, hash, userID)
+	return err
+}
+
+func (s *Store) CreateEmailChangeOTP(ctx context.Context, userID int64, newEmail, code string, ttl time.Duration) error {
+	hash, err := auth.HashPassword(code)
+	if err != nil {
+		return err
+	}
+	now := utcNow()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO email_change_otps(user_id, new_email, otp_hash, expires_at, created_at) VALUES(?,?,?,?,?)`,
+		userID, strings.TrimSpace(newEmail), hash, formatTime(time.Now().UTC().Add(ttl)), now)
+	return err
+}
+
+func (s *Store) PendingEmailChange(ctx context.Context, userID int64) (string, time.Time, error) {
+	var email, expires string
+	err := s.db.QueryRowContext(ctx, `SELECT new_email, expires_at FROM email_change_otps WHERE user_id=? AND used_at IS NULL ORDER BY id DESC LIMIT 1`, userID).Scan(&email, &expires)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", time.Time{}, nil
+		}
+		return "", time.Time{}, err
+	}
+	return email, parseTime(expires), nil
+}
+
+func (s *Store) UseEmailChangeOTP(ctx context.Context, userID int64, code string, maxAttempts int) (string, string, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", false, err
+	}
+	defer rollback(tx)
+	var id, attempts int64
+	var oldEmail, newEmail, hash, expires string
+	err = tx.QueryRowContext(ctx, `SELECT e.id, u.email, e.new_email, e.otp_hash, e.expires_at, e.attempts
+		FROM email_change_otps e JOIN users u ON u.id=e.user_id
+		WHERE e.user_id=? AND e.used_at IS NULL ORDER BY e.id DESC LIMIT 1`, userID).
+		Scan(&id, &oldEmail, &newEmail, &hash, &expires, &attempts)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", false, nil
+		}
+		return "", "", false, err
+	}
+	now := time.Now().UTC()
+	if !now.Before(parseTime(expires)) || attempts >= int64(maxAttempts) {
+		_, _ = tx.ExecContext(ctx, `UPDATE email_change_otps SET used_at=? WHERE id=?`, formatTime(now), id)
+		return "", "", false, tx.Commit()
+	}
+	if !auth.CheckPassword(hash, strings.TrimSpace(code)) {
+		attempts++
+		if attempts >= int64(maxAttempts) {
+			_, err = tx.ExecContext(ctx, `UPDATE email_change_otps SET attempts=?, used_at=? WHERE id=?`, attempts, formatTime(now), id)
+		} else {
+			_, err = tx.ExecContext(ctx, `UPDATE email_change_otps SET attempts=? WHERE id=?`, attempts, id)
+		}
+		if err != nil {
+			return "", "", false, err
+		}
+		return "", "", false, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET email=? WHERE id=?`, newEmail, userID); err != nil {
+		return "", "", false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE email_change_otps SET used_at=?, attempts=? WHERE id=?`, formatTime(now), attempts+1, id); err != nil {
+		return "", "", false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE email_change_otps SET used_at=? WHERE user_id=? AND id<>? AND used_at IS NULL`, formatTime(now), userID, id); err != nil {
+		return "", "", false, err
+	}
+	return oldEmail, newEmail, true, tx.Commit()
+}
+
+func (s *Store) CreatePasswordResetToken(ctx context.Context, userID int64, token string, ttl time.Duration) error {
+	now := utcNow()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO password_reset_tokens(user_id, token_hash, expires_at, created_at) VALUES(?,?,?,?)`,
+		userID, tokenHash(token), formatTime(time.Now().UTC().Add(ttl)), now)
+	return err
+}
+
+func (s *Store) ResetPasswordWithToken(ctx context.Context, token, password string) (int64, bool, error) {
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return 0, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rollback(tx)
+	var id, userID int64
+	var expires string
+	err = tx.QueryRowContext(ctx, `SELECT id, user_id, expires_at FROM password_reset_tokens WHERE token_hash=? AND used_at IS NULL ORDER BY id DESC LIMIT 1`, tokenHash(token)).Scan(&id, &userID, &expires)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	now := time.Now().UTC()
+	if !now.Before(parseTime(expires)) {
+		_, _ = tx.ExecContext(ctx, `UPDATE password_reset_tokens SET used_at=? WHERE id=?`, formatTime(now), id)
+		return 0, false, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=? WHERE id=?`, hash, userID); err != nil {
+		return 0, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE password_reset_tokens SET used_at=? WHERE id=?`, formatTime(now), id); err != nil {
+		return 0, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+		return 0, false, err
+	}
+	return userID, true, tx.Commit()
+}
+
+func (s *Store) EmailSettings(ctx context.Context) domain.EmailSettings {
+	settings := domain.EmailSettings{NotifyOldEmailOnChange: true}
+	var notify string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='email_change_notify_old'`).Scan(&notify)
+	if notify != "" {
+		settings.NotifyOldEmailOnChange = notify == "1" || strings.EqualFold(notify, "true")
+	}
+	return settings
+}
+
+func (s *Store) UpsertEmailSettings(ctx context.Context, settings domain.EmailSettings) error {
+	value := "0"
+	if settings.NotifyOldEmailOnChange {
+		value = "1"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('email_change_notify_old',?)`, value)
 	return err
 }
 
@@ -2647,6 +2780,11 @@ func randomToken(size int) string {
 	return hex.EncodeToString(b)
 }
 
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
 func rollback(tx *sql.Tx) {
 	_ = tx.Rollback()
 }
@@ -2728,6 +2866,7 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 	for _, setting := range []struct{ name, value string }{
 		{"working_days", "1,2,3,4,5"},
 		{"working_hours_per_day", "8"},
+		{"email_change_notify_old", "1"},
 	} {
 		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO settings(name, value) VALUES(?,?)`, setting.name, setting.value); err != nil {
 			return err
@@ -2787,6 +2926,8 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_workstreams_workspace_name ON workstreams(workspace_id, name)`,
 		`CREATE INDEX IF NOT EXISTS idx_project_workstreams_project ON project_workstreams(project_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_timesheets_workstream ON timesheets(workstream_id, started_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_email_change_otps_user ON email_change_otps(user_id, used_at, expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens(token_hash, used_at, expires_at)`,
 	}
 	for _, query := range indexes {
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
@@ -3199,6 +3340,8 @@ CREATE TABLE IF NOT EXISTS user_roles(user_id INTEGER NOT NULL REFERENCES users(
 CREATE TABLE IF NOT EXISTS organization_members(organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('owner','admin')), created_at TEXT NOT NULL, PRIMARY KEY(organization_id, user_id));
 CREATE TABLE IF NOT EXISTS workspace_members(workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('admin','analyst','member')), created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, user_id));
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE, csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS email_change_otps(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, new_email TEXT NOT NULL, otp_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS password_reset_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS teams(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS team_members(team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, lead INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(team_id, user_id));
 CREATE TABLE IF NOT EXISTS groups(id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(workspace_id, name));

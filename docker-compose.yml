@@ -15,8 +15,22 @@ services:
       TOCKR_DEFAULT_CURRENCY: ZAR
       TOCKR_FUTURE_TIME_POLICY: end_of_day
       TOCKR_TOTP_MODE: disabled
+      TOCKR_PUBLIC_URL: http://localhost:8029
+      TOCKR_SMTP_HOST: mailpit
+      TOCKR_SMTP_PORT: 1025
+      TOCKR_SMTP_FROM: Tockr <noreply@localhost>
+      TOCKR_SMTP_STARTTLS: "false"
     volumes:
       - tockr-data:/app/data
+    depends_on:
+      - mailpit
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - 1025:1025
+      - 8025:8025
     restart: unless-stopped
 
 volumes:

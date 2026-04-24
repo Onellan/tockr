@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,6 +30,7 @@ import (
 	"tockr/internal/db/sqlite"
 	"tockr/internal/domain"
 	"tockr/internal/platform/config"
+	emailer "tockr/internal/platform/email"
 	templates "tockr/web/templates"
 )
 
@@ -65,6 +68,10 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Get("/healthz", s.health)
 	r.Get("/login", s.loginPage)
 	r.Post("/login", s.login)
+	r.Get("/forgot-password", s.forgotPasswordPage)
+	r.Post("/forgot-password", s.forgotPassword)
+	r.Get("/reset-password", s.resetPasswordPage)
+	r.Post("/reset-password", s.resetPassword)
 	r.Get("/reports/share/{token}", s.viewSharedReport)
 	r.Post("/logout", s.requireLogin(s.logout))
 	r.Group(func(r chi.Router) {
@@ -73,6 +80,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/admin", s.adminHome)
 		r.Get("/account", s.account)
 		r.Post("/account", s.updateAccount)
+		r.Post("/account/email", s.requestEmailChange)
+		r.Get("/account/email/verify", s.verifyEmailPage)
+		r.Post("/account/email/verify", s.verifyEmailChange)
 		r.Post("/account/password", s.updatePassword)
 		r.Post("/account/totp/enable", s.enableTOTP)
 		r.Post("/account/totp/disable", s.disableTOTP)
@@ -117,6 +127,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/timesheets/stop", s.stopTimer)
 		r.Get("/admin/schedule", s.requirePermission(auth.PermManageOrg, s.workScheduleSettings))
 		r.Post("/admin/schedule", s.requirePermission(auth.PermManageOrg, s.saveWorkScheduleSettings))
+		r.Get("/admin/email", s.requirePermission(auth.PermManageOrg, s.emailSettings))
+		r.Post("/admin/email", s.requirePermission(auth.PermManageOrg, s.saveEmailSettings))
+		r.Post("/admin/email/test", s.requirePermission(auth.PermManageOrg, s.testEmailSettings))
 		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
 		r.Post("/reports/saved", s.requirePermission(auth.PermViewReports, s.saveReport))
 		r.Post("/reports/saved/{id}", s.requirePermission(auth.PermViewReports, s.editSavedReport))
@@ -272,6 +285,75 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func (s *Server) forgotPasswordPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, r, templates.ForgotPassword(r.URL.Query().Get("message")))
+}
+
+func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	generic := "If that email exists, a reset link has been sent."
+	sender := emailer.NewSender(s.cfg)
+	if err := sender.Validate(); err != nil {
+		http.Redirect(w, r, "/forgot-password?message=Password+reset+email+is+not+configured.+Contact+an+administrator.", http.StatusSeeOther)
+		return
+	}
+	email := strings.TrimSpace(r.FormValue("email"))
+	user, err := s.store.FindUserByEmail(r.Context(), email)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if user != nil && user.Enabled {
+		token := randomToken(32)
+		if err := s.store.CreatePasswordResetToken(r.Context(), user.ID, token, 30*time.Minute); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		link := s.absoluteURL(r, "/reset-password?token="+url.QueryEscape(token))
+		if err := sender.Send(emailer.Message{
+			To:      user.Email,
+			Subject: "Reset your Tockr password",
+			Text:    fmt.Sprintf("Use this link to reset your Tockr password. It expires in 30 minutes and can be used once.\n\n%s\n\nIf you did not request this, you can ignore this email.", link),
+		}); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		s.store.Audit(r.Context(), &user.ID, "request", "password_reset", &user.ID, "")
+	}
+	http.Redirect(w, r, "/forgot-password?message="+url.QueryEscape(generic), http.StatusSeeOther)
+}
+
+func (s *Server) resetPasswordPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, r, templates.ResetPassword(r.URL.Query().Get("token"), r.URL.Query().Get("message")))
+}
+
+func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	token := strings.TrimSpace(r.FormValue("token"))
+	password := r.FormValue("password")
+	if len(password) < 8 || password != r.FormValue("confirm") {
+		http.Redirect(w, r, "/reset-password?token="+url.QueryEscape(token)+"&message=Password+confirmation+does+not+match", http.StatusSeeOther)
+		return
+	}
+	userID, ok, err := s.store.ResetPasswordWithToken(r.Context(), token, password)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if !ok {
+		http.Redirect(w, r, "/reset-password?message=Reset+link+is+invalid+or+expired", http.StatusSeeOther)
+		return
+	}
+	s.store.Audit(r.Context(), &userID, "reset", "account", &userID, "password")
+	http.Redirect(w, r, "/login?message=Password+updated", http.StatusSeeOther)
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	state := s.state(r)
 	if state.Session != nil {
@@ -309,6 +391,83 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.Audit(r.Context(), &userID, "update", "account", &userID, "profile")
 	http.Redirect(w, r, "/account?message=Profile+updated", http.StatusSeeOther)
+}
+
+func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	state := s.state(r)
+	newEmail := normalizeEmail(r.FormValue("new_email"))
+	if _, err := mail.ParseAddress(newEmail); err != nil || !strings.Contains(newEmail, "@") {
+		http.Redirect(w, r, "/account?message=Enter+a+valid+email+address", http.StatusSeeOther)
+		return
+	}
+	if strings.EqualFold(newEmail, state.User.Email) {
+		http.Redirect(w, r, "/account?message=That+email+is+already+on+your+account", http.StatusSeeOther)
+		return
+	}
+	existing, err := s.store.FindUserByEmail(r.Context(), newEmail)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if existing != nil {
+		http.Redirect(w, r, "/account?message=That+email+is+already+in+use", http.StatusSeeOther)
+		return
+	}
+	sender := emailer.NewSender(s.cfg)
+	if err := sender.Validate(); err != nil {
+		http.Redirect(w, r, "/account?message=Email+sending+is+not+configured", http.StatusSeeOther)
+		return
+	}
+	code := numericCode(6)
+	if err := s.store.CreateEmailChangeOTP(r.Context(), state.User.ID, newEmail, code, 10*time.Minute); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := sender.Send(emailer.Message{
+		To:      newEmail,
+		Subject: "Verify your Tockr email address",
+		Text:    fmt.Sprintf("Your Tockr email change code is %s.\n\nIt expires in 10 minutes and can be used once.", code),
+	}); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), &state.User.ID, "request", "account_email", &state.User.ID, newEmail)
+	http.Redirect(w, r, "/account/email/verify?message=Verification+code+sent", http.StatusSeeOther)
+}
+
+func (s *Server) verifyEmailPage(w http.ResponseWriter, r *http.Request) {
+	state := s.state(r)
+	pending, expires, err := s.store.PendingEmailChange(r.Context(), state.User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.VerifyEmail(s.nav(r), pending, expires, r.URL.Query().Get("message")))
+}
+
+func (s *Server) verifyEmailChange(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	state := s.state(r)
+	oldEmail, newEmail, ok, err := s.store.UseEmailChangeOTP(r.Context(), state.User.ID, r.FormValue("code"), 5)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if !ok {
+		http.Redirect(w, r, "/account/email/verify?message=Verification+code+is+invalid+or+expired", http.StatusSeeOther)
+		return
+	}
+	settings := s.store.EmailSettings(r.Context())
+	if settings.NotifyOldEmailOnChange && oldEmail != "" {
+		_ = emailer.NewSender(s.cfg).Send(emailer.Message{
+			To:      oldEmail,
+			Subject: "Your Tockr email address was changed",
+			Text:    fmt.Sprintf("Your Tockr account email address was changed to %s.\n\nIf this was not you, contact an administrator immediately.", newEmail),
+		})
+	}
+	s.store.Audit(r.Context(), &state.User.ID, "verify", "account_email", &state.User.ID, oldEmail+" -> "+newEmail)
+	http.Redirect(w, r, "/account?message=Email+address+updated", http.StatusSeeOther)
 }
 
 func (s *Server) updatePassword(w http.ResponseWriter, r *http.Request) {
@@ -1514,7 +1673,7 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions || r.URL.Path == "/login" {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions || r.URL.Path == "/login" || r.URL.Path == "/forgot-password" || r.URL.Path == "/reset-password" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1992,6 +2151,39 @@ func (s *Server) hasAnyAdminAccess(r *http.Request) bool {
 	return false
 }
 
+func (s *Server) smtpSettingsView() templates.SMTPSettingsView {
+	view := templates.SMTPSettingsView{
+		Host:               s.cfg.SMTPHost,
+		Port:               s.cfg.SMTPPort,
+		UsernameConfigured: s.cfg.SMTPUsername != "",
+		PasswordConfigured: s.cfg.SMTPPassword != "",
+		From:               s.cfg.SMTPFrom,
+		StartTLS:           s.cfg.SMTPStartTLS,
+		PublicURL:          s.cfg.PublicURL,
+		Configured:         emailer.NewSender(s.cfg).Configured(),
+	}
+	if err := emailer.NewSender(s.cfg).Validate(); err != nil {
+		view.Error = err.Error()
+	} else {
+		view.Valid = true
+	}
+	return view
+}
+
+func (s *Server) absoluteURL(r *http.Request, path string) string {
+	if s.cfg.PublicURL != "" {
+		return strings.TrimRight(s.cfg.PublicURL, "/") + path
+	}
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+	}
+	return scheme + "://" + r.Host + path
+}
+
 func (s *Server) cookie(sessionID string) *http.Cookie {
 	return &http.Cookie{Name: "tockr_session", Value: s.sign(sessionID), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(14 * 24 * time.Hour)}
 }
@@ -2175,6 +2367,40 @@ func (s *Server) saveWorkScheduleSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 	http.Redirect(w, r, "/admin/schedule", http.StatusSeeOther)
+}
+
+func (s *Server) emailSettings(w http.ResponseWriter, r *http.Request) {
+	s.render(w, r, templates.EmailSettings(s.nav(r), s.smtpSettingsView(), s.store.EmailSettings(r.Context()), r.URL.Query().Get("message")))
+}
+
+func (s *Server) saveEmailSettings(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	settings := domain.EmailSettings{NotifyOldEmailOnChange: checkbox(r, "notify_old_email")}
+	if err := s.store.UpsertEmailSettings(r.Context(), settings); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "update", "email_settings", nil, "")
+	http.Redirect(w, r, "/admin/email?message=Email+settings+saved", http.StatusSeeOther)
+}
+
+func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	to := strings.TrimSpace(r.FormValue("to"))
+	if _, err := mail.ParseAddress(to); err != nil {
+		http.Redirect(w, r, "/admin/email?message=Enter+a+valid+test+recipient", http.StatusSeeOther)
+		return
+	}
+	if err := emailer.NewSender(s.cfg).Send(emailer.Message{
+		To:      to,
+		Subject: "Tockr SMTP test",
+		Text:    "This is a Tockr SMTP test email. If you received it, email sending is working.",
+	}); err != nil {
+		http.Redirect(w, r, "/admin/email?message="+url.QueryEscape("SMTP test failed: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/email?message=SMTP+test+email+sent", http.StatusSeeOther)
 }
 
 // ─── Saved report edit/delete/share ───────────────────────────────────────────
@@ -2592,6 +2818,19 @@ func randomToken(bytes int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+func numericCode(digits int) string {
+	limit := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil)
+	n, err := rand.Int(rand.Reader, limit)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%0*d", digits, n.Int64())
+}
+
+func normalizeEmail(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func htmlEscape(s string) string {

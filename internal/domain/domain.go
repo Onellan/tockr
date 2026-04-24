@@ -179,6 +179,10 @@ type WorkSchedule struct {
 	WorkingHoursPerDay float64        // e.g. 8.0
 }
 
+type EmailSettings struct {
+	NotifyOldEmailOnChange bool
+}
+
 // MonthOverride stores an admin-set working-day count for a specific year/month.
 type MonthOverride struct {
 	Year  int
