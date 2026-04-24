@@ -1744,6 +1744,88 @@ func (s *Store) CreateTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 	return s.insertTimesheet(ctx, t, tagNames)
 }
 
+func (s *Store) Timesheet(ctx context.Context, id int64) (*domain.Timesheet, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets WHERE id=?`, id)
+	item, err := scanTimesheet(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	tags, err := s.timesheetTags(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	item.Tags = tags
+	return &item, nil
+}
+
+func (s *Store) UpdateTimesheet(ctx context.Context, t *domain.Timesheet, tagNames []string) error {
+	if t.ID == 0 {
+		return errors.New("timesheet id is required")
+	}
+	if t.EndedAt == nil {
+		return errors.New("ended_at is required")
+	}
+	t.DurationSeconds = int64(t.EndedAt.Sub(t.StartedAt).Seconds()) - t.BreakSeconds
+	if t.DurationSeconds < 0 {
+		t.DurationSeconds = 0
+	}
+	if t.WorkspaceID == 0 {
+		t.WorkspaceID = 1
+	}
+	rate, internal, err := s.ResolveRateAt(ctx, t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID, t.TaskID, t.StartedAt)
+	if err != nil {
+		return err
+	}
+	t.RateCents = rate
+	t.InternalRateCents = internal
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	var ended any
+	if t.EndedAt != nil {
+		ended = formatTime(*t.EndedAt)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE timesheets SET customer_id=?, project_id=?, activity_id=?, task_id=?, started_at=?, ended_at=?, timezone=?, duration_seconds=?, break_seconds=?, rate_cents=?, internal_rate_cents=?, billable=?, description=?, updated_at=? WHERE id=? AND workspace_id=?`,
+		t.CustomerID, t.ProjectID, t.ActivityID, t.TaskID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), strings.TrimSpace(t.Description), utcNow(), t.ID, t.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM timesheet_tags WHERE timesheet_id=?`, t.ID); err != nil {
+		return err
+	}
+	for _, name := range tagNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO tags(workspace_id, name, visible) VALUES(?,?,1)`, t.WorkspaceID, name); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO timesheet_tags(timesheet_id, tag_id) SELECT ?, id FROM tags WHERE workspace_id=? AND name=?`, t.ID, t.WorkspaceID, name); err != nil {
+			return err
+		}
+	}
+	t.Tags, err = s.timesheetTagsTx(ctx, tx, t.ID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) insertTimesheet(ctx context.Context, t *domain.Timesheet, tagNames []string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1777,6 +1859,27 @@ func (s *Store) insertTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) timesheetTags(ctx context.Context, timesheetID int64) ([]domain.Tag, error) {
+	return s.timesheetTagsTx(ctx, s.db, timesheetID)
+}
+
+func (s *Store) timesheetTagsTx(ctx context.Context, query queryer, timesheetID int64) ([]domain.Tag, error) {
+	rows, err := query.QueryContext(ctx, `SELECT t.id, t.workspace_id, t.name, t.visible FROM tags t JOIN timesheet_tags tt ON tt.tag_id=t.id WHERE tt.timesheet_id=? ORDER BY t.name`, timesheetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tags := []domain.Tag{}
+	for rows.Next() {
+		var tag domain.Tag
+		if err := rows.Scan(&tag.ID, &tag.WorkspaceID, &tag.Name, &tag.Visible); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
 }
 
 func (s *Store) StopTimer(ctx context.Context, userID int64, end time.Time) (*domain.Timesheet, error) {
@@ -2508,6 +2611,10 @@ func accessibleProjectIDs(access domain.AccessContext) []int64 {
 
 type scanner interface {
 	Scan(dest ...any) error
+}
+
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 func scanProjectTemplate(row scanner) (domain.ProjectTemplate, error) {

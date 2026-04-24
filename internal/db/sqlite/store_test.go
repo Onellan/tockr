@@ -263,3 +263,84 @@ func TestHistoricalRatesAndUserCostResolution(t *testing.T) {
 		t.Fatalf("expected new rate/cost, got rate=%d cost=%v", rate, cost)
 	}
 }
+
+func TestUpdateTimesheetRecalculatesAndReplacesTags(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SeedAdmin(ctx, "admin@example.com", "secret12345", "UTC", "USD"); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || user == nil {
+		t.Fatal("missing admin")
+	}
+	customer := &domain.Customer{WorkspaceID: 1, Name: "Acme", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	project := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Migration", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	activity := &domain.Activity{WorkspaceID: 1, ProjectID: &project.ID, Name: "Build", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, activity); err != nil {
+		t.Fatal(err)
+	}
+	task := &domain.Task{WorkspaceID: 1, ProjectID: project.ID, Name: "Design", Visible: true, Billable: true}
+	if err := store.UpsertTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	oldFrom := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newFrom := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.UpsertRate(ctx, &domain.Rate{WorkspaceID: 1, TaskID: &task.ID, AmountCents: 10000, EffectiveFrom: oldFrom}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRate(ctx, &domain.Rate{WorkspaceID: 1, TaskID: &task.ID, AmountCents: 15000, EffectiveFrom: newFrom}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 2, 12, 9, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Hour)
+	entry := &domain.Timesheet{WorkspaceID: 1, UserID: user.ID, CustomerID: customer.ID, ProjectID: project.ID, ActivityID: activity.ID, TaskID: &task.ID, StartedAt: start, EndedAt: &end, Billable: true, Description: "Initial", Timezone: "UTC"}
+	if err := store.CreateTimesheet(ctx, entry, []string{"legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if entry.RateCents != 10000 {
+		t.Fatalf("created rate = %d, want 10000", entry.RateCents)
+	}
+	updatedStart := time.Date(2026, 4, 18, 9, 30, 0, 0, time.UTC)
+	updatedEnd := updatedStart.Add(90 * time.Minute)
+	entry.StartedAt = updatedStart
+	entry.EndedAt = &updatedEnd
+	entry.BreakSeconds = 15 * 60
+	entry.Billable = false
+	entry.Description = "Updated"
+	if err := store.UpdateTimesheet(ctx, entry, []string{"qa", "review"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Timesheet(ctx, entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil {
+		t.Fatal("updated timesheet not found")
+	}
+	if loaded.RateCents != 15000 {
+		t.Fatalf("updated rate = %d, want 15000", loaded.RateCents)
+	}
+	if loaded.DurationSeconds != 4500 {
+		t.Fatalf("updated duration = %d, want 4500", loaded.DurationSeconds)
+	}
+	if loaded.Billable {
+		t.Fatal("updated timesheet should be non-billable")
+	}
+	if loaded.Description != "Updated" {
+		t.Fatalf("updated description = %q", loaded.Description)
+	}
+	if len(loaded.Tags) != 2 || loaded.Tags[0].Name != "qa" || loaded.Tags[1].Name != "review" {
+		t.Fatalf("updated tags = %#v", loaded.Tags)
+	}
+}

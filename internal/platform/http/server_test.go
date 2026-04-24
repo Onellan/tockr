@@ -893,6 +893,229 @@ func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing
 	}
 }
 
+func TestTimesheetEditFlowUpdatesDashboardListCalendarReportsAndCreateStillWorks(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	customer, project, activity, task := seedSelectorFixtures(t, store)
+	updatedActivity := &domain.Activity{WorkspaceID: 1, ProjectID: &project.ID, Name: "QA Review", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, updatedActivity); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || admin == nil {
+		t.Fatal("missing admin")
+	}
+	start := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Minute)
+	end := start.Add(90 * time.Minute)
+	entry := &domain.Timesheet{
+		WorkspaceID: 1,
+		UserID:      admin.ID,
+		CustomerID:  customer.ID,
+		ProjectID:   project.ID,
+		ActivityID:  activity.ID,
+		TaskID:      &task.ID,
+		StartedAt:   start,
+		EndedAt:     &end,
+		Timezone:    "UTC",
+		Billable:    true,
+		Description: "Original field visit",
+	}
+	if err := store.CreateTimesheet(ctx, entry, []string{"legacy"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	editHref := "/timesheets/" + strconv.FormatInt(entry.ID, 10) + "/edit"
+
+	dashboard := getWithCookie(app, "/", cookie).Body.String()
+	if !strings.Contains(dashboard, editHref) {
+		t.Fatal("dashboard should expose edit action for recent timesheet work")
+	}
+
+	timesheets := getWithCookie(app, "/timesheets", cookie).Body.String()
+	if !strings.Contains(timesheets, editHref) {
+		t.Fatal("timesheets list should expose edit action")
+	}
+
+	editPage := getWithCookie(app, editHref, cookie)
+	if editPage.Code != http.StatusOK {
+		t.Fatalf("edit page returned %d", editPage.Code)
+	}
+	editBody := editPage.Body.String()
+	for _, expected := range []string{
+		`action="/timesheets/` + strconv.FormatInt(entry.ID, 10) + `"`,
+		`Edit timesheet entry`,
+		`Original field visit`,
+		`value="legacy"`,
+		`name="billable" value="1" checked`,
+	} {
+		if !strings.Contains(editBody, expected) {
+			t.Fatalf("edit page missing %q", expected)
+		}
+	}
+	csrf := csrfFromBody(t, editBody)
+	updatedStart := start.Add(30 * time.Minute)
+	updatedEnd := updatedStart.Add(2 * time.Hour)
+	rec := postFormWithCookie(app, "/timesheets/"+strconv.FormatInt(entry.ID, 10), cookie, url.Values{
+		"csrf":          {csrf},
+		"customer_id":   {strconv.FormatInt(customer.ID, 10)},
+		"project_id":    {strconv.FormatInt(project.ID, 10)},
+		"activity_id":   {strconv.FormatInt(updatedActivity.ID, 10)},
+		"task_id":       {strconv.FormatInt(task.ID, 10)},
+		"start":         {updatedStart.Local().Format("2006-01-02T15:04")},
+		"end":           {updatedEnd.Local().Format("2006-01-02T15:04")},
+		"break_minutes": {"15"},
+		"tags":          {"edited,review"},
+		"description":   {"Edited field visit"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("timesheet edit returned %d", rec.Code)
+	}
+
+	timesheets = getWithCookie(app, rec.Header().Get("Location"), cookie).Body.String()
+	for _, expected := range []string{"Entry updated", "Edited field visit", "QA Review", "Internal"} {
+		if !strings.Contains(timesheets, expected) {
+			t.Fatalf("timesheets view missing %q after edit", expected)
+		}
+	}
+	if strings.Contains(timesheets, "Original field visit") {
+		t.Fatal("timesheets view still shows stale description after edit")
+	}
+
+	calendar := getWithCookie(app, "/calendar?date="+updatedStart.Format("2006-01-02"), cookie).Body.String()
+	for _, expected := range []string{"Edited field visit", "QA Review", editHref} {
+		if !strings.Contains(calendar, expected) {
+			t.Fatalf("calendar missing %q after edit", expected)
+		}
+	}
+
+	reports := getWithCookie(app, "/reports?group=activity&billable=false", cookie).Body.String()
+	if !strings.Contains(reports, "QA Review") {
+		t.Fatal("reports should reflect updated non-billable activity after edit")
+	}
+
+	createBody := getWithCookie(app, "/timesheets?date="+time.Now().UTC().Format("2006-01-02"), cookie).Body.String()
+	createCSRF := csrfFromBody(t, createBody)
+	rec = postFormWithCookie(app, "/timesheets", cookie, url.Values{
+		"csrf":          {createCSRF},
+		"customer_id":   {strconv.FormatInt(customer.ID, 10)},
+		"project_id":    {strconv.FormatInt(project.ID, 10)},
+		"activity_id":   {strconv.FormatInt(activity.ID, 10)},
+		"task_id":       {strconv.FormatInt(task.ID, 10)},
+		"start":         {time.Now().Add(-90 * time.Minute).Format("2006-01-02T15:04")},
+		"end":           {time.Now().Add(-30 * time.Minute).Format("2006-01-02T15:04")},
+		"break_minutes": {"0"},
+		"description":   {"Creation still works"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("timesheet create after edit returned %d", rec.Code)
+	}
+	if body := getWithCookie(app, "/timesheets", cookie).Body.String(); !strings.Contains(body, "Creation still works") {
+		t.Fatal("timesheet creation regression: new entry missing after edit flow")
+	}
+}
+
+func TestTimesheetEditPermissionsValidationAndExportLocking(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	customer, project, activity, task := seedSelectorFixtures(t, store)
+	otherProject := &domain.Project{WorkspaceID: 1, CustomerID: customer.ID, Name: "Other Project", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, otherProject); err != nil {
+		t.Fatal(err)
+	}
+	otherTask := &domain.Task{WorkspaceID: 1, ProjectID: otherProject.ID, Name: "Wrong Task", Visible: true, Billable: true}
+	if err := store.UpsertTask(ctx, otherTask); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || admin == nil {
+		t.Fatal("missing admin")
+	}
+	start := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Minute)
+	end := start.Add(1 * time.Hour)
+	entry := &domain.Timesheet{WorkspaceID: 1, UserID: admin.ID, CustomerID: customer.ID, ProjectID: project.ID, ActivityID: activity.ID, TaskID: &task.ID, StartedAt: start, EndedAt: &end, Timezone: "UTC", Billable: true, Description: "Protected entry"}
+	if err := store.CreateTimesheet(ctx, entry, nil); err != nil {
+		t.Fatal(err)
+	}
+	editHref := "/timesheets/" + strconv.FormatInt(entry.ID, 10) + "/edit"
+
+	if err := store.CreateUser(ctx, domain.User{
+		Email:       "manager@example.com",
+		Username:    "manager",
+		DisplayName: "Manager",
+		Timezone:    "UTC",
+		Enabled:     true,
+	}, "manager12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := store.FindUserByEmail(ctx, "manager@example.com")
+	if err != nil || manager == nil {
+		t.Fatal("missing manager")
+	}
+	managerCookie := loginCookie(t, app, "manager@example.com", "manager12345")
+	managerTimesheets := getWithCookie(app, "/timesheets", managerCookie).Body.String()
+	if strings.Contains(managerTimesheets, editHref) {
+		t.Fatal("unassigned user should not see edit affordance for another user's entry")
+	}
+	if rec := getWithCookie(app, editHref, managerCookie); rec.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized edit page returned %d, want 403", rec.Code)
+	}
+	managerCSRF := csrfFromBody(t, managerTimesheets)
+	editPost := postFormWithCookie(app, "/timesheets/"+strconv.FormatInt(entry.ID, 10), managerCookie, url.Values{
+		"csrf":          {managerCSRF},
+		"customer_id":   {strconv.FormatInt(customer.ID, 10)},
+		"project_id":    {strconv.FormatInt(project.ID, 10)},
+		"activity_id":   {strconv.FormatInt(activity.ID, 10)},
+		"task_id":       {strconv.FormatInt(task.ID, 10)},
+		"start":         {start.Local().Format("2006-01-02T15:04")},
+		"end":           {end.Local().Format("2006-01-02T15:04")},
+		"break_minutes": {"0"},
+		"description":   {"Should fail"},
+	})
+	if editPost.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized edit post returned %d, want 403", editPost.Code)
+	}
+
+	if err := store.AddProjectMember(ctx, project.ID, manager.ID, domain.ProjectRoleManager); err != nil {
+		t.Fatal(err)
+	}
+	managerBody := getWithCookie(app, "/timesheets", managerCookie).Body.String()
+	if !strings.Contains(managerBody, editHref) {
+		t.Fatal("project manager should see edit affordance for project entry")
+	}
+	editPage := getWithCookie(app, editHref, managerCookie)
+	if editPage.Code != http.StatusOK {
+		t.Fatalf("manager edit page returned %d", editPage.Code)
+	}
+	csrf := csrfFromBody(t, editPage.Body.String())
+	invalid := postFormWithCookie(app, "/timesheets/"+strconv.FormatInt(entry.ID, 10), managerCookie, url.Values{
+		"csrf":          {csrf},
+		"customer_id":   {strconv.FormatInt(customer.ID, 10)},
+		"project_id":    {strconv.FormatInt(project.ID, 10)},
+		"activity_id":   {strconv.FormatInt(activity.ID, 10)},
+		"task_id":       {strconv.FormatInt(otherTask.ID, 10)},
+		"start":         {start.Local().Format("2006-01-02T15:04")},
+		"end":           {end.Local().Format("2006-01-02T15:04")},
+		"break_minutes": {"0"},
+		"description":   {"Invalid task update"},
+	})
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid hierarchy edit returned %d, want 400", invalid.Code)
+	}
+	if !strings.Contains(invalid.Body.String(), "task does not belong to the selected project") {
+		t.Fatal("invalid hierarchy edit should show validation message")
+	}
+
+	if _, err := store.DB().ExecContext(ctx, `UPDATE timesheets SET exported=1 WHERE id=?`, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := getWithCookie(app, editHref, loginCookie(t, app, "admin@example.com", "admin12345")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("export-locked edit page returned %d, want 400", rec.Code)
+	}
+}
+
 func TestProjectTemplateCreateEditAndUse(t *testing.T) {
 	app, store := testApp(t)
 	defer store.Close()

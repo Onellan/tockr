@@ -48,14 +48,19 @@ type SelectOption struct {
 }
 
 type TimesheetPrefill struct {
-	CustomerID  int64
-	ProjectID   int64
-	ActivityID  int64
-	TaskID      int64
-	Date        string
-	Start       string
-	End         string
-	Description string
+	EntryID      int64
+	CustomerID   int64
+	ProjectID    int64
+	ActivityID   int64
+	TaskID       int64
+	Date         string
+	Start        string
+	End          string
+	BreakMinutes string
+	Tags         string
+	Description  string
+	Billable     bool
+	Message      string
 }
 
 type SelectorData struct {
@@ -247,10 +252,14 @@ func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Ti
 			if desc == "" {
 				desc = recentWorkLabel(item, selectors)
 			}
-			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong><a class="table-action" href="%s">Use again</a></div>`,
+			actions := `<a class="table-action" href="` + esc(timesheetPrefillHref(item)) + `">Use again</a>`
+			if item.TimesheetID > 0 {
+				actions += ` <a class="table-action" href="` + esc(timesheetEditHref(item.TimesheetID)) + `">Edit</a>`
+			}
+			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong>%s</div>`,
 				esc(desc),
 				esc(duration(item.DurationSeconds)+" · "+item.StartedAt.Format("Mon 02 Jan 15:04")),
-				esc(timesheetPrefillHref(item)))
+				actions)
 		}
 		_, _ = fmt.Fprint(w, `</div></div><div class="panel"><div class="panel-head"><div><h2>Project watchlist</h2><p>Projects nearing estimate or fixed-fee budget thresholds.</p></div></div>`)
 		if len(summary.ProjectWatchlist) == 0 {
@@ -430,13 +439,16 @@ func Rates(user *NavUser, rates []domain.Rate, costs []domain.UserCostRate, sele
 	}))
 }
 
-func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorData, favorites []domain.Favorite, recent []domain.DashboardRecentWork, prefill TimesheetPrefill) templ.Component {
+func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorData, favorites []domain.Favorite, recent []domain.DashboardRecentWork, prefill TimesheetPrefill, editable map[int64]bool) templ.Component {
 	return Layout("Timesheets", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Timesheets", "Time capture", "Manual entry first. Use recent work, favorites, and clear billing context to backfill quickly and accurately.")
+		if strings.TrimSpace(prefill.Message) != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(prefill.Message))
+		}
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Log engineering time</h2><p>Choose the client, project, work type, and optional task before saving the entry.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderWorkSelectorsWithSelected(w, selectors, true, prefill)
-		_, _ = fmt.Fprintf(w, `<label>Start<input type="datetime-local" name="start" value="%s" required></label><label>End<input type="datetime-local" name="end" value="%s" required></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input name="break_minutes" value="0"></label><label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
-			esc(prefill.Start), esc(prefill.End), esc(prefill.Description))
+		_, _ = fmt.Fprintf(w, `<label>Start<input type="datetime-local" name="start" value="%s" required></label><label>End<input type="datetime-local" name="end" value="%s" required></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input name="break_minutes" value="%s"></label><label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
+			esc(prefill.Start), esc(prefill.End), esc(defaultVal(prefill.BreakMinutes, "0")), esc(prefill.Tags), esc(prefill.Description))
 		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Recent and repeat work</h2><p>Reuse common consulting tasks without rebuilding the full selection.</p></div></div><div class="summary-list">`)
 		if len(recent) == 0 && len(favorites) == 0 {
 			_, _ = fmt.Fprint(w, `<div><span>No recent work yet</span><strong>Recent entries and favorites will appear here after you start logging time.</strong></div>`)
@@ -476,11 +488,29 @@ func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorDa
 				Money(entry.RateCents),
 				humanBillable(entry.Billable),
 				humanExport(entry.Exported),
-				esc(entry.Description) + ` <a class="table-action small" href="` + esc(timesheetPrefillHref(domain.DashboardRecentWork{CustomerID: entry.CustomerID, ProjectID: entry.ProjectID, ActivityID: entry.ActivityID, TaskID: entry.TaskID, Description: entry.Description, StartedAt: entry.StartedAt, DurationSeconds: entry.DurationSeconds, Billable: entry.Billable, Exported: entry.Exported})) + `">Duplicate</a>`,
+				esc(entry.Description),
+				timesheetActions(entry, editable),
 			})
 		}
-		dataTableRaw(w, []string{"Client", "Project", "Work Type", "Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description"}, rows)
+		dataTableRaw(w, []string{"Client", "Project", "Work Type", "Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description", "Actions"}, rows)
 		_, _ = fmt.Fprint(w, `<div class="export-row"><a class="ghost-button" href="/timesheets/export">Export CSV</a></div>`)
+		return nil
+	}))
+}
+
+func EditTimesheet(user *NavUser, selectors *SelectorData, prefill TimesheetPrefill, message string, exported bool) templ.Component {
+	return Layout("Edit Timesheet", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Edit entry", "Timesheets", "Update the captured work package without recreating the entry.")
+		if strings.TrimSpace(message) != "" {
+			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
+		}
+		if exported {
+			_, _ = fmt.Fprint(w, `<div class="alert">Exported entries are locked to preserve invoice and export integrity.</div>`)
+		}
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Edit timesheet entry</h2><p>Adjust the entry details, then save or cancel back to the weekly timesheet view.</p></div></div><form method="post" action="/timesheets/%d" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, prefill.EntryID, esc(user.CSRF))
+		renderWorkSelectorsWithSelected(w, selectors, true, prefill)
+		_, _ = fmt.Fprintf(w, `<label>Start<input type="datetime-local" name="start" value="%s" required></label><label>End<input type="datetime-local" name="end" value="%s" required></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input name="break_minutes" value="%s"></label><label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Save changes</button><a class="ghost-button" href="/timesheets">Cancel</a></div></form></section>`,
+			esc(prefill.Start), esc(prefill.End), esc(defaultVal(prefill.BreakMinutes, "0")), esc(prefill.Tags), checkedIf(prefill.Billable), esc(prefill.Description))
 		return nil
 	}))
 }
@@ -555,7 +585,7 @@ func ProjectDashboard(user *NavUser, d domain.ProjectDashboard) templ.Component 
 	}))
 }
 
-func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, selectors *SelectorData) templ.Component {
+func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, selectors *SelectorData, editable map[int64]bool) templ.Component {
 	return Layout("Calendar", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Calendar", "Weekly review", "Review where the week went, spot missing days, and jump straight into backfill.")
 		prev := weekStart.AddDate(0, 0, -7).Format("2006-01-02")
@@ -604,6 +634,9 @@ func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, se
 						esc(duration(entry.DurationSeconds)))
 					if entry.Description != "" {
 						_, _ = fmt.Fprintf(w, `<span class="entry-desc">%s</span>`, esc(entry.Description))
+					}
+					if editable[entry.ID] {
+						_, _ = fmt.Fprintf(w, `<span class="entry-actions"><a class="table-action small" href="%s">Edit</a></span>`, esc(timesheetEditHref(entry.ID)))
 					}
 					_, _ = fmt.Fprint(w, `</div>`)
 				}
@@ -1618,6 +1651,18 @@ func recentWorkLabel(item domain.DashboardRecentWork, selectors *SelectorData) s
 		}
 	}
 	return strings.Join(out, " / ")
+}
+
+func timesheetEditHref(id int64) string {
+	return fmt.Sprintf("/timesheets/%d/edit", id)
+}
+
+func timesheetActions(entry domain.Timesheet, editable map[int64]bool) string {
+	actions := `<a class="table-action small" href="` + esc(timesheetPrefillHref(domain.DashboardRecentWork{CustomerID: entry.CustomerID, ProjectID: entry.ProjectID, ActivityID: entry.ActivityID, TaskID: entry.TaskID, Description: entry.Description, StartedAt: entry.StartedAt, DurationSeconds: entry.DurationSeconds, Billable: entry.Billable, Exported: entry.Exported})) + `">Duplicate</a>`
+	if editable[entry.ID] {
+		actions += ` <a class="table-action small" href="` + esc(timesheetEditHref(entry.ID)) + `">Edit</a>`
+	}
+	return actions
 }
 
 func timesheetPrefillHref(item domain.DashboardRecentWork) string {
