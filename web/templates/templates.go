@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"math"
 	"net/url"
 	"path"
 	"sort"
@@ -689,15 +690,15 @@ func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, s
 	}))
 }
 
-func ProjectDashboard(user *NavUser, d domain.ProjectDashboard) templ.Component {
+func ProjectDashboard(user *NavUser, d domain.ProjectDashboard, selectors *SelectorData) templ.Component {
 	return Layout("Project dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, d.Project.Name, "Project dashboard", "Monitor delivery burn, invoice readiness, and who is doing the work.")
-		renderProjectDashboardBody(w, d)
+		renderProjectDashboardBody(w, d, selectors, fmt.Sprintf("/projects/%d/dashboard", d.Project.ID))
 		return nil
 	}))
 }
 
-func ProjectDashboards(user *NavUser, projects []SelectOption, selectedProjectID int64, dashboard *domain.ProjectDashboard) templ.Component {
+func ProjectDashboards(user *NavUser, projects []SelectOption, selectedProjectID int64, dashboard *domain.ProjectDashboard, selectors *SelectorData) templ.Component {
 	return Layout("Project dashboards", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Project dashboards", "Projects / Delivery", "Open a project dashboard directly and switch between project views without going back to the projects list.")
 		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Select project</h2><p>Choose a project to open its delivery dashboard.</p></div></div><form method="get" action="/project-dashboards" class="toolbar-form selector-form">`)
@@ -715,12 +716,27 @@ func ProjectDashboards(user *NavUser, projects []SelectOption, selectedProjectID
 			dataTableRaw(w, []string{"Project", "Action"}, rows)
 			return nil
 		}
-		renderProjectDashboardBody(w, *dashboard)
+		renderProjectDashboardBody(w, *dashboard, selectors, "/project-dashboards")
 		return nil
 	}))
 }
 
-func renderProjectDashboardBody(w io.Writer, d domain.ProjectDashboard) {
+func renderProjectDashboardBody(w io.Writer, d domain.ProjectDashboard, selectors *SelectorData, filterAction string) {
+	filter := d.Filter
+	resetHref := fmt.Sprintf("/projects/%d/dashboard", d.Project.ID)
+	if filterAction == "/project-dashboards" {
+		resetHref = fmt.Sprintf("/project-dashboards?project_id=%d", d.Project.ID)
+	}
+	_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Project effort filters</h2><p>Keep chart and contribution views in sync while narrowing the project lens.</p></div></div><form method="get" action="%s" class="toolbar-form selector-form">`, esc(filterAction))
+	_, _ = fmt.Fprintf(w, `<input type="hidden" name="project_id" value="%d">`, d.Project.ID)
+	_, _ = fmt.Fprintf(w, `<label>Date from<input type="date" name="begin" value="%s"></label><label>Date to<input type="date" name="end" value="%s"></label>`, dateInput(filter.Begin), dateInput(filter.End))
+	renderSelect(w, "Workstream", "workstream_id", optionList(selectors, "workstream"), filter.WorkstreamID, false, "All workstreams", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-ids"})
+	renderSelect(w, "Work Type", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All work types", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+	renderSelect(w, "Task", "task_id", optionList(selectors, "task"), filter.TaskID, false, "All tasks", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+	renderSelect(w, "Engineer", "user_id", optionList(selectors, "user"), filter.UserID, false, "All engineers", nil)
+	renderSelect(w, "Group", "group_id", optionList(selectors, "group"), filter.GroupID, false, "All groups", nil)
+	_, _ = fmt.Fprintf(w, `<button class="primary">Apply filters</button><a class="ghost-button" href="%s">Reset</a></form></section>`, esc(resetHref))
+
 	_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
 	metric(w, "Tracked", duration(d.TrackedSeconds), "Total project time")
 	metric(w, "Estimate used", fmt.Sprintf("%d%%", d.EstimatePercent), "Against estimate")
@@ -734,19 +750,112 @@ func renderProjectDashboardBody(w io.Writer, d domain.ProjectDashboard) {
 	if d.Alert {
 		_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold. Review burn before approving more work or sending the next invoice.</div>`)
 	}
-	_, _ = fmt.Fprint(w, `<section class="two-col section-spacer"><div class="panel"><div class="panel-head"><div><h2>Active task mix</h2><p>Where the project effort is landing now.</p></div></div>`)
-	taskRows := [][]string{}
-	for _, task := range d.TaskSummaries {
-		taskRows = append(taskRows, []string{task.Name, duration(task.TrackedSeconds), duration(task.UnbilledSeconds), humanBillable(task.Billable)})
-	}
-	dataTable(w, []string{"Task", "Tracked", "Unbilled", "Billable"}, taskRows)
-	_, _ = fmt.Fprint(w, `</div><div class="panel"><div class="panel-head"><div><h2>Key contributors</h2><p>Who is carrying the billable load on this project.</p></div></div>`)
-	contributorRows := [][]string{}
-	for _, contributor := range d.Contributors {
-		contributorRows = append(contributorRows, []string{contributor.DisplayName, duration(contributor.TrackedSeconds), duration(contributor.BillableSeconds)})
-	}
-	dataTable(w, []string{"Engineer", "Tracked", "Billable"}, contributorRows)
+
+	_, _ = fmt.Fprint(w, `<section class="panel section-spacer"><div class="panel-head"><div><h2>Captured time distribution</h2><p>Fast pie summaries of where filtered project effort is concentrated.</p></div></div><div class="project-breakdown-grid">`)
+	renderProjectBreakdownCard(w, "By workstream", "Delivery streams receiving effort", d.WorkstreamBreakdown, d.TrackedSeconds)
+	renderProjectBreakdownCard(w, "By work type", "Kinds of work being executed", d.WorkTypeBreakdown, d.TrackedSeconds)
+	renderProjectBreakdownCard(w, "By task", "Deliverables absorbing team time", d.TaskBreakdown, d.TrackedSeconds)
 	_, _ = fmt.Fprint(w, `</div></section>`)
+
+	_, _ = fmt.Fprint(w, `<section class="panel section-spacer"><div class="panel-head"><div><h2>Key contributors by category</h2><p>Person-level contribution rows for workstream, work type, and task dimensions.</p></div></div><div class="tabs project-contrib-tabs"><a href="#project-contrib-workstream">Workstream</a><a href="#project-contrib-worktype">Work Type</a><a href="#project-contrib-task">Task</a></div>`)
+	renderProjectContributionTable(w, "project-contrib-workstream", "Contributions by workstream", "Workstream", d.WorkstreamContributors, d.TrackedSeconds)
+	renderProjectContributionTable(w, "project-contrib-worktype", "Contributions by work type", "Work Type", d.WorkTypeContributors, d.TrackedSeconds)
+	renderProjectContributionTable(w, "project-contrib-task", "Contributions by task", "Task", d.TaskContributors, d.TrackedSeconds)
+	_, _ = fmt.Fprint(w, `</section>`)
+}
+
+type projectPieSlice struct {
+	Name           string
+	TrackedSeconds int64
+	Percent        float64
+	Color          string
+}
+
+func renderProjectBreakdownCard(w io.Writer, title, description string, slices []domain.ProjectBreakdownSlice, totalSeconds int64) {
+	series := projectPieSeries(slices, totalSeconds, 6)
+	_, _ = fmt.Fprintf(w, `<article class="project-breakdown-card"><header><h3>%s</h3><p>%s</p></header>`, esc(title), esc(description))
+	if totalSeconds <= 0 || len(series) == 0 {
+		_, _ = fmt.Fprint(w, `<div class="empty-state compact"><strong>No captured time</strong><span>Adjust filters or log time to populate this breakdown.</span></div></article>`)
+		return
+	}
+	_, _ = fmt.Fprint(w, `<div class="project-pie-layout"><svg class="project-pie" viewBox="0 0 160 160" role="img" aria-label="Captured time breakdown pie chart">`)
+	startAngle := -math.Pi / 2
+	for _, slice := range series {
+		angle := 2 * math.Pi * (float64(slice.TrackedSeconds) / float64(totalSeconds))
+		if angle <= 0 {
+			continue
+		}
+		if angle >= (2*math.Pi)-0.0001 {
+			_, _ = fmt.Fprintf(w, `<circle cx="80" cy="80" r="62" fill="%s"></circle>`, esc(slice.Color))
+			continue
+		}
+		endAngle := startAngle + angle
+		largeArc := 0
+		if angle > math.Pi {
+			largeArc = 1
+		}
+		x1 := 80 + 62*math.Cos(startAngle)
+		y1 := 80 + 62*math.Sin(startAngle)
+		x2 := 80 + 62*math.Cos(endAngle)
+		y2 := 80 + 62*math.Sin(endAngle)
+		_, _ = fmt.Fprintf(w, `<path d="M 80 80 L %.3f %.3f A 62 62 0 %d 1 %.3f %.3f Z" fill="%s" stroke="#ffffff" stroke-width="1.2"></path>`, x1, y1, largeArc, x2, y2, esc(slice.Color))
+		startAngle = endAngle
+	}
+	_, _ = fmt.Fprintf(w, `<text x="80" y="77" text-anchor="middle" class="project-pie-total-label">Tracked</text><text x="80" y="97" text-anchor="middle" class="project-pie-total-value">%s</text></svg><ul class="project-pie-legend">`, esc(duration(totalSeconds)))
+	for _, slice := range series {
+		_, _ = fmt.Fprintf(w, `<li><span class="swatch" style="background:%s"></span><span class="legend-label">%s</span><span class="legend-value">%s</span><span class="legend-share">%s</span></li>`, esc(slice.Color), esc(slice.Name), esc(duration(slice.TrackedSeconds)), esc(fmt.Sprintf("%.1f%%", slice.Percent)))
+	}
+	_, _ = fmt.Fprint(w, `</ul></div></article>`)
+}
+
+func projectPieSeries(slices []domain.ProjectBreakdownSlice, totalSeconds int64, maxVisible int) []projectPieSlice {
+	if totalSeconds <= 0 || len(slices) == 0 {
+		return nil
+	}
+	trimmed := make([]domain.ProjectBreakdownSlice, 0, len(slices))
+	for _, item := range slices {
+		if item.TrackedSeconds > 0 {
+			trimmed = append(trimmed, item)
+		}
+	}
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if maxVisible < 2 {
+		maxVisible = 2
+	}
+	if len(trimmed) > maxVisible {
+		other := int64(0)
+		for _, item := range trimmed[maxVisible-1:] {
+			other += item.TrackedSeconds
+		}
+		trimmed = append(trimmed[:maxVisible-1], domain.ProjectBreakdownSlice{Name: "Other", TrackedSeconds: other})
+	}
+	colors := []string{"#1f77b4", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51", "#8ab17d", "#3d405b"}
+	series := make([]projectPieSlice, 0, len(trimmed))
+	for i, item := range trimmed {
+		series = append(series, projectPieSlice{
+			Name:           item.Name,
+			TrackedSeconds: item.TrackedSeconds,
+			Percent:        (float64(item.TrackedSeconds) * 100) / float64(totalSeconds),
+			Color:          colors[i%len(colors)],
+		})
+	}
+	return series
+}
+
+func renderProjectContributionTable(w io.Writer, id, title, categoryLabel string, rows []domain.ProjectContributionSummary, totalSeconds int64) {
+	_, _ = fmt.Fprintf(w, `<section class="project-contrib-section" id="%s"><div class="panel-head"><div><h3>%s</h3><p>Sorted by captured time in the active project filter scope.</p></div></div>`, esc(id), esc(title))
+	tableRows := make([][]string, 0, len(rows))
+	for _, item := range rows {
+		share := "0.0%"
+		if totalSeconds > 0 {
+			share = fmt.Sprintf("%.1f%%", (float64(item.TrackedSeconds)*100)/float64(totalSeconds))
+		}
+		tableRows = append(tableRows, []string{item.DisplayName, item.ItemName, duration(item.TrackedSeconds), share})
+	}
+	dataTable(w, []string{"Engineer", categoryLabel, "Tracked", "Project share"}, tableRows)
+	_, _ = fmt.Fprint(w, `</section>`)
 }
 
 func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, selectors *SelectorData, editable map[int64]bool) templ.Component {

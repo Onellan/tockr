@@ -723,15 +723,16 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) projectDashboards(w http.ResponseWriter, r *http.Request) {
-	selectData, err := s.selectorData(r, false, false)
+	selectData, err := s.selectorData(r, true, true)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	selectedProjectID := int64Param(r, "project_id")
+	filter := projectDashboardFilterFromRequest(r)
 	var dashboard *domain.ProjectDashboard
 	if selectedProjectID > 0 {
-		item, err := s.store.ProjectDashboard(r.Context(), s.access(r), selectedProjectID)
+		item, err := s.store.ProjectDashboard(r.Context(), s.access(r), selectedProjectID, filter)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				http.NotFound(w, r)
@@ -742,16 +743,21 @@ func (s *Server) projectDashboards(w http.ResponseWriter, r *http.Request) {
 		}
 		dashboard = &item
 	}
-	s.render(w, r, templates.ProjectDashboards(s.nav(r), selectData.Projects, selectedProjectID, dashboard))
+	s.render(w, r, templates.ProjectDashboards(s.nav(r), selectData.Projects, selectedProjectID, dashboard, selectData))
 }
 
 func (s *Server) projectDashboard(w http.ResponseWriter, r *http.Request) {
-	dashboard, err := s.store.ProjectDashboard(r.Context(), s.access(r), pathID(r))
+	selectData, err := s.selectorData(r, true, true)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	dashboard, err := s.store.ProjectDashboard(r.Context(), s.access(r), pathID(r), projectDashboardFilterFromRequest(r))
 	if err != nil || dashboard.Project.ID == 0 {
 		http.NotFound(w, r)
 		return
 	}
-	s.render(w, r, templates.ProjectDashboard(s.nav(r), dashboard))
+	s.render(w, r, templates.ProjectDashboard(s.nav(r), dashboard, selectData))
 }
 
 func (s *Server) projectMembers(w http.ResponseWriter, r *http.Request) {
@@ -3303,6 +3309,18 @@ func parseDateParam(r *http.Request, key string) *time.Time {
 		return nil
 	}
 	return &parsed
+}
+
+func projectDashboardFilterFromRequest(r *http.Request) domain.ProjectDashboardFilter {
+	return domain.ProjectDashboardFilter{
+		Begin:        parseDateParam(r, "begin"),
+		End:          parseDateParam(r, "end"),
+		WorkstreamID: int64Param(r, "workstream_id"),
+		ActivityID:   int64Param(r, "activity_id"),
+		TaskID:       int64Param(r, "task_id"),
+		UserID:       int64Param(r, "user_id"),
+		GroupID:      int64Param(r, "group_id"),
+	}
 }
 
 func formInt(r *http.Request, key string) int64 {

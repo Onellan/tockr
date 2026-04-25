@@ -194,13 +194,167 @@ func TestTogglInspiredPhaseOneModels(t *testing.T) {
 	if len(rows) != 1 || rows[0]["name"] != "Design" {
 		t.Fatalf("expected task report row, got %#v", rows)
 	}
-	dashboard, err := store.ProjectDashboard(ctx, access, project.ID)
+	dashboard, err := store.ProjectDashboard(ctx, access, project.ID, domain.ProjectDashboardFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dashboard.EstimatePercent < 100 || !dashboard.Alert {
 		t.Fatalf("expected project dashboard to flag estimate threshold, got %#v", dashboard)
 	}
+}
+
+func TestProjectDashboardBreakdownsAndFilterScope(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SeedAdmin(ctx, "admin@example.com", "secret12345", "UTC", "USD"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || admin == nil {
+		t.Fatal("missing admin")
+	}
+	if err := store.CreateUser(ctx, domain.User{Email: "teammate@example.com", Username: "teammate", DisplayName: "Teammate", Timezone: "UTC", Enabled: true}, "secret12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	teammate, err := store.FindUserByEmail(ctx, "teammate@example.com")
+	if err != nil || teammate == nil {
+		t.Fatal("missing teammate")
+	}
+	access, err := store.AccessForUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	customer := &domain.Customer{WorkspaceID: access.WorkspaceID, Name: "Acme", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, customer); err != nil {
+		t.Fatal(err)
+	}
+	project := &domain.Project{WorkspaceID: access.WorkspaceID, CustomerID: customer.ID, Name: "Delivery", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	otherProject := &domain.Project{WorkspaceID: access.WorkspaceID, CustomerID: customer.ID, Name: "Other", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, otherProject); err != nil {
+		t.Fatal(err)
+	}
+
+	wsBuild := &domain.Workstream{WorkspaceID: access.WorkspaceID, Name: "Build", Visible: true}
+	if err := store.UpsertWorkstream(ctx, wsBuild); err != nil {
+		t.Fatal(err)
+	}
+	wsQA := &domain.Workstream{WorkspaceID: access.WorkspaceID, Name: "QA", Visible: true}
+	if err := store.UpsertWorkstream(ctx, wsQA); err != nil {
+		t.Fatal(err)
+	}
+
+	activityDev := &domain.Activity{WorkspaceID: access.WorkspaceID, ProjectID: &project.ID, Name: "Development", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, activityDev); err != nil {
+		t.Fatal(err)
+	}
+	activityReview := &domain.Activity{WorkspaceID: access.WorkspaceID, ProjectID: &project.ID, Name: "Review", Visible: true, Billable: true}
+	if err := store.UpsertActivity(ctx, activityReview); err != nil {
+		t.Fatal(err)
+	}
+	taskAPI := &domain.Task{WorkspaceID: access.WorkspaceID, ProjectID: project.ID, Name: "API", Visible: true, Billable: true}
+	if err := store.UpsertTask(ctx, taskAPI); err != nil {
+		t.Fatal(err)
+	}
+	taskDocs := &domain.Task{WorkspaceID: access.WorkspaceID, ProjectID: project.ID, Name: "Docs", Visible: true, Billable: true}
+	if err := store.UpsertTask(ctx, taskDocs); err != nil {
+		t.Fatal(err)
+	}
+
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	addEntry := func(userID int64, projectID int64, workstreamID *int64, activityID int64, taskID *int64, durationSeconds int64, billable bool, exported bool, offsetHours int) {
+		t.Helper()
+		start := base.Add(time.Duration(offsetHours) * time.Hour)
+		end := start.Add(time.Duration(durationSeconds) * time.Second)
+		entry := &domain.Timesheet{
+			WorkspaceID:     access.WorkspaceID,
+			UserID:          userID,
+			CustomerID:      customer.ID,
+			ProjectID:       projectID,
+			WorkstreamID:    workstreamID,
+			ActivityID:      activityID,
+			TaskID:          taskID,
+			StartedAt:       start,
+			EndedAt:         &end,
+			DurationSeconds: durationSeconds,
+			Billable:        billable,
+			Exported:        exported,
+			RateCents:       10000,
+		}
+		if err := store.CreateTimesheet(ctx, entry, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	addEntry(admin.ID, project.ID, &wsBuild.ID, activityDev.ID, &taskAPI.ID, 7200, true, false, 0)
+	addEntry(admin.ID, project.ID, &wsQA.ID, activityReview.ID, &taskDocs.ID, 3600, false, false, 3)
+	addEntry(teammate.ID, project.ID, &wsBuild.ID, activityDev.ID, &taskAPI.ID, 1800, true, false, 5)
+	addEntry(teammate.ID, project.ID, nil, activityReview.ID, nil, 900, true, false, 6)
+	addEntry(admin.ID, otherProject.ID, &wsBuild.ID, activityDev.ID, &taskAPI.ID, 18000, true, false, 8)
+
+	dashboard, err := store.ProjectDashboard(ctx, access, project.ID, domain.ProjectDashboardFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dashboard.TrackedSeconds != 13500 {
+		t.Fatalf("tracked seconds = %d, want 13500", dashboard.TrackedSeconds)
+	}
+	if breakdownSeconds(dashboard.WorkstreamBreakdown, "Build") != 9000 {
+		t.Fatalf("workstream Build seconds = %d, want 9000", breakdownSeconds(dashboard.WorkstreamBreakdown, "Build"))
+	}
+	if breakdownSeconds(dashboard.WorkstreamBreakdown, "QA") != 3600 {
+		t.Fatalf("workstream QA seconds = %d, want 3600", breakdownSeconds(dashboard.WorkstreamBreakdown, "QA"))
+	}
+	if breakdownSeconds(dashboard.WorkstreamBreakdown, "Unassigned workstream") != 900 {
+		t.Fatalf("unassigned workstream seconds = %d, want 900", breakdownSeconds(dashboard.WorkstreamBreakdown, "Unassigned workstream"))
+	}
+	if contributionSeconds(dashboard.WorkstreamContributors, teammate.ID, "Build") != 1800 {
+		t.Fatalf("teammate build contribution = %d, want 1800", contributionSeconds(dashboard.WorkstreamContributors, teammate.ID, "Build"))
+	}
+	if breakdownSeconds(dashboard.TaskBreakdown, "API") != 9000 {
+		t.Fatalf("task API seconds = %d, want 9000", breakdownSeconds(dashboard.TaskBreakdown, "API"))
+	}
+	if breakdownSeconds(dashboard.TaskBreakdown, "Unassigned task") != 900 {
+		t.Fatalf("unassigned task seconds = %d, want 900", breakdownSeconds(dashboard.TaskBreakdown, "Unassigned task"))
+	}
+
+	begin := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC)
+	filtered, err := store.ProjectDashboard(ctx, access, project.ID, domain.ProjectDashboardFilter{Begin: &begin, End: &end, UserID: teammate.ID, WorkstreamID: wsBuild.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.TrackedSeconds != 1800 {
+		t.Fatalf("filtered tracked seconds = %d, want 1800", filtered.TrackedSeconds)
+	}
+	if len(filtered.WorkstreamBreakdown) != 1 || filtered.WorkstreamBreakdown[0].Name != "Build" {
+		t.Fatalf("filtered workstream breakdown = %#v, want one Build row", filtered.WorkstreamBreakdown)
+	}
+}
+
+func breakdownSeconds(items []domain.ProjectBreakdownSlice, name string) int64 {
+	for _, item := range items {
+		if item.Name == name {
+			return item.TrackedSeconds
+		}
+	}
+	return 0
+}
+
+func contributionSeconds(items []domain.ProjectContributionSummary, userID int64, itemName string) int64 {
+	for _, item := range items {
+		if item.UserID == userID && item.ItemName == itemName {
+			return item.TrackedSeconds
+		}
+	}
+	return 0
 }
 
 func TestHistoricalRatesAndUserCostResolution(t *testing.T) {

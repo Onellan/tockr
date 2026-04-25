@@ -1116,8 +1116,10 @@ func TestProjectDashboardRendersCorrectly(t *testing.T) {
 		t.Fatalf("GET /projects/{id}/dashboard returned %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, project.Name) {
-		t.Fatalf("project dashboard missing project name %q", project.Name)
+	for _, expected := range []string{project.Name, "Project effort filters", "Captured time distribution", "Key contributors by category"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("project dashboard missing %q", expected)
+		}
 	}
 }
 
@@ -1153,9 +1155,38 @@ func TestProjectDashboardsHubRendersAndLoadsSelection(t *testing.T) {
 		t.Fatalf("GET /project-dashboards?project_id= returned %d", rec.Code)
 	}
 	body = rec.Body.String()
-	for _, expected := range []string{project.Name, "Tracked", "Key contributors"} {
+	for _, expected := range []string{project.Name, "Tracked", "Captured time distribution", "Key contributors by category"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("selected project dashboard missing %q", expected)
+		}
+	}
+}
+
+func TestProjectDashboardFilterQueryRendersSelections(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	_, project, activity, task := seedSelectorFixtures(t, store)
+	ws := &domain.Workstream{WorkspaceID: 1, Name: "Engineering", Visible: true}
+	if err := store.UpsertWorkstream(context.Background(), ws); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	rec := getWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/dashboard?workstream_id="+strconv.FormatInt(ws.ID, 10)+"&activity_id="+strconv.FormatInt(activity.ID, 10)+"&task_id="+strconv.FormatInt(task.ID, 10)+"&begin=2026-04-01&end=2026-04-30", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("filtered dashboard returned %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		`name="begin" value="2026-04-01"`,
+		`name="end" value="2026-04-30"`,
+		`name="workstream_id"`,
+		`name="activity_id"`,
+		`name="task_id"`,
+		`Apply filters`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("filtered dashboard missing %q", expected)
 		}
 	}
 }
