@@ -47,6 +47,11 @@ type SelectOption struct {
 	Attrs map[string]string
 }
 
+type Notice struct {
+	Kind    string
+	Message string
+}
+
 type TimesheetPrefill struct {
 	EntryID       int64
 	EntryMode     string
@@ -64,6 +69,7 @@ type TimesheetPrefill struct {
 	Tags          string
 	Description   string
 	Billable      bool
+	Notice        Notice
 	Message       string
 }
 
@@ -198,34 +204,28 @@ func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 	})
 }
 
-func Login(message string) templ.Component {
+func Login(notice Notice) templ.Component {
 	return Layout("Login", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Know exactly where your team's time goes — and bill every hour with confidence.</p><ul><li>Capture time before it slips away</li><li>Turn hours into accurate, ready-to-send invoices</li><li>Keep projects on budget with real-time visibility</li></ul></div><form method="post" action="/login" class="login-card"><div><h2>Welcome back</h2><p>Sign in to your account.</p></div>`)
-		if message != "" {
-			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
-		}
+		renderNotice(w, notice)
 		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><label>Two-factor code <input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Only if enabled"></label><button class="primary full">Login</button><a class="auth-link" href="/forgot-password">Forgot password?</a></form></section>`)
 		return nil
 	}))
 }
 
-func ForgotPassword(message string) templ.Component {
+func ForgotPassword(notice Notice) templ.Component {
 	return Layout("Forgot password", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Reset access with a time-limited email link.</p></div><form method="post" action="/forgot-password" class="login-card"><div><h2>Forgot password</h2><p>Enter your account email and check your inbox.</p></div>`)
-		if message != "" {
-			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
-		}
+		renderNotice(w, notice)
 		_, _ = fmt.Fprint(w, `<label>Email<input name="email" type="email" autocomplete="username" required></label><button class="primary full">Send reset link</button><a class="auth-link" href="/login">Back to login</a></form></section>`)
 		return nil
 	}))
 }
 
-func ResetPassword(token, message string) templ.Component {
+func ResetPassword(token string, notice Notice) templ.Component {
 	return Layout("Reset password", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Choose a new password for local authentication.</p></div><form method="post" action="/reset-password" class="login-card"><div><h2>Reset password</h2><p>Reset links expire and can be used once.</p></div>`)
-		if message != "" {
-			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
-		}
+		renderNotice(w, notice)
 		_, _ = fmt.Fprintf(w, `<input type="hidden" name="token" value="%s"><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><label>Confirm password<input name="confirm" type="password" minlength="8" autocomplete="new-password" required></label><button class="primary full">Update password</button><a class="auth-link" href="/login">Back to login</a></form></section>`, esc(token))
 		return nil
 	}))
@@ -505,6 +505,7 @@ func Rates(user *NavUser, rates []domain.Rate, costs []domain.UserCostRate, sele
 func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorData, favorites []domain.Favorite, recent []domain.DashboardRecentWork, prefill TimesheetPrefill, editable map[int64]bool) templ.Component {
 	return Layout("Timesheets", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Timesheets", "Time capture", "Manual entry first. Use recent work, favorites, and clear billing context to backfill quickly and accurately.")
+		renderNotice(w, prefill.Notice)
 		if strings.TrimSpace(prefill.Message) != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(prefill.Message))
 		}
@@ -783,12 +784,10 @@ func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, se
 	}))
 }
 
-func Account(user *NavUser, account domain.User, totpMode string, setupSecret, setupURI string, recoveryCodes []string, message string) templ.Component {
+func Account(user *NavUser, account domain.User, totpMode string, setupSecret, setupURI string, recoveryCodes []string, notice Notice) templ.Component {
 	return Layout("Account", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Account", "Profile and security", "Keep your local profile, timezone, password, and workspace context up to date.")
-		if message != "" {
-			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
-		}
+		renderNotice(w, notice)
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Profile</h2><p>Name and local display preferences.</p></div></div><form method="post" action="/account" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Display name<input name="display_name" value="%s" required></label><label>Email<input value="%s" disabled></label>`, esc(user.CSRF), esc(account.DisplayName), esc(account.Email))
 		renderTimezoneSelect(w, "Timezone", "timezone", account.Timezone, false)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save profile</button></div></form></div>`)
@@ -820,12 +819,10 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 	}))
 }
 
-func VerifyEmail(user *NavUser, pendingEmail string, expires time.Time, message string) templ.Component {
+func VerifyEmail(user *NavUser, pendingEmail string, expires time.Time, notice Notice) templ.Component {
 	return Layout("Verify email", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Verify Email", "Profile and security", "Enter the one-time code sent to your new email address.")
-		if message != "" {
-			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
-		}
+		renderNotice(w, notice)
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Email verification</h2><p>Codes expire after 10 minutes and stop working after too many attempts.</p></div></div>`)
 		if pendingEmail == "" {
 			_, _ = fmt.Fprint(w, `<div class="empty-state"><strong>No pending email change</strong><span>Start a new email change from your account page.</span></div><div class="form-actions"><a class="ghost-button" href="/account">Back to account</a></div></section>`)
@@ -1506,6 +1503,20 @@ func reportOption(current, value, label string) string {
 	return fmt.Sprintf(`<option value="%s"%s>%s</option>`, esc(value), selected, esc(label))
 }
 
+func renderNotice(w io.Writer, notice Notice) {
+	message := strings.TrimSpace(notice.Message)
+	if message == "" {
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(notice.Kind))
+	switch kind {
+	case "success", "error", "warning", "info":
+	default:
+		kind = "info"
+	}
+	_, _ = fmt.Fprintf(w, `<div class="alert alert-%s">%s</div>`, esc(kind), esc(message))
+}
+
 func sameDay(a, b time.Time) bool {
 	ay, am, ad := a.UTC().Date()
 	by, bm, bd := b.UTC().Date()
@@ -2135,12 +2146,10 @@ func WorkScheduleSettings(user *NavUser, schedule domain.WorkSchedule) templ.Com
 	}))
 }
 
-func EmailSettings(user *NavUser, smtp SMTPSettingsView, settings domain.EmailSettings, message string) templ.Component {
+func EmailSettings(user *NavUser, smtp SMTPSettingsView, settings domain.EmailSettings, notice Notice) templ.Component {
 	return Layout("Email Settings", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Email", "Administration", "Review SMTP delivery configuration and account email policy.")
-		if message != "" {
-			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(message))
-		}
+		renderNotice(w, notice)
 		status := `<span class="badge success">Ready</span>`
 		if !smtp.Valid {
 			status = `<span class="badge warning">Needs configuration</span>`
@@ -2173,9 +2182,10 @@ func EmailSettings(user *NavUser, smtp SMTPSettingsView, settings domain.EmailSe
 	}))
 }
 
-func Recalculate(user *NavUser, preview []domain.RecalcPreviewRow, selectors *SelectorData, projectID int64, sinceStr string) templ.Component {
+func Recalculate(user *NavUser, preview []domain.RecalcPreviewRow, selectors *SelectorData, projectID int64, sinceStr string, notice Notice) templ.Component {
 	return Layout("Recalculate Rates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Retroactive Rate Recalculation", "Administration", "Preview the financial impact before updating historical timesheet rates.")
+		renderNotice(w, notice)
 		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How to use this screen:</strong> Choose a project and a start date, then click <strong>Preview</strong> to see which time entries have a different rate than the one currently configured. Entries already included in an exported invoice are flagged — recalculating them updates the stored value but will not change any invoice already sent. Click <strong>Apply</strong> only when you have reviewed all changes.</div>`)
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Preview scope</h2><p>Select one project and the earliest date to evaluate.</p></div></div><form class="toolbar-form selector-form" method="get" action="/admin/recalculate">`)
 		renderSelect(w, "Project", "project_id", optionList(selectors, "project"), projectID, true, "Select a project", nil)

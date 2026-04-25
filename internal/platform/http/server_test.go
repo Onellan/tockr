@@ -277,8 +277,11 @@ func TestTOTPOptionalLoginRequiresCodeForEnabledUser(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	app.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Two-factor") {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
 		t.Fatalf("login without totp should redirect to code error, code=%d location=%s", rec.Code, rec.Header().Get("Location"))
+	}
+	if body := getPublic(app, "/login", rec.Result().Cookies()...).Body.String(); !strings.Contains(body, "Two-factor code required") {
+		t.Fatal("login page should show two-factor flash message")
 	}
 	code, ok := auth.CurrentTOTPCode(secret, time.Now().UTC())
 	if !ok {
@@ -1115,7 +1118,10 @@ func TestTimesheetEditFlowUpdatesDashboardListCalendarReportsAndCreateStillWorks
 		t.Fatalf("timesheet edit returned %d", rec.Code)
 	}
 
-	timesheets = getWithCookie(app, rec.Header().Get("Location"), cookie).Body.String()
+	if rec.Header().Get("Location") != "/timesheets" {
+		t.Fatalf("timesheet edit location = %s", rec.Header().Get("Location"))
+	}
+	timesheets = getWithCookies(app, rec.Header().Get("Location"), withCookies(cookie, rec.Result().Cookies())...).Body.String()
 	for _, expected := range []string{"Entry updated", "Edited field visit", "QA Review", "Internal"} {
 		if !strings.Contains(timesheets, expected) {
 			t.Fatalf("timesheets view missing %q after edit", expected)
@@ -1390,11 +1396,27 @@ func loginCookie(t *testing.T, app *Server, email, password string) *http.Cookie
 }
 
 func getWithCookie(app *Server, target string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	return getWithCookies(app, target, cookie)
+}
+
+func getWithCookies(app *Server, target string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
-	req.AddCookie(cookie)
+	for _, cookie := range cookies {
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+	}
 	rec := httptest.NewRecorder()
 	app.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func withCookies(first *http.Cookie, rest []*http.Cookie) []*http.Cookie {
+	cookies := []*http.Cookie{}
+	if first != nil {
+		cookies = append(cookies, first)
+	}
+	return append(cookies, rest...)
 }
 
 func postFormWithCookie(app *Server, target string, cookie *http.Cookie, form url.Values) *httptest.ResponseRecorder {
