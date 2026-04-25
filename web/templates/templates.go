@@ -51,6 +51,7 @@ type TimesheetPrefill struct {
 	EntryID      int64
 	CustomerID   int64
 	ProjectID    int64
+	WorkstreamID int64
 	ActivityID   int64
 	TaskID       int64
 	Date         string
@@ -64,19 +65,21 @@ type TimesheetPrefill struct {
 }
 
 type SelectorData struct {
-	Customers  []SelectOption
-	Projects   []SelectOption
-	Activities []SelectOption
-	Tasks      []SelectOption
-	Users      []SelectOption
-	Groups     []SelectOption
+	Customers   []SelectOption
+	Projects    []SelectOption
+	Workstreams []SelectOption
+	Activities  []SelectOption
+	Tasks       []SelectOption
+	Users       []SelectOption
+	Groups      []SelectOption
 
-	CustomerLabels map[int64]string
-	ProjectLabels  map[int64]string
-	ActivityLabels map[int64]string
-	TaskLabels     map[int64]string
-	UserLabels     map[int64]string
-	GroupLabels    map[int64]string
+	CustomerLabels   map[int64]string
+	ProjectLabels    map[int64]string
+	WorkstreamLabels map[int64]string
+	ActivityLabels   map[int64]string
+	TaskLabels       map[int64]string
+	UserLabels       map[int64]string
+	GroupLabels      map[int64]string
 }
 
 type SMTPSettingsView struct {
@@ -98,6 +101,7 @@ var primaryNav = []navItem{
 	{"Calendar", "/calendar", "Work", auth.PermTrackTime},
 	{"Clients", "/customers", "Projects / Delivery", ""},
 	{"Projects", "/projects", "Projects / Delivery", ""},
+	{"Project Dashboards", "/project-dashboards", "Projects / Delivery", auth.PermManageProjects},
 	{"Work Types", "/activities", "Projects / Delivery", ""},
 	{"Workstreams", "/workstreams", "Projects / Delivery", auth.PermManageMaster},
 	{"Tasks", "/tasks", "Projects / Delivery", ""},
@@ -157,7 +161,7 @@ var timezoneOptions = []timezoneOption{
 
 func Layout(title string, user *NavUser, body templ.Component) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s</title><link rel=\"icon\" href=\"/favicon.ico?v=20260423-brand\" sizes=\"any\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/favicon-32x32.png?v=20260423-brand\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/favicon-16x16.png?v=20260423-brand\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/apple-touch-icon.png?v=20260423-brand\"><link rel=\"manifest\" href=\"/static/site.webmanifest?v=20260423-brand\"><meta name=\"theme-color\" content=\"#2F80ED\"><link rel=\"stylesheet\" href=\"/static/style.css?v=20260423-brand\"><script src=\"/static/menu.js?v=20260422-navfix\" defer></script></head><body>", esc(title))
+		_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>%s</title><link rel=\"icon\" href=\"/favicon.ico?v=20260423-brand\" sizes=\"any\"><link rel=\"icon\" type=\"image/png\" sizes=\"32x32\" href=\"/static/favicon-32x32.png?v=20260423-brand\"><link rel=\"icon\" type=\"image/png\" sizes=\"16x16\" href=\"/static/favicon-16x16.png?v=20260423-brand\"><link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/apple-touch-icon.png?v=20260423-brand\"><link rel=\"manifest\" href=\"/static/site.webmanifest?v=20260423-brand\"><meta name=\"theme-color\" content=\"#2F80ED\"><link rel=\"stylesheet\" href=\"/static/style.css?v=20260423-brand\"><script src=\"/static/menu.js?v=20260422-navfix\" defer></script></head><body class=\"%s\">", esc(title), esc(bodyClass(title)))
 		if user == nil {
 			_, _ = fmt.Fprint(w, `<main class="auth-main">`)
 			if err := body.Render(ctx, w); err != nil {
@@ -312,46 +316,94 @@ func EntityListRaw(title string, user *NavUser, headers []string, rows [][]strin
 func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		action := "/customers"
+		visibleChecked := ` checked`
+		billableChecked := ` checked`
 		if c != nil && c.ID > 0 {
 			action = fmt.Sprintf("/customers/%d", c.ID)
+			visibleChecked = checkedIf(c.Visible)
+			billableChecked = checkedIf(c.Billable)
 		}
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Client name<input name="name" value="%s" required></label><label>Company<input name="company" value="%s"></label><label>Billing email<input name="email" value="%s"></label><label>Billing unit <span class="field-hint">ISO 4217 currency code — e.g. ZAR, USD, EUR</span><input name="currency" value="%s" placeholder="ZAR" maxlength="3"></label>`,
 			action, esc(user.CSRF), val(c, "Name"), val(c, "Company"), val(c, "Email"), defaultVal(val(c, "Currency"), "ZAR"))
 		renderTimezoneSelect(w, "Timezone", "timezone", defaultVal(val(c, "Timezone"), "UTC"), false)
-		_, _ = fmt.Fprintf(w, `<label>Client ID <span class="field-hint">leave blank to auto-generate (e.g. CL-000001)</span><input name="number" value="%s"></label><label class="wide">Comment<textarea name="comment">%s</textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><label class="check"><input type="checkbox" name="billable" checked> Billable</label><div class="form-actions"><button class="primary">Save client</button></div></form>`,
-			val(c, "Number"), val(c, "Comment"))
+		_, _ = fmt.Fprintf(w, `<label>Client ID <span class="field-hint">leave blank to auto-generate (e.g. CL-000001)</span><input name="number" value="%s"></label><label class="wide">Comment<textarea name="comment">%s</textarea></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label><label class="check"><input type="checkbox" name="billable"%s> Billable</label><div class="form-actions"><button class="primary">Save client</button></div></form>`,
+			val(c, "Number"), val(c, "Comment"), visibleChecked, billableChecked)
 		return nil
 	})
 }
 
-func ProjectForm(user *NavUser, selectors *SelectorData) templ.Component {
+func ProjectForm(user *NavUser, selectors *SelectorData, project *domain.Project) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/projects"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-		renderSelect(w, "Customer"+tipHTML("The client this project is billed to. Determines the billing unit and default billing contact."), "customer_id", optionList(selectors, "customer"), 0, true, "Select a customer", nil)
-		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" required></label>`, tipHTML("Project display name shown in timesheets, reports and invoices."))
-		_, _ = fmt.Fprintf(w, `<label>Project ID %s<input name="number" placeholder="auto-generated if blank"></label>`, tipHTML("Internal reference code (e.g. PR-000001). Leave blank to auto-generate."))
-		_, _ = fmt.Fprintf(w, `<label>Order number %s<input name="order_number"></label>`, tipHTML("Purchase order or contract reference number for invoice line items."))
-		_, _ = fmt.Fprintf(w, `<label>Estimate hours %s<input name="estimate_hours" value="0"></label>`, tipHTML("Total hours budgeted. Tockr shows burn against this in the project dashboard."))
-		_, _ = fmt.Fprintf(w, `<label>Budget %s<input name="budget_cents" value="0" placeholder="e.g. 1000000 = 10,000 in billing unit"></label>`, tipHTML("Monetary budget in minor currency units (cents/pennies). Triggers an alert when spend reaches the alert threshold."))
-		_, _ = fmt.Fprintf(w, `<label>Budget alert (%%) %s<input name="budget_alert_percent" value="80"></label>`, tipHTML("Send a budget warning when this percentage of the monetary budget is consumed (e.g. 80 = alert at 80%)."))
-		_, _ = fmt.Fprint(w, `<label class="wide">Comment<textarea name="comment"></textarea></label>`)
-		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible" checked> Visible %s</label>`, tipHTML("Visible projects appear in timesheet entry selectors. Uncheck to archive a project."))
-		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="private"> Private %s</label>`, tipHTML("Private projects are only visible to explicitly assigned members."))
-		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable" checked> Billable %s</label>`, tipHTML("Billable projects are included in invoice and rate calculations."))
+		action := "/projects"
+		selectedCustomer := int64(0)
+		name := ""
+		number := ""
+		orderNo := ""
+		estimateHours := int64(0)
+		budgetCents := int64(0)
+		budgetAlert := int64(80)
+		comment := ""
+		visibleChecked := ` checked`
+		privateChecked := ""
+		billableChecked := ` checked`
+		if project != nil {
+			action = fmt.Sprintf("/projects/%d", project.ID)
+			selectedCustomer = project.CustomerID
+			name = project.Name
+			number = project.Number
+			orderNo = project.OrderNo
+			estimateHours = project.EstimateSeconds / 3600
+			budgetCents = project.BudgetCents
+			budgetAlert = defaultInt(project.BudgetAlertPercent, 80)
+			comment = project.Comment
+			visibleChecked = checkedIf(project.Visible)
+			privateChecked = checkedIf(project.Private)
+			billableChecked = checkedIf(project.Billable)
+		}
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s">`, esc(action), esc(user.CSRF))
+		renderSelect(w, "Customer"+tipHTML("The client this project is billed to. Determines the billing unit and default billing contact."), "customer_id", optionList(selectors, "customer"), selectedCustomer, true, "Select a customer", nil)
+		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" value="%s" required></label>`, tipHTML("Project display name shown in timesheets, reports and invoices."), esc(name))
+		_, _ = fmt.Fprintf(w, `<label>Project ID %s<input name="number" value="%s" placeholder="auto-generated if blank"></label>`, tipHTML("Internal reference code (e.g. PR-000001). Leave blank to auto-generate."), esc(number))
+		_, _ = fmt.Fprintf(w, `<label>Order number %s<input name="order_number" value="%s"></label>`, tipHTML("Purchase order or contract reference number for invoice line items."), esc(orderNo))
+		_, _ = fmt.Fprintf(w, `<label>Estimate hours %s<input name="estimate_hours" value="%d"></label>`, tipHTML("Total hours budgeted. Tockr shows burn against this in the project dashboard."), estimateHours)
+		_, _ = fmt.Fprintf(w, `<label>Budget %s<input name="budget_cents" value="%d" placeholder="e.g. 1000000 = 10,000 in billing unit"></label>`, tipHTML("Monetary budget in minor currency units (cents/pennies). Triggers an alert when spend reaches the alert threshold."), budgetCents)
+		_, _ = fmt.Fprintf(w, `<label>Budget alert (%%) %s<input name="budget_alert_percent" value="%d"></label>`, tipHTML("Send a budget warning when this percentage of the monetary budget is consumed (e.g. 80 = alert at 80%)."), budgetAlert)
+		_, _ = fmt.Fprintf(w, `<label class="wide">Comment<textarea name="comment">%s</textarea></label>`, esc(comment))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible"%s> Visible %s</label>`, visibleChecked, tipHTML("Visible projects appear in timesheet entry selectors. Uncheck to archive a project."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="private"%s> Private %s</label>`, privateChecked, tipHTML("Private projects are only visible to explicitly assigned members."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable"%s> Billable %s</label>`, billableChecked, tipHTML("Billable projects are included in invoice and rate calculations."))
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save project</button></div></form>`)
 		return nil
 	})
 }
 
-func ActivityForm(user *NavUser, selectors *SelectorData) templ.Component {
+func ActivityForm(user *NavUser, selectors *SelectorData, activity *domain.Activity) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/activities"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-		renderSelect(w, "Project"+tipHTML("Scope this activity to one project, or leave blank to make it available across all projects."), "project_id", optionList(selectors, "project"), 0, false, "Global activity", nil)
-		_, _ = fmt.Fprintf(w, `<label>Work type %s<input name="name" required></label>`, tipHTML("Work type shown in timesheets (e.g. design review, site visit, coordination, QA/rework)."))
-		_, _ = fmt.Fprintf(w, `<label>Work Type ID %s<input name="number" placeholder="auto-generated if blank"></label>`, tipHTML("Optional reference code. Auto-generated as WT-XXXXXX if left blank."))
-		_, _ = fmt.Fprint(w, `<label class="wide">Comment<textarea name="comment"></textarea></label>`)
-		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible" checked> Visible %s</label>`, tipHTML("Visible activities appear in timesheet selectors. Uncheck to retire an activity without deleting it."))
-		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable" checked> Billable %s</label>`, tipHTML("Billable activities are included in invoice and rate calculations."))
+		action := "/activities"
+		selectedProject := int64(0)
+		name := ""
+		number := ""
+		comment := ""
+		visibleChecked := ` checked`
+		billableChecked := ` checked`
+		if activity != nil {
+			action = fmt.Sprintf("/activities/%d", activity.ID)
+			if activity.ProjectID != nil {
+				selectedProject = *activity.ProjectID
+			}
+			name = activity.Name
+			number = activity.Number
+			comment = activity.Comment
+			visibleChecked = checkedIf(activity.Visible)
+			billableChecked = checkedIf(activity.Billable)
+		}
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s">`, esc(action), esc(user.CSRF))
+		renderSelect(w, "Project"+tipHTML("Scope this activity to one project, or leave blank to make it available across all projects."), "project_id", optionList(selectors, "project"), selectedProject, false, "Global activity", nil)
+		_, _ = fmt.Fprintf(w, `<label>Work type %s<input name="name" value="%s" required></label>`, tipHTML("Work type shown in timesheets (e.g. design review, site visit, coordination, QA/rework)."), esc(name))
+		_, _ = fmt.Fprintf(w, `<label>Work Type ID %s<input name="number" value="%s" placeholder="auto-generated if blank"></label>`, tipHTML("Optional reference code. Auto-generated as WT-XXXXXX if left blank."), esc(number))
+		_, _ = fmt.Fprintf(w, `<label class="wide">Comment<textarea name="comment">%s</textarea></label>`, esc(comment))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible"%s> Visible %s</label>`, visibleChecked, tipHTML("Visible activities appear in timesheet selectors. Uncheck to retire an activity without deleting it."))
+		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable"%s> Billable %s</label>`, billableChecked, tipHTML("Billable activities are included in invoice and rate calculations."))
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save work type</button></div></form>`)
 		return nil
 	})
@@ -555,34 +607,61 @@ func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, s
 func ProjectDashboard(user *NavUser, d domain.ProjectDashboard) templ.Component {
 	return Layout("Project dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, d.Project.Name, "Project dashboard", "Monitor delivery burn, invoice readiness, and who is doing the work.")
-		_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
-		metric(w, "Tracked", duration(d.TrackedSeconds), "Total project time")
-		metric(w, "Estimate used", fmt.Sprintf("%d%%", d.EstimatePercent), "Against estimate")
-		metric(w, "Billable value", money(d.BillableCents), "Tracked value")
-		metric(w, "Budget used", fmt.Sprintf("%d%%", d.BudgetPercent), "Against fixed fee")
-		metric(w, "Unbilled time", duration(d.UnbilledSeconds), "Billable hours not yet exported")
-		metric(w, "Unbilled value", money(d.UnbilledCents), "Potential invoice value")
-		metric(w, "Billable split", duration(d.BillableSeconds), "Direct billable effort")
-		metric(w, "Internal split", duration(d.NonBillableSeconds), "Non-billable effort")
-		_, _ = fmt.Fprint(w, `</section>`)
-		if d.Alert {
-			_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold. Review burn before approving more work or sending the next invoice.</div>`)
-		}
-		_, _ = fmt.Fprint(w, `<section class="two-col section-spacer"><div class="panel"><div class="panel-head"><div><h2>Active task mix</h2><p>Where the project effort is landing now.</p></div></div>`)
-		taskRows := [][]string{}
-		for _, task := range d.TaskSummaries {
-			taskRows = append(taskRows, []string{task.Name, duration(task.TrackedSeconds), duration(task.UnbilledSeconds), humanBillable(task.Billable)})
-		}
-		dataTable(w, []string{"Task", "Tracked", "Unbilled", "Billable"}, taskRows)
-		_, _ = fmt.Fprint(w, `</div><div class="panel"><div class="panel-head"><div><h2>Key contributors</h2><p>Who is carrying the billable load on this project.</p></div></div>`)
-		contributorRows := [][]string{}
-		for _, contributor := range d.Contributors {
-			contributorRows = append(contributorRows, []string{contributor.DisplayName, duration(contributor.TrackedSeconds), duration(contributor.BillableSeconds)})
-		}
-		dataTable(w, []string{"Engineer", "Tracked", "Billable"}, contributorRows)
-		_, _ = fmt.Fprint(w, `</div></section>`)
+		renderProjectDashboardBody(w, d)
 		return nil
 	}))
+}
+
+func ProjectDashboards(user *NavUser, projects []SelectOption, selectedProjectID int64, dashboard *domain.ProjectDashboard) templ.Component {
+	return Layout("Project dashboards", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Project dashboards", "Projects / Delivery", "Open a project dashboard directly and switch between project views without going back to the projects list.")
+		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Select project</h2><p>Choose a project to open its delivery dashboard.</p></div></div><form method="get" action="/project-dashboards" class="toolbar-form selector-form">`)
+		renderSelect(w, "Project", "project_id", projects, selectedProjectID, true, "Select a project", nil)
+		_, _ = fmt.Fprint(w, `<button class="primary">Open dashboard</button></form></section>`)
+		if dashboard == nil {
+			if len(projects) == 0 {
+				_, _ = fmt.Fprint(w, `<div class="empty-state"><strong>No projects available</strong><span>Create a project first, then return here to inspect its dashboard.</span></div>`)
+				return nil
+			}
+			rows := make([][]string, 0, len(projects))
+			for _, project := range projects {
+				rows = append(rows, []string{project.Label, `<a class="table-action" href="/project-dashboards?project_id=` + esc(fmt.Sprint(project.Value)) + `">Open dashboard</a>`})
+			}
+			dataTableRaw(w, []string{"Project", "Action"}, rows)
+			return nil
+		}
+		renderProjectDashboardBody(w, *dashboard)
+		return nil
+	}))
+}
+
+func renderProjectDashboardBody(w io.Writer, d domain.ProjectDashboard) {
+	_, _ = fmt.Fprint(w, `<section class="metric-grid">`)
+	metric(w, "Tracked", duration(d.TrackedSeconds), "Total project time")
+	metric(w, "Estimate used", fmt.Sprintf("%d%%", d.EstimatePercent), "Against estimate")
+	metric(w, "Billable value", money(d.BillableCents), "Tracked value")
+	metric(w, "Budget used", fmt.Sprintf("%d%%", d.BudgetPercent), "Against fixed fee")
+	metric(w, "Unbilled time", duration(d.UnbilledSeconds), "Billable hours not yet exported")
+	metric(w, "Unbilled value", money(d.UnbilledCents), "Potential invoice value")
+	metric(w, "Billable split", duration(d.BillableSeconds), "Direct billable effort")
+	metric(w, "Internal split", duration(d.NonBillableSeconds), "Non-billable effort")
+	_, _ = fmt.Fprint(w, `</section>`)
+	if d.Alert {
+		_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold. Review burn before approving more work or sending the next invoice.</div>`)
+	}
+	_, _ = fmt.Fprint(w, `<section class="two-col section-spacer"><div class="panel"><div class="panel-head"><div><h2>Active task mix</h2><p>Where the project effort is landing now.</p></div></div>`)
+	taskRows := [][]string{}
+	for _, task := range d.TaskSummaries {
+		taskRows = append(taskRows, []string{task.Name, duration(task.TrackedSeconds), duration(task.UnbilledSeconds), humanBillable(task.Billable)})
+	}
+	dataTable(w, []string{"Task", "Tracked", "Unbilled", "Billable"}, taskRows)
+	_, _ = fmt.Fprint(w, `</div><div class="panel"><div class="panel-head"><div><h2>Key contributors</h2><p>Who is carrying the billable load on this project.</p></div></div>`)
+	contributorRows := [][]string{}
+	for _, contributor := range d.Contributors {
+		contributorRows = append(contributorRows, []string{contributor.DisplayName, duration(contributor.TrackedSeconds), duration(contributor.BillableSeconds)})
+	}
+	dataTable(w, []string{"Engineer", "Tracked", "Billable"}, contributorRows)
+	_, _ = fmt.Fprint(w, `</div></section>`)
 }
 
 func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, selectors *SelectorData, editable map[int64]bool) templ.Component {
@@ -916,11 +995,33 @@ func Webhooks(user *NavUser, hooks []domain.WebhookEndpoint) templ.Component {
 	}))
 }
 
-func UserForm(user *NavUser) templ.Component {
+func UserForm(user *NavUser, target *domain.User) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/admin/users"><input type="hidden" name="csrf" value="%s"><label>Email<input name="email" type="email" required></label><label>Username <span class="field-hint">used for login</span><input name="username" required></label><label>Display name<input name="display_name" required></label><label>Password<input name="password" type="password" required></label>`, esc(user.CSRF))
-		renderTimezoneSelect(w, "Timezone", "timezone", "UTC", true)
-		_, _ = fmt.Fprint(w, `<label>Role<select name="role"><option value="user">User</option><option value="teamlead">Team lead</option><option value="admin">Admin</option><option value="superadmin">Super admin</option></select></label><div class="form-actions"><button class="primary">Create user</button></div></form>`)
+		action := "/admin/users"
+		email := ""
+		username := ""
+		displayName := ""
+		timezone := "UTC"
+		passwordRequired := ` required`
+		passwordLabel := "Password"
+		buttonLabel := "Create user"
+		enabledChecked := ` checked`
+		selectedRoleName := string(domain.RoleUser)
+		if target != nil {
+			action = fmt.Sprintf("/admin/users/%d", target.ID)
+			email = target.Email
+			username = target.Username
+			displayName = target.DisplayName
+			timezone = defaultVal(target.Timezone, "UTC")
+			passwordRequired = ""
+			passwordLabel = `Password <span class="field-hint">leave blank to keep the current password</span>`
+			buttonLabel = "Save user"
+			enabledChecked = checkedIf(target.Enabled)
+			selectedRoleName = selectedRole(target.Roles)
+		}
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Email<input name="email" type="email" value="%s" required></label><label>Username <span class="field-hint">used for login</span><input name="username" value="%s" required></label><label>Display name<input name="display_name" value="%s" required></label><label>%s<input name="password" type="password"%s></label>`, esc(action), esc(user.CSRF), esc(email), esc(username), esc(displayName), passwordLabel, passwordRequired)
+		renderTimezoneSelect(w, "Timezone", "timezone", timezone, true)
+		_, _ = fmt.Fprintf(w, `<label>Role<select name="role"><option value="user"%s>User</option><option value="teamlead"%s>Team lead</option><option value="admin"%s>Admin</option><option value="superadmin"%s>Super admin</option></select></label><label class="check"><input type="checkbox" name="enabled" value="1"%s> Enabled</label><div class="form-actions"><button class="primary">%s</button></div></form>`, selectedAttr(selectedRoleName == string(domain.RoleUser)), selectedAttr(selectedRoleName == string(domain.RoleTeamLead)), selectedAttr(selectedRoleName == string(domain.RoleAdmin)), selectedAttr(selectedRoleName == string(domain.RoleSuperAdmin)), enabledChecked, buttonLabel)
 		if user.Permissions["manage_users"] {
 			_, _ = fmt.Fprint(w,
 				`<div class="role-guide">`+
@@ -991,6 +1092,7 @@ func renderWorkSelectors(w io.Writer, selectors *SelectorData, requireCore bool)
 func renderWorkSelectorsWithSelected(w io.Writer, selectors *SelectorData, requireCore bool, selected TimesheetPrefill) {
 	renderSelect(w, "Client"+tipHTML("The client that will ultimately be billed for the work."), "customer_id", optionList(selectors, "customer"), selected.CustomerID, requireCore, "Select a client", nil)
 	renderSelect(w, "Project"+tipHTML("The project or job number this time should land against."), "project_id", optionList(selectors, "project"), selected.ProjectID, requireCore, "Select a project", map[string]string{"data-filter-parent": "customer_id", "data-filter-attr": "customer-id"})
+	renderSelect(w, "Workstream"+tipHTML("Workstream identifies the delivery stream or discipline this effort belongs to within the selected project."), "workstream_id", optionList(selectors, "workstream"), selected.WorkstreamID, requireCore, "Select a workstream", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-ids"})
 	renderSelect(w, "Work Type"+tipHTML("Work type explains the kind of effort performed, such as design review, QA/rework, site visit, or coordination."), "activity_id", optionList(selectors, "activity"), selected.ActivityID, requireCore, "Select a work type", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 	renderSelect(w, "Task"+tipHTML("Task is the deliverable or work package being billed, such as pump sizing, P&ID review, or tender support."), "task_id", optionList(selectors, "task"), selected.TaskID, false, "No task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 }
@@ -1044,6 +1146,8 @@ func optionList(selectors *SelectorData, kind string) []SelectOption {
 		return selectors.Customers
 	case "project":
 		return selectors.Projects
+	case "workstream":
+		return selectors.Workstreams
 	case "activity":
 		return selectors.Activities
 	case "task":
@@ -1595,6 +1699,28 @@ func singularTitle(title string) string {
 	}
 }
 
+func bodyClass(title string) string {
+	clean := strings.ToLower(strings.TrimSpace(title))
+	clean = strings.ReplaceAll(clean, "&", "and")
+	clean = strings.ReplaceAll(clean, " ", "-")
+	clean = strings.ReplaceAll(clean, "/", "-")
+	for strings.Contains(clean, "--") {
+		clean = strings.ReplaceAll(clean, "--", "-")
+	}
+	return "page-" + strings.Trim(clean, "-")
+}
+
+func selectedRole(roles []domain.Role) string {
+	for _, role := range []domain.Role{domain.RoleSuperAdmin, domain.RoleAdmin, domain.RoleTeamLead, domain.RoleUser} {
+		for _, assigned := range roles {
+			if assigned == role {
+				return string(role)
+			}
+		}
+	}
+	return string(domain.RoleUser)
+}
+
 func FormatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -1622,7 +1748,11 @@ func reportHeading(group string) string {
 }
 
 func calendarEntryLabel(entry domain.Timesheet, selectors *SelectorData) string {
-	parts := []string{label(selectors.ProjectLabels, entry.ProjectID), label(selectors.ActivityLabels, entry.ActivityID)}
+	parts := []string{label(selectors.ProjectLabels, entry.ProjectID)}
+	if entry.WorkstreamID != nil {
+		parts = append(parts, label(selectors.WorkstreamLabels, *entry.WorkstreamID))
+	}
+	parts = append(parts, label(selectors.ActivityLabels, entry.ActivityID))
 	if entry.TaskID != nil {
 		parts = append(parts, label(selectors.TaskLabels, *entry.TaskID))
 	}
@@ -1639,6 +1769,7 @@ func recentWorkLabel(item domain.DashboardRecentWork, selectors *SelectorData) s
 	parts := []string{
 		label(selectors.CustomerLabels, item.CustomerID),
 		label(selectors.ProjectLabels, item.ProjectID),
+		labelPtr(selectors.WorkstreamLabels, item.WorkstreamID),
 		label(selectors.ActivityLabels, item.ActivityID),
 	}
 	if item.TaskID != nil {
@@ -1658,7 +1789,7 @@ func timesheetEditHref(id int64) string {
 }
 
 func timesheetActions(entry domain.Timesheet, editable map[int64]bool) string {
-	actions := `<a class="table-action small" href="` + esc(timesheetPrefillHref(domain.DashboardRecentWork{CustomerID: entry.CustomerID, ProjectID: entry.ProjectID, ActivityID: entry.ActivityID, TaskID: entry.TaskID, Description: entry.Description, StartedAt: entry.StartedAt, DurationSeconds: entry.DurationSeconds, Billable: entry.Billable, Exported: entry.Exported})) + `">Duplicate</a>`
+	actions := `<a class="table-action small" href="` + esc(timesheetPrefillHref(domain.DashboardRecentWork{CustomerID: entry.CustomerID, ProjectID: entry.ProjectID, WorkstreamID: entry.WorkstreamID, ActivityID: entry.ActivityID, TaskID: entry.TaskID, Description: entry.Description, StartedAt: entry.StartedAt, DurationSeconds: entry.DurationSeconds, Billable: entry.Billable, Exported: entry.Exported})) + `">Duplicate</a>`
 	if editable[entry.ID] {
 		actions += ` <a class="table-action small" href="` + esc(timesheetEditHref(entry.ID)) + `">Edit</a>`
 	}
@@ -1669,6 +1800,9 @@ func timesheetPrefillHref(item domain.DashboardRecentWork) string {
 	values := url.Values{}
 	values.Set("customer_id", fmt.Sprint(item.CustomerID))
 	values.Set("project_id", fmt.Sprint(item.ProjectID))
+	if item.WorkstreamID != nil {
+		values.Set("workstream_id", fmt.Sprint(*item.WorkstreamID))
+	}
 	values.Set("activity_id", fmt.Sprint(item.ActivityID))
 	if item.TaskID != nil {
 		values.Set("task_id", fmt.Sprint(*item.TaskID))
@@ -1749,8 +1883,9 @@ func Tasks(user *NavUser, tasks []domain.Task, selectors *SelectorData, canManag
 					yesNo(task.Visible), yesNo(task.Billable),
 					task.EstimateSeconds/3600)
 				if canManage {
-					_, _ = fmt.Fprintf(w, `<td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/tasks/%d"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Number<input name="number" value="%s"></label><label>Estimate hours<input name="estimate_hours" type="number" value="%d"></label><label class="check"><input type="checkbox" name="visible" value="1"%s> Visible</label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label><button class="primary small">Save</button></form></details><form method="post" action="/tasks/%d/archive" onsubmit="return confirm('Archive this task?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Archive</button></form></td>`,
+					_, _ = fmt.Fprintf(w, `<td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/tasks/%d"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="project_id" value="%d"><label>Name<input name="name" value="%s" required></label><label>Number<input name="number" value="%s"></label><label>Estimate hours<input name="estimate_hours" type="number" value="%d"></label><label class="check"><input type="checkbox" name="visible" value="1"%s> Visible</label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label><button class="primary small">Save</button></form></details><form method="post" action="/tasks/%d/archive" onsubmit="return confirm('Archive this task?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Archive</button></form></td>`,
 						task.ID, esc(user.CSRF),
+						task.ProjectID,
 						esc(task.Name), esc(task.Number),
 						task.EstimateSeconds/3600,
 						checkedIf(task.Visible), checkedIf(task.Billable),

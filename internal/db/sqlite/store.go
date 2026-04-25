@@ -33,20 +33,21 @@ type Session struct {
 }
 
 type TimesheetFilter struct {
-	WorkspaceID int64
-	UserID      int64
-	CustomerID  int64
-	ProjectID   int64
-	ProjectIDs  []int64
-	ActivityID  int64
-	TaskID      int64
-	GroupID     int64
-	Begin       *time.Time
-	End         *time.Time
-	Exported    *bool
-	Billable    *bool
-	Page        int
-	Size        int
+	WorkspaceID  int64
+	UserID       int64
+	CustomerID   int64
+	ProjectID    int64
+	ProjectIDs   []int64
+	WorkstreamID int64
+	ActivityID   int64
+	TaskID       int64
+	GroupID      int64
+	Begin        *time.Time
+	End          *time.Time
+	Exported     *bool
+	Billable     *bool
+	Page         int
+	Size         int
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -418,6 +419,78 @@ func (s *Store) CreateUser(ctx context.Context, u domain.User, password string, 
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, u.OrganizationID).Scan(&workspaceID); err == nil && workspaceID > 0 {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(?,?,?,?)`, workspaceID, id, string(workspaceRoleFromLegacy(roles)), now); err != nil {
 			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) UpdateUser(ctx context.Context, u domain.User, password string, roles []domain.Role) error {
+	if u.ID == 0 {
+		return errors.New("user id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if u.OrganizationID == 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT organization_id FROM users WHERE id=?`, u.ID).Scan(&u.OrganizationID); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE users SET email=?, username=?, display_name=?, timezone=?, enabled=? WHERE id=? AND organization_id=?`,
+		strings.TrimSpace(u.Email), strings.TrimSpace(u.Username), strings.TrimSpace(u.DisplayName), defaultString(strings.TrimSpace(u.Timezone), "UTC"), boolInt(u.Enabled), u.ID, u.OrganizationID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	if strings.TrimSpace(password) != "" {
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=? WHERE id=?`, hash, u.ID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_roles WHERE user_id=?`, u.ID); err != nil {
+		return err
+	}
+	for _, role := range roles {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO user_roles(user_id, role_id) SELECT ?, id FROM roles WHERE name=?`, u.ID, string(role)); err != nil {
+			return err
+		}
+	}
+	if orgRole := organizationRoleFromLegacy(roles); orgRole != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO organization_members(organization_id, user_id, role, created_at) VALUES(?,?,?,?) ON CONFLICT(organization_id, user_id) DO UPDATE SET role=excluded.role`, u.OrganizationID, u.ID, string(orgRole), utcNow()); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM organization_members WHERE organization_id=? AND user_id=?`, u.OrganizationID, u.ID); err != nil {
+			return err
+		}
+	}
+	workspaceRole := workspaceRoleFromLegacy(roles)
+	result, err = tx.ExecContext(ctx, `UPDATE workspace_members SET role=? WHERE user_id=? AND workspace_id IN (SELECT id FROM workspaces WHERE organization_id=?)`, string(workspaceRole), u.ID, u.OrganizationID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		var workspaceID int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, u.OrganizationID).Scan(&workspaceID); err == nil && workspaceID > 0 {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(?,?,?,?)`, workspaceID, u.ID, string(workspaceRole), utcNow()); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -1745,7 +1818,7 @@ func (s *Store) CreateTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 }
 
 func (s *Store) Timesheet(ctx context.Context, id int64) (*domain.Timesheet, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, workstream_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets WHERE id=?`, id)
 	item, err := scanTimesheet(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1792,8 +1865,8 @@ func (s *Store) UpdateTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 	if t.EndedAt != nil {
 		ended = formatTime(*t.EndedAt)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE timesheets SET customer_id=?, project_id=?, activity_id=?, task_id=?, started_at=?, ended_at=?, timezone=?, duration_seconds=?, break_seconds=?, rate_cents=?, internal_rate_cents=?, billable=?, description=?, updated_at=? WHERE id=? AND workspace_id=?`,
-		t.CustomerID, t.ProjectID, t.ActivityID, t.TaskID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), strings.TrimSpace(t.Description), utcNow(), t.ID, t.WorkspaceID)
+	result, err := tx.ExecContext(ctx, `UPDATE timesheets SET customer_id=?, project_id=?, workstream_id=?, activity_id=?, task_id=?, started_at=?, ended_at=?, timezone=?, duration_seconds=?, break_seconds=?, rate_cents=?, internal_rate_cents=?, billable=?, description=?, updated_at=? WHERE id=? AND workspace_id=?`,
+		t.CustomerID, t.ProjectID, t.WorkstreamID, t.ActivityID, t.TaskID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), strings.TrimSpace(t.Description), utcNow(), t.ID, t.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -1837,8 +1910,8 @@ func (s *Store) insertTimesheet(ctx context.Context, t *domain.Timesheet, tagNam
 	if t.EndedAt != nil {
 		ended = formatTime(*t.EndedAt)
 	}
-	res, err := tx.ExecContext(ctx, `INSERT INTO timesheets(workspace_id, user_id, customer_id, project_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.ActivityID, t.TaskID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), boolInt(t.Exported), t.Description, now, now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO timesheets(workspace_id, user_id, customer_id, project_id, workstream_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.WorkspaceID, t.UserID, t.CustomerID, t.ProjectID, t.WorkstreamID, t.ActivityID, t.TaskID, formatTime(t.StartedAt), ended, defaultString(t.Timezone, "UTC"), t.DurationSeconds, t.BreakSeconds, t.RateCents, t.InternalRateCents, boolInt(t.Billable), boolInt(t.Exported), t.Description, now, now)
 	if err != nil {
 		return err
 	}
@@ -1933,6 +2006,10 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 		where = append(where, "project_id=?")
 		args = append(args, f.ProjectID)
 	}
+	if f.WorkstreamID > 0 {
+		where = append(where, "workstream_id=?")
+		args = append(args, f.WorkstreamID)
+	}
 	if len(f.ProjectIDs) > 0 {
 		placeholders := make([]string, len(f.ProjectIDs))
 		for i, id := range f.ProjectIDs {
@@ -1974,7 +2051,7 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets `+whereSQL+` ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, workstream_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets `+whereSQL+` ORDER BY started_at DESC LIMIT ? OFFSET ?`,
 		append(args, f.Size, (f.Page-1)*f.Size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
@@ -2666,8 +2743,8 @@ func scanTimesheet(row scanner) (domain.Timesheet, error) {
 	var t domain.Timesheet
 	var started, created, updated string
 	var ended sql.NullString
-	var internal, task sql.NullInt64
-	err := row.Scan(&t.ID, &t.WorkspaceID, &t.UserID, &t.CustomerID, &t.ProjectID, &t.ActivityID, &task, &started, &ended, &t.Timezone, &t.DurationSeconds, &t.BreakSeconds, &t.RateCents, &internal, &t.Billable, &t.Exported, &t.Description, &created, &updated)
+	var internal, workstream, task sql.NullInt64
+	err := row.Scan(&t.ID, &t.WorkspaceID, &t.UserID, &t.CustomerID, &t.ProjectID, &workstream, &t.ActivityID, &task, &started, &ended, &t.Timezone, &t.DurationSeconds, &t.BreakSeconds, &t.RateCents, &internal, &t.Billable, &t.Exported, &t.Description, &created, &updated)
 	if err != nil {
 		return t, err
 	}
@@ -2676,6 +2753,7 @@ func scanTimesheet(row scanner) (domain.Timesheet, error) {
 		v := parseTime(ended.String)
 		t.EndedAt = &v
 	}
+	t.WorkstreamID = nullableInt(workstream)
 	t.TaskID = nullableInt(task)
 	t.InternalRateCents = nullableInt(internal)
 	t.CreatedAt = parseTime(created)

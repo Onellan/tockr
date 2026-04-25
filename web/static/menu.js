@@ -88,7 +88,13 @@
             return;
           }
           var optionValue = option.getAttribute("data-" + optionAttr);
-          var visible = !parentValue || !optionValue || optionValue === parentValue;
+      var matchesParent = optionValue === parentValue;
+      if (!matchesParent && optionValue && optionValue.indexOf(",") !== -1) {
+      matchesParent = optionValue.split(",").map(function (value) {
+        return value.trim();
+      }).indexOf(parentValue) !== -1;
+      }
+      var visible = !parentValue || !optionValue || matchesParent;
           option.hidden = !visible;
           option.disabled = !visible;
         });

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"tockr/internal/db/sqlite"
 	"tockr/internal/domain"
 )
 
@@ -1093,6 +1094,35 @@ func TestProjectDashboardNotFoundForInvalidID(t *testing.T) {
 	}
 }
 
+func TestProjectDashboardsHubRendersAndLoadsSelection(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	_, project, _, _ := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	rec := getWithCookie(app, "/project-dashboards", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /project-dashboards returned %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{"Project dashboards", project.Name, "Open dashboard"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("project dashboards hub missing %q", expected)
+		}
+	}
+
+	rec = getWithCookie(app, "/project-dashboards?project_id="+strconv.FormatInt(project.ID, 10), cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /project-dashboards?project_id= returned %d", rec.Code)
+	}
+	body = rec.Body.String()
+	for _, expected := range []string{project.Name, "Tracked", "Key contributors"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("selected project dashboard missing %q", expected)
+		}
+	}
+}
+
 // ─── Task Archive ─────────────────────────────────────────────────────────────
 
 func TestTaskArchive(t *testing.T) {
@@ -1136,6 +1166,35 @@ func TestCreateCustomer(t *testing.T) {
 	}
 }
 
+func TestUpdateCustomer(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	customer, _, _, _ := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/customers", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	rec := postFormWithCookie(app, "/customers/"+strconv.FormatInt(customer.ID, 10), cookie, url.Values{
+		"csrf":     {csrf},
+		"name":     {"Updated Customer"},
+		"company":  {"Updated Co"},
+		"email":    {"billing@example.com"},
+		"currency": {"EUR"},
+		"timezone": {"UTC"},
+		"visible":  {"on"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("update customer returned %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Customer(context.Background(), customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil || updated.Name != "Updated Customer" || updated.Company != "Updated Co" || updated.Email != "billing@example.com" || updated.Currency != "EUR" || updated.Billable {
+		t.Fatalf("customer not updated correctly: %+v", updated)
+	}
+}
+
 func TestCreateProjectWithAutoNumber(t *testing.T) {
 	app, store := testApp(t)
 	defer store.Close()
@@ -1168,6 +1227,39 @@ func TestCreateProjectWithAutoNumber(t *testing.T) {
 	}
 }
 
+func TestUpdateProject(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	customer, project, _, _ := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/projects", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	rec := postFormWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10), cookie, url.Values{
+		"csrf":                 {csrf},
+		"customer_id":          {strconv.FormatInt(customer.ID, 10)},
+		"name":                 {"Updated Project"},
+		"number":               {"PR-UPDATED"},
+		"order_number":         {"PO-42"},
+		"estimate_hours":       {"12"},
+		"budget_cents":         {"420000"},
+		"budget_alert_percent": {"75"},
+		"visible":              {"on"},
+		"private":              {"on"},
+		"billable":             {"on"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("update project returned %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Project(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil || updated.Name != "Updated Project" || updated.Number != "PR-UPDATED" || updated.OrderNo != "PO-42" || !updated.Private || updated.EstimateSeconds != 12*3600 || updated.BudgetCents != 420000 || updated.BudgetAlertPercent != 75 {
+		t.Fatalf("project not updated correctly: %+v", updated)
+	}
+}
+
 func TestCreateActivity(t *testing.T) {
 	app, store := testApp(t)
 	defer store.Close()
@@ -1186,6 +1278,33 @@ func TestCreateActivity(t *testing.T) {
 	}
 	if !strings.Contains(getWithCookie(app, "/activities", cookie).Body.String(), "New Activity") {
 		t.Fatal("activities page should show created activity")
+	}
+}
+
+func TestUpdateActivity(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	_, project, activity, _ := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/activities", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	rec := postFormWithCookie(app, "/activities/"+strconv.FormatInt(activity.ID, 10), cookie, url.Values{
+		"csrf":       {csrf},
+		"project_id": {strconv.FormatInt(project.ID, 10)},
+		"name":       {"Updated Activity"},
+		"number":     {"WT-900"},
+		"visible":    {"on"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("update activity returned %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Activity(context.Background(), activity.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil || updated.Name != "Updated Activity" || updated.Number != "WT-900" || updated.Billable {
+		t.Fatalf("activity not updated correctly: %+v", updated)
 	}
 }
 
@@ -1350,6 +1469,97 @@ func TestCreateUser(t *testing.T) {
 	}
 	if !strings.Contains(getWithCookie(app, "/admin/users", cookie).Body.String(), "newuser@example.com") {
 		t.Fatal("users page should show created user")
+	}
+}
+
+func TestUpdateUser(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, domain.User{
+		Email: "editme@example.com", Username: "editme", DisplayName: "Edit Me", Timezone: "UTC", Enabled: true,
+	}, "edit12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.FindUserByEmail(ctx, "editme@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/admin/users", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	rec := postFormWithCookie(app, "/admin/users/"+strconv.FormatInt(user.ID, 10), cookie, url.Values{
+		"csrf":         {csrf},
+		"email":        {"updated.user@example.com"},
+		"username":     {"updateduser"},
+		"display_name": {"Updated User"},
+		"role":         {"teamlead"},
+		"timezone":     {"Europe/London"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("update user returned %d: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.FindUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil || updated.Email != "updated.user@example.com" || updated.Username != "updateduser" || updated.DisplayName != "Updated User" || updated.Timezone != "Europe/London" || updated.Enabled {
+		t.Fatalf("user not updated correctly: %+v", updated)
+	}
+	if len(updated.Roles) != 1 || updated.Roles[0] != domain.RoleTeamLead {
+		t.Fatalf("user roles = %v, want [teamlead]", updated.Roles)
+	}
+}
+
+func TestTimesheetRequiresConfiguredWorkstream(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	customer, project, activity, task := seedSelectorFixtures(t, store)
+	workstream := &domain.Workstream{WorkspaceID: 1, Name: "Delivery", Visible: true}
+	if err := store.UpsertWorkstream(ctx, workstream); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: project.ID, WorkstreamID: workstream.ID, Active: true}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/timesheets", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+	start := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02T15:04")
+	end := time.Now().UTC().Add(-1 * time.Hour).Format("2006-01-02T15:04")
+	baseForm := url.Values{
+		"csrf":          {csrf},
+		"customer_id":   {strconv.FormatInt(customer.ID, 10)},
+		"project_id":    {strconv.FormatInt(project.ID, 10)},
+		"activity_id":   {strconv.FormatInt(activity.ID, 10)},
+		"task_id":       {strconv.FormatInt(task.ID, 10)},
+		"start":         {start},
+		"end":           {end},
+		"break_minutes": {"0"},
+		"description":   {"Workstream-bound entry"},
+	}
+
+	rec := postFormWithCookie(app, "/timesheets", cookie, baseForm)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("timesheet without workstream returned %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "workstream is required") {
+		t.Fatalf("timesheet validation message missing workstream requirement: %s", rec.Body.String())
+	}
+
+	baseForm.Set("workstream_id", strconv.FormatInt(workstream.ID, 10))
+	rec = postFormWithCookie(app, "/timesheets", cookie, baseForm)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("timesheet with workstream returned %d: %s", rec.Code, rec.Body.String())
+	}
+	items, _, err := store.ListTimesheets(ctx, sqlite.TimesheetFilter{WorkspaceID: 1, ProjectID: project.ID, Page: 1, Size: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 || items[0].WorkstreamID == nil || *items[0].WorkstreamID != workstream.ID {
+		t.Fatalf("timesheet not saved with workstream: %+v", items)
 	}
 }
 

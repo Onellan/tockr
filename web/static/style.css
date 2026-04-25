@@ -485,6 +485,11 @@ select {
   padding: var(--space-5) 0 48px;
 }
 
+.page-projects .content,
+.page-project-dashboards .content {
+  width: min(1440px, calc(100% - 48px));
+}
+
 .page-head {
   display: flex;
   justify-content: space-between;
@@ -1440,7 +1445,7 @@ label > .field-hint {
   font-size: 22px;
 }
 
-@media (max-width: 920px) {
+@media (max-width: 920px) and (hover: none), (max-width: 920px) and (pointer: coarse) {
   body.nav-open {
     overflow: hidden;
   }

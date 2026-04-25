@@ -40,7 +40,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
+	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/project-dashboards", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -51,6 +51,10 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	body := getWithCookie(app, "/timesheets", cookie).Body.String()
 	if !strings.Contains(body, `class="nav-link active" aria-current="page" href="/timesheets"`) {
 		t.Fatal("expected timesheets nav item to be active")
+	}
+	projectBody := getWithCookie(app, "/project-dashboards", cookie).Body.String()
+	if !strings.Contains(projectBody, `href="/project-dashboards"`) {
+		t.Fatal("expected project dashboards link in primary navigation")
 	}
 
 	body = getWithCookie(app, "/reports?group=customer", cookie).Body.String()
@@ -106,7 +110,7 @@ func TestUIOutlierPagesUseSharedPatternsAndNoDeadActions(t *testing.T) {
 	}
 
 	for route, expected := range map[string][]string{
-		"/tasks":                {`class="panel form-panel"`, `class="table-card"`, `class="inline-edit"`},
+		"/tasks":                {`class="panel form-panel"`, `class="table-card"`, `class="inline-edit"`, `name="project_id" value="`},
 		"/reports/utilization":  {`class="panel form-panel"`, `class="toolbar-form"`, `class="empty-state"`},
 		"/admin/exchange-rates": {`class="page-head"`, `class="panel form-panel"`, `class="empty-state"`},
 		"/admin/recalculate":    {`class="page-head"`, `class="panel form-panel"`, `class="toolbar-form selector-form"`},
@@ -149,7 +153,8 @@ func TestResponsiveNavigationMarkupAndAssets(t *testing.T) {
 
 	css := getPublic(app, "/static/style.css").Body.String()
 	for _, expected := range []string{
-		`@media (max-width: 920px)`,
+		`@media (max-width: 920px) and (hover: none), (max-width: 920px) and (pointer: coarse)`,
+		`.page-projects .content`,
 		`.app-shell.nav-open .sidebar`,
 		`transform: translateX(-105%)`,
 		`body.nav-open`,
@@ -169,6 +174,7 @@ func TestResponsiveNavigationMarkupAndAssets(t *testing.T) {
 	for _, expected := range []string{
 		`function setupMobileNav()`,
 		`[data-mobile-nav-toggle]`,
+		`optionValue.split(",")`,
 		`nav-open`,
 	} {
 		if !strings.Contains(js, expected) {
@@ -874,10 +880,14 @@ func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing
 		"Buildout",
 		"Implementation",
 		"Launch task",
-		"Add more time",
 	} {
 		if !strings.Contains(calendar, expected) {
 			t.Fatalf("calendar missing %q", expected)
+		}
+	}
+	if weekday := time.Now().UTC().Weekday(); weekday != time.Saturday && weekday != time.Sunday {
+		if !strings.Contains(calendar, "Add more time") {
+			t.Fatal("calendar missing weekday follow-up action")
 		}
 	}
 

@@ -287,6 +287,7 @@ type Timesheet struct {
 	UserID            int64
 	CustomerID        int64
 	ProjectID         int64
+	WorkstreamID      *int64
 	ActivityID        int64
 	TaskID            *int64
 	StartedAt         time.Time
@@ -412,6 +413,7 @@ type DashboardRecentWork struct {
 	TimesheetID     int64
 	CustomerID      int64
 	ProjectID       int64
+	WorkstreamID    *int64
 	ActivityID      int64
 	TaskID          *int64
 	Description     string
