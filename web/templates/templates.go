@@ -48,20 +48,23 @@ type SelectOption struct {
 }
 
 type TimesheetPrefill struct {
-	EntryID      int64
-	CustomerID   int64
-	ProjectID    int64
-	WorkstreamID int64
-	ActivityID   int64
-	TaskID       int64
-	Date         string
-	Start        string
-	End          string
-	BreakMinutes string
-	Tags         string
-	Description  string
-	Billable     bool
-	Message      string
+	EntryID       int64
+	EntryMode     string
+	CustomerID    int64
+	ProjectID     int64
+	WorkstreamID  int64
+	ActivityID    int64
+	TaskID        int64
+	Date          string
+	ManualHours   string
+	ManualMinutes string
+	Start         string
+	End           string
+	BreakMinutes  string
+	Tags          string
+	Description   string
+	Billable      bool
+	Message       string
 }
 
 type SelectorData struct {
@@ -238,11 +241,11 @@ func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Ti
 		metric(w, "Active timers", fmt.Sprint(summary.Stats["active_timers"]), "Currently running across workspace")
 		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Quick log and timer <span class="tooltip-icon" data-tooltip="Use this for the work package you are on right now. Choose the client, project, work type, and optional task before starting or logging time.">i</span></h2><p>Start a live timer or jump into manual entry with the same engineering work classification.</p></div></div>`)
 		if active != nil {
-			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Your current timer is active. Stop it when the work package is complete.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button><a class="ghost-button" href="/timesheets">Open weekly review</a></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
+			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Your current timer is active. Stop it when the work package is complete.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button><a class="ghost-button" href="/timesheets?entry_mode=manual">Quick log</a><a class="ghost-button" href="/timesheets">Open weekly review</a></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
 		} else {
 			_, _ = fmt.Fprintf(w, `<form method="post" action="/timesheets/start" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 			renderWorkSelectors(w, selectors, true)
-			_, _ = fmt.Fprint(w, `<input name="description" placeholder="Describe the current engineering task or deliverable"><button class="primary">Start timer</button><a class="ghost-button" href="/timesheets">Manual entry</a></form>`)
+			_, _ = fmt.Fprint(w, `<input name="description" placeholder="Describe the current engineering task or deliverable"><button class="primary">Start timer</button><a class="ghost-button" href="/timesheets?entry_mode=manual">Quick log</a></form>`)
 		}
 		_, _ = fmt.Fprint(w, `<div class="summary-list section-spacer">`)
 		if len(summary.RecentWork) == 0 {
@@ -499,8 +502,9 @@ func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorDa
 		}
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Log engineering time</h2><p>Choose the client, project, work type, and optional task before saving the entry.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderWorkSelectorsWithSelected(w, selectors, true, prefill)
-		_, _ = fmt.Fprintf(w, `<label>Start<input type="datetime-local" name="start" value="%s" required></label><label>End<input type="datetime-local" name="end" value="%s" required></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input name="break_minutes" value="%s"></label><label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
-			esc(prefill.Start), esc(prefill.End), esc(defaultVal(prefill.BreakMinutes, "0")), esc(prefill.Tags), esc(prefill.Description))
+		renderTimesheetTimeFields(w, prefill, false)
+		_, _ = fmt.Fprintf(w, `<label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
+			esc(prefill.Tags), esc(prefill.Description))
 		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Recent and repeat work</h2><p>Reuse common consulting tasks without rebuilding the full selection.</p></div></div><div class="summary-list">`)
 		if len(recent) == 0 && len(favorites) == 0 {
 			_, _ = fmt.Fprint(w, `<div><span>No recent work yet</span><strong>Recent entries and favorites will appear here after you start logging time.</strong></div>`)
@@ -561,10 +565,54 @@ func EditTimesheet(user *NavUser, selectors *SelectorData, prefill TimesheetPref
 		}
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Edit timesheet entry</h2><p>Adjust the entry details, then save or cancel back to the weekly timesheet view.</p></div></div><form method="post" action="/timesheets/%d" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, prefill.EntryID, esc(user.CSRF))
 		renderWorkSelectorsWithSelected(w, selectors, true, prefill)
-		_, _ = fmt.Fprintf(w, `<label>Start<input type="datetime-local" name="start" value="%s" required></label><label>End<input type="datetime-local" name="end" value="%s" required></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input name="break_minutes" value="%s"></label><label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Save changes</button><a class="ghost-button" href="/timesheets">Cancel</a></div></form></section>`,
-			esc(prefill.Start), esc(prefill.End), esc(defaultVal(prefill.BreakMinutes, "0")), esc(prefill.Tags), checkedIf(prefill.Billable), esc(prefill.Description))
+		renderTimesheetTimeFields(w, prefill, true)
+		_, _ = fmt.Fprintf(w, `<label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Save changes</button><a class="ghost-button" href="/timesheets">Cancel</a></div></form></section>`,
+			esc(prefill.Tags), checkedIf(prefill.Billable), esc(prefill.Description))
 		return nil
 	}))
+}
+
+func renderTimesheetTimeFields(w io.Writer, prefill TimesheetPrefill, editing bool) {
+	mode := timesheetEntryMode(prefill.EntryMode)
+	manualHidden := ""
+	rangeHidden := ` hidden`
+	if mode == "range" {
+		manualHidden = ` hidden`
+		rangeHidden = ""
+	}
+	manualChecked := checkedIf(mode == "manual")
+	rangeChecked := checkedIf(mode == "range")
+	if prefill.Date == "" {
+		prefill.Date = time.Now().UTC().Format("2006-01-02")
+	}
+	if prefill.ManualHours == "" {
+		prefill.ManualHours = "0"
+	}
+	if prefill.ManualMinutes == "" {
+		prefill.ManualMinutes = "0"
+	}
+	if prefill.BreakMinutes == "" {
+		prefill.BreakMinutes = "0"
+	}
+	rangeIntro := "Use exact start and end times."
+	if editing {
+		rangeIntro = "Keep or adjust exact start and end times."
+	}
+	_, _ = fmt.Fprint(w, `<div class="entry-mode wide" data-entry-mode><span class="entry-mode-label">Entry mode</span><div class="segmented-control" role="radiogroup" aria-label="Timesheet entry mode">`)
+	_, _ = fmt.Fprintf(w, `<label><input type="radio" name="entry_mode" value="manual"%s><span>Date + duration</span></label>`, manualChecked)
+	_, _ = fmt.Fprintf(w, `<label><input type="radio" name="entry_mode" value="range"%s><span>Start + end</span></label>`, rangeChecked)
+	_, _ = fmt.Fprint(w, `</div></div>`)
+	_, _ = fmt.Fprintf(w, `<fieldset class="entry-mode-panel wide" data-entry-mode-panel="manual"%s><legend>Manual duration</legend><p>Date, hours, and minutes.</p><div class="entry-duration-grid"><label>Date<input type="date" name="date" value="%s" data-required="true"></label><label>Hours<input type="number" name="hours" min="0" step="1" inputmode="numeric" value="%s" data-required="true"></label><label>Minutes<input type="number" name="minutes" min="0" max="59" step="1" inputmode="numeric" value="%s" data-required="true"></label></div></fieldset>`,
+		manualHidden, esc(prefill.Date), esc(prefill.ManualHours), esc(prefill.ManualMinutes))
+	_, _ = fmt.Fprintf(w, `<fieldset class="entry-mode-panel wide" data-entry-mode-panel="range"%s><legend>Start and end</legend><p>%s</p><div class="entry-duration-grid"><label>Start<input type="datetime-local" name="start" value="%s" data-required="true"></label><label>End<input type="datetime-local" name="end" value="%s" data-required="true"></label><label>Break minutes <span class="field-hint">Deducted from the total duration.</span><input type="number" name="break_minutes" min="0" step="1" inputmode="numeric" value="%s"></label></div></fieldset>`,
+		rangeHidden, esc(rangeIntro), esc(prefill.Start), esc(prefill.End), esc(prefill.BreakMinutes))
+}
+
+func timesheetEntryMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "range") {
+		return "range"
+	}
+	return "manual"
 }
 
 func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, saved []domain.SavedReport, selectors *SelectorData) templ.Component {

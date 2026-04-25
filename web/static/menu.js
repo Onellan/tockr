@@ -110,6 +110,44 @@
 
   setupDependentSelectors();
 
+  function setupTimesheetEntryModes() {
+    document.querySelectorAll("[data-entry-mode]").forEach(function (root) {
+      var form = root.closest("form");
+      if (!form) return;
+      var radios = Array.from(root.querySelectorAll('input[name="entry_mode"]'));
+      var panels = Array.from(form.querySelectorAll("[data-entry-mode-panel]"));
+      if (!radios.length || !panels.length) return;
+
+      function selectedMode() {
+        var checked = radios.find(function (radio) {
+          return radio.checked;
+        });
+        return checked ? checked.value : "manual";
+      }
+
+      function refresh() {
+        var mode = selectedMode();
+        panels.forEach(function (panel) {
+          var active = panel.getAttribute("data-entry-mode-panel") === mode;
+          panel.hidden = !active;
+          panel.querySelectorAll("input, select, textarea").forEach(function (input) {
+            input.disabled = !active;
+            if (input.hasAttribute("data-required")) {
+              input.required = active;
+            }
+          });
+        });
+      }
+
+      radios.forEach(function (radio) {
+        radio.addEventListener("change", refresh);
+      });
+      refresh();
+    });
+  }
+
+  setupTimesheetEntryModes();
+
   function setupMobileNav() {
     var shell = document.querySelector("[data-app-shell]");
     var sidebar = document.getElementById("app-sidebar");
