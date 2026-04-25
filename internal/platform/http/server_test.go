@@ -910,8 +910,18 @@ func TestTimesheetEntryModesRenderDefaultsAndDashboardQuickLog(t *testing.T) {
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
 	dashboard := getWithCookie(app, "/", cookie).Body.String()
-	if !strings.Contains(dashboard, `href="/timesheets?entry_mode=manual"`) || !strings.Contains(dashboard, `Quick log`) {
-		t.Fatal("dashboard quick log should open manual entry by default")
+	for _, expected := range []string{
+		`action="/timesheets"`,
+		`name="entry_mode" value="manual"`,
+		`name="date"`,
+		`name="hours"`,
+		`name="minutes"`,
+		`Quick log`,
+		`formaction="/timesheets/start"`,
+	} {
+		if !strings.Contains(dashboard, expected) {
+			t.Fatalf("dashboard quick log should render manual capture field %q", expected)
+		}
 	}
 
 	body := getWithCookie(app, "/timesheets", cookie).Body.String()

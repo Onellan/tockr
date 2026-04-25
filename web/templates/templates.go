@@ -239,14 +239,11 @@ func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Ti
 		metric(w, "Week to date", duration(summary.WeekTracked), "Current consulting week")
 		metric(w, "Missing this week", duration(summary.MissingSeconds), "Hours still to capture")
 		metric(w, "Active timers", fmt.Sprint(summary.Stats["active_timers"]), "Currently running across workspace")
-		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Quick log and timer <span class="tooltip-icon" data-tooltip="Use this for the work package you are on right now. Choose the client, project, work type, and optional task before starting or logging time.">i</span></h2><p>Start a live timer or jump into manual entry with the same engineering work classification.</p></div></div>`)
+		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Quick log and timer <span class="tooltip-icon" data-tooltip="Use this for the work package you are on right now. Choose the client, project, work type, and optional task before starting or logging time.">i</span></h2><p>Log a date and duration quickly, or start a live timer with the same work classification.</p></div></div>`)
 		if active != nil {
-			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Your current timer is active. Stop it when the work package is complete.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button><a class="ghost-button" href="/timesheets?entry_mode=manual">Quick log</a><a class="ghost-button" href="/timesheets">Open weekly review</a></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
-		} else {
-			_, _ = fmt.Fprintf(w, `<form method="post" action="/timesheets/start" class="compact-form selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
-			renderWorkSelectors(w, selectors, true)
-			_, _ = fmt.Fprint(w, `<input name="description" placeholder="Describe the current engineering task or deliverable"><button class="primary">Start timer</button><a class="ghost-button" href="/timesheets?entry_mode=manual">Quick log</a></form>`)
+			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Your current timer is active. Stop it when the work package is complete.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button><a class="ghost-button" href="/timesheets">Open weekly review</a></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
 		}
+		renderDashboardQuickLogForm(w, user, selectors, active == nil)
 		_, _ = fmt.Fprint(w, `<div class="summary-list section-spacer">`)
 		if len(summary.RecentWork) == 0 {
 			_, _ = fmt.Fprint(w, `<div><span>No recent work yet</span><strong>Your recently tracked tasks will appear here for quick reuse.</strong></div>`)
@@ -284,6 +281,17 @@ func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Ti
 		_, _ = fmt.Fprint(w, `</div></section>`)
 		return nil
 	}))
+}
+
+func renderDashboardQuickLogForm(w io.Writer, user *NavUser, selectors *SelectorData, canStartTimer bool) {
+	_, _ = fmt.Fprintf(w, `<form method="post" action="/timesheets" class="compact-form selector-form quick-log-form"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="entry_mode" value="manual">`, esc(user.CSRF))
+	renderWorkSelectors(w, selectors, true)
+	_, _ = fmt.Fprintf(w, `<label>Date<input type="date" name="date" value="%s" required></label><label>Hours<input type="number" name="hours" min="0" step="1" inputmode="numeric" value="0" required></label><label>Minutes<input type="number" name="minutes" min="0" max="59" step="1" inputmode="numeric" value="0" required></label><input name="description" placeholder="Describe the work">`, esc(time.Now().UTC().Format("2006-01-02")))
+	_, _ = fmt.Fprint(w, `<button class="primary">Quick log</button>`)
+	if canStartTimer {
+		_, _ = fmt.Fprint(w, `<button class="ghost-button" formaction="/timesheets/start">Start timer</button>`)
+	}
+	_, _ = fmt.Fprint(w, `<a class="ghost-button" href="/timesheets">Open timesheets</a></form>`)
 }
 
 func EntityList[T any](title string, user *NavUser, headers []string, rows [][]string, form templ.Component) templ.Component {
