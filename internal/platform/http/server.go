@@ -1233,21 +1233,21 @@ func (s *Server) editTimesheet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	start, end, err := parseRange(r.FormValue("start"), r.FormValue("end"))
+	parsed, err := parseTimesheetTime(r)
 	if err != nil {
-		s.badRequest(w, r, err)
+		s.renderTimesheetCreateError(w, r, err.Error())
 		return
 	}
-	if err := checkFuturePolicy(s.cfg.FutureTimePolicy, start, end); err != nil {
-		s.badRequest(w, r, err)
+	if err := checkFuturePolicy(s.cfg.FutureTimePolicy, parsed.Start, parsed.End); err != nil {
+		s.renderTimesheetCreateError(w, r, err.Error())
 		return
 	}
 	projectID := formInt(r, "project_id")
 	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id")); err != nil {
-		s.badRequest(w, r, err)
+		s.renderTimesheetCreateError(w, r, err.Error())
 		return
 	}
-	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, WorkstreamID: formOptionalInt(r, "workstream_id"), ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, EndedAt: &end, Timezone: s.cfg.DefaultTimezone, BreakSeconds: formInt(r, "break_minutes") * 60, Billable: true, Description: r.FormValue("description")}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, WorkstreamID: formOptionalInt(r, "workstream_id"), ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: parsed.Start, EndedAt: &parsed.End, Timezone: s.cfg.DefaultTimezone, BreakSeconds: parsed.BreakSeconds, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.CreateTimesheet(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -1256,6 +1256,31 @@ func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), &uid, "create", "timesheet", &t.ID, "")
 	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.created", t)
 	http.Redirect(w, r, "/timesheets", http.StatusSeeOther)
+}
+
+func (s *Server) renderTimesheetCreateError(w http.ResponseWriter, r *http.Request, message string) {
+	filter := s.timesheetScope(r)
+	filter.Page = page(r)
+	filter.Size = size(r)
+	items, _, err := s.store.ListTimesheets(r.Context(), filter)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	favorites, err := s.store.ListFavorites(r.Context(), s.access(r).WorkspaceID, s.state(r).User.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	prefill := timesheetPrefillFromForm(r)
+	prefill.Message = message
+	w.WriteHeader(http.StatusBadRequest)
+	s.render(w, r, templates.Timesheets(s.nav(r), items, selectors, favorites, dashboardRecentFromTimesheets(items), prefill, s.editableTimesheetIDs(r, items)))
 }
 
 func (s *Server) updateTimesheet(w http.ResponseWriter, r *http.Request) {
@@ -1272,13 +1297,13 @@ func (s *Server) updateTimesheet(w http.ResponseWriter, r *http.Request) {
 	}
 	prefill := timesheetPrefillFromForm(r)
 	prefill.EntryID = entry.ID
-	start, end, err := parseRange(r.FormValue("start"), r.FormValue("end"))
+	parsed, err := parseTimesheetTime(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		s.render(w, r, templates.EditTimesheet(s.nav(r), selectors, prefill, err.Error(), entry.Exported))
 		return
 	}
-	if err := checkFuturePolicy(s.cfg.FutureTimePolicy, start, end); err != nil {
+	if err := checkFuturePolicy(s.cfg.FutureTimePolicy, parsed.Start, parsed.End); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		s.render(w, r, templates.EditTimesheet(s.nav(r), selectors, prefill, err.Error(), entry.Exported))
 		return
@@ -1294,10 +1319,10 @@ func (s *Server) updateTimesheet(w http.ResponseWriter, r *http.Request) {
 	entry.WorkstreamID = formOptionalInt(r, "workstream_id")
 	entry.ActivityID = formInt(r, "activity_id")
 	entry.TaskID = formOptionalInt(r, "task_id")
-	entry.StartedAt = start
-	entry.EndedAt = &end
+	entry.StartedAt = parsed.Start
+	entry.EndedAt = &parsed.End
 	entry.Timezone = s.cfg.DefaultTimezone
-	entry.BreakSeconds = formInt(r, "break_minutes") * 60
+	entry.BreakSeconds = parsed.BreakSeconds
 	entry.Billable = checkbox(r, "billable")
 	entry.Description = strings.TrimSpace(r.FormValue("description"))
 	if err := s.store.UpdateTimesheet(r.Context(), entry, splitCSV(r.FormValue("tags"))); err != nil {
@@ -3356,6 +3381,85 @@ func defaultInt64(value, fallback int64) int64 {
 	return value
 }
 
+type parsedTimesheetTime struct {
+	Start        time.Time
+	End          time.Time
+	BreakSeconds int64
+}
+
+func parseTimesheetTime(r *http.Request) (parsedTimesheetTime, error) {
+	mode := strings.ToLower(strings.TrimSpace(r.FormValue("entry_mode")))
+	if mode == "" && (strings.TrimSpace(r.FormValue("start")) != "" || strings.TrimSpace(r.FormValue("end")) != "") {
+		mode = "range"
+	}
+	if mode == "" {
+		mode = "manual"
+	}
+	switch mode {
+	case "manual":
+		return parseManualTimesheetTime(r.FormValue("date"), r.FormValue("hours"), r.FormValue("minutes"))
+	case "range":
+		start, end, err := parseRange(r.FormValue("start"), r.FormValue("end"))
+		if err != nil {
+			return parsedTimesheetTime{}, err
+		}
+		breakMinutes, err := parseNonNegativeInt(r.FormValue("break_minutes"), "break minutes")
+		if err != nil {
+			return parsedTimesheetTime{}, err
+		}
+		breakSeconds := breakMinutes * 60
+		if int64(end.Sub(start).Seconds())-breakSeconds <= 0 {
+			return parsedTimesheetTime{}, errors.New("duration must be greater than zero")
+		}
+		return parsedTimesheetTime{Start: start, End: end, BreakSeconds: breakSeconds}, nil
+	default:
+		return parsedTimesheetTime{}, errors.New("valid entry mode is required")
+	}
+}
+
+func parseManualTimesheetTime(dateValue, hoursValue, minutesValue string) (parsedTimesheetTime, error) {
+	dateValue = strings.TrimSpace(dateValue)
+	if dateValue == "" {
+		return parsedTimesheetTime{}, errors.New("date is required")
+	}
+	start, err := time.ParseInLocation("2006-01-02", dateValue, time.Local)
+	if err != nil {
+		return parsedTimesheetTime{}, errors.New("valid date is required")
+	}
+	hours, err := parseNonNegativeInt(hoursValue, "hours")
+	if err != nil {
+		return parsedTimesheetTime{}, err
+	}
+	minutes, err := parseNonNegativeInt(minutesValue, "minutes")
+	if err != nil {
+		return parsedTimesheetTime{}, err
+	}
+	if minutes > 59 {
+		return parsedTimesheetTime{}, errors.New("minutes must be between 0 and 59")
+	}
+	totalSeconds := hours*3600 + minutes*60
+	if totalSeconds <= 0 {
+		return parsedTimesheetTime{}, errors.New("duration must be greater than zero")
+	}
+	end := start.Add(time.Duration(totalSeconds) * time.Second)
+	return parsedTimesheetTime{Start: start.UTC(), End: end.UTC()}, nil
+}
+
+func parseNonNegativeInt(value, label string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = "0"
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("valid %s are required", label)
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s cannot be negative", label)
+	}
+	return parsed, nil
+}
+
 func parseRange(startValue, endValue string) (time.Time, time.Time, error) {
 	start, err := time.ParseInLocation("2006-01-02T15:04", startValue, time.Local)
 	if err != nil {
@@ -3434,16 +3538,25 @@ func dashboardRecentFromTimesheets(items []domain.Timesheet) []domain.DashboardR
 
 func timesheetPrefillFromRequest(r *http.Request) templates.TimesheetPrefill {
 	q := r.URL.Query()
+	today := time.Now().UTC().Format("2006-01-02")
+	entryMode := strings.ToLower(strings.TrimSpace(q.Get("entry_mode")))
+	if entryMode != "range" {
+		entryMode = "manual"
+	}
 	prefill := templates.TimesheetPrefill{
-		CustomerID:   int64Param(r, "customer_id"),
-		ProjectID:    int64Param(r, "project_id"),
-		WorkstreamID: int64Param(r, "workstream_id"),
-		ActivityID:   int64Param(r, "activity_id"),
-		TaskID:       int64Param(r, "task_id"),
-		Description:  strings.TrimSpace(q.Get("description")),
-		Tags:         strings.TrimSpace(q.Get("tags")),
-		Billable:     true,
-		Message:      strings.TrimSpace(q.Get("message")),
+		EntryMode:     entryMode,
+		CustomerID:    int64Param(r, "customer_id"),
+		ProjectID:     int64Param(r, "project_id"),
+		WorkstreamID:  int64Param(r, "workstream_id"),
+		ActivityID:    int64Param(r, "activity_id"),
+		TaskID:        int64Param(r, "task_id"),
+		Date:          defaultString(strings.TrimSpace(q.Get("date")), today),
+		ManualHours:   defaultString(strings.TrimSpace(q.Get("hours")), "0"),
+		ManualMinutes: defaultString(strings.TrimSpace(q.Get("minutes")), "0"),
+		Description:   strings.TrimSpace(q.Get("description")),
+		Tags:          strings.TrimSpace(q.Get("tags")),
+		Billable:      true,
+		Message:       strings.TrimSpace(q.Get("message")),
 	}
 	if breakMinutes := strings.TrimSpace(q.Get("break_minutes")); breakMinutes != "" {
 		prefill.BreakMinutes = breakMinutes
@@ -3455,18 +3568,21 @@ func timesheetPrefillFromRequest(r *http.Request) templates.TimesheetPrefill {
 	}
 	if start := q.Get("start"); start != "" {
 		prefill.Start = start
+		if q.Get("entry_mode") == "" {
+			prefill.EntryMode = "range"
+		}
 	}
 	if end := q.Get("end"); end != "" {
 		prefill.End = end
+		if q.Get("entry_mode") == "" {
+			prefill.EntryMode = "range"
+		}
 	}
-	if date := q.Get("date"); date != "" {
-		prefill.Date = date
-		if prefill.Start == "" {
-			prefill.Start = date + "T08:00"
-		}
-		if prefill.End == "" {
-			prefill.End = date + "T17:00"
-		}
+	if prefill.Start == "" {
+		prefill.Start = prefill.Date + "T08:00"
+	}
+	if prefill.End == "" {
+		prefill.End = prefill.Date + "T17:00"
 	}
 	return prefill
 }
@@ -3478,17 +3594,30 @@ func timesheetPrefillFromEntry(entry domain.Timesheet) templates.TimesheetPrefil
 			tags = append(tags, tag.Name)
 		}
 	}
+	durationSeconds := entry.DurationSeconds
+	if durationSeconds < 0 {
+		durationSeconds = 0
+	}
+	entryMode := "range"
+	localStart := entry.StartedAt.Local()
+	if entry.BreakSeconds == 0 && localStart.Hour() == 0 && localStart.Minute() == 0 && localStart.Second() == 0 {
+		entryMode = "manual"
+	}
 	prefill := templates.TimesheetPrefill{
-		EntryID:      entry.ID,
-		CustomerID:   entry.CustomerID,
-		ProjectID:    entry.ProjectID,
-		WorkstreamID: valueOrZero(entry.WorkstreamID),
-		ActivityID:   entry.ActivityID,
-		Description:  entry.Description,
-		Start:        entry.StartedAt.Local().Format("2006-01-02T15:04"),
-		BreakMinutes: fmt.Sprint(entry.BreakSeconds / 60),
-		Tags:         strings.Join(tags, ","),
-		Billable:     entry.Billable,
+		EntryID:       entry.ID,
+		EntryMode:     entryMode,
+		CustomerID:    entry.CustomerID,
+		ProjectID:     entry.ProjectID,
+		WorkstreamID:  valueOrZero(entry.WorkstreamID),
+		ActivityID:    entry.ActivityID,
+		Description:   entry.Description,
+		Date:          localStart.Format("2006-01-02"),
+		ManualHours:   fmt.Sprint(durationSeconds / 3600),
+		ManualMinutes: fmt.Sprint((durationSeconds % 3600) / 60),
+		Start:         entry.StartedAt.Local().Format("2006-01-02T15:04"),
+		BreakMinutes:  fmt.Sprint(entry.BreakSeconds / 60),
+		Tags:          strings.Join(tags, ","),
+		Billable:      entry.Billable,
 	}
 	if entry.TaskID != nil {
 		prefill.TaskID = *entry.TaskID
@@ -3500,17 +3629,25 @@ func timesheetPrefillFromEntry(entry domain.Timesheet) templates.TimesheetPrefil
 }
 
 func timesheetPrefillFromForm(r *http.Request) templates.TimesheetPrefill {
+	entryMode := strings.ToLower(strings.TrimSpace(r.FormValue("entry_mode")))
+	if entryMode != "range" {
+		entryMode = "manual"
+	}
 	prefill := templates.TimesheetPrefill{
-		CustomerID:   formInt(r, "customer_id"),
-		ProjectID:    formInt(r, "project_id"),
-		WorkstreamID: formInt(r, "workstream_id"),
-		ActivityID:   formInt(r, "activity_id"),
-		Start:        strings.TrimSpace(r.FormValue("start")),
-		End:          strings.TrimSpace(r.FormValue("end")),
-		BreakMinutes: strings.TrimSpace(defaultString(r.FormValue("break_minutes"), "0")),
-		Description:  strings.TrimSpace(r.FormValue("description")),
-		Tags:         strings.TrimSpace(r.FormValue("tags")),
-		Billable:     checkbox(r, "billable"),
+		EntryMode:     entryMode,
+		CustomerID:    formInt(r, "customer_id"),
+		ProjectID:     formInt(r, "project_id"),
+		WorkstreamID:  formInt(r, "workstream_id"),
+		ActivityID:    formInt(r, "activity_id"),
+		Date:          strings.TrimSpace(r.FormValue("date")),
+		ManualHours:   strings.TrimSpace(defaultString(r.FormValue("hours"), "0")),
+		ManualMinutes: strings.TrimSpace(defaultString(r.FormValue("minutes"), "0")),
+		Start:         strings.TrimSpace(r.FormValue("start")),
+		End:           strings.TrimSpace(r.FormValue("end")),
+		BreakMinutes:  strings.TrimSpace(defaultString(r.FormValue("break_minutes"), "0")),
+		Description:   strings.TrimSpace(r.FormValue("description")),
+		Tags:          strings.TrimSpace(r.FormValue("tags")),
+		Billable:      checkbox(r, "billable"),
 	}
 	if taskID := formOptionalInt(r, "task_id"); taskID != nil {
 		prefill.TaskID = *taskID

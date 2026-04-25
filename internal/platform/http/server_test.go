@@ -903,6 +903,128 @@ func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing
 	}
 }
 
+func TestTimesheetEntryModesRenderDefaultsAndDashboardQuickLog(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	dashboard := getWithCookie(app, "/", cookie).Body.String()
+	if !strings.Contains(dashboard, `href="/timesheets?entry_mode=manual"`) || !strings.Contains(dashboard, `Quick log`) {
+		t.Fatal("dashboard quick log should open manual entry by default")
+	}
+
+	body := getWithCookie(app, "/timesheets", cookie).Body.String()
+	for _, expected := range []string{
+		`name="entry_mode" value="manual" checked`,
+		`data-entry-mode-panel="manual"`,
+		`name="date"`,
+		`name="hours"`,
+		`name="minutes"`,
+		`data-entry-mode-panel="range" hidden`,
+		`name="start"`,
+		`name="end"`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("timesheet manual default form missing %q", expected)
+		}
+	}
+
+	rangeBody := getWithCookie(app, "/timesheets?entry_mode=range&date=2026-04-22", cookie).Body.String()
+	for _, expected := range []string{
+		`name="entry_mode" value="range" checked`,
+		`data-entry-mode-panel="manual" hidden`,
+		`data-entry-mode-panel="range"`,
+		`value="2026-04-22T08:00"`,
+		`value="2026-04-22T17:00"`,
+	} {
+		if !strings.Contains(rangeBody, expected) {
+			t.Fatalf("timesheet range form missing %q", expected)
+		}
+	}
+}
+
+func TestTimesheetEntryModesValidateAndSave(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	customer, project, activity, task := seedSelectorFixtures(t, store)
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/timesheets", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+
+	base := url.Values{
+		"csrf":        {csrf},
+		"customer_id": {strconv.FormatInt(customer.ID, 10)},
+		"project_id":  {strconv.FormatInt(project.ID, 10)},
+		"activity_id": {strconv.FormatInt(activity.ID, 10)},
+		"task_id":     {strconv.FormatInt(task.ID, 10)},
+	}
+	pastDate := time.Now().AddDate(0, 0, -2).Format("2006-01-02")
+
+	invalidManual := cloneValues(base)
+	invalidManual.Set("entry_mode", "manual")
+	invalidManual.Set("date", pastDate)
+	invalidManual.Set("hours", "0")
+	invalidManual.Set("minutes", "0")
+	rec := postFormWithCookie(app, "/timesheets", cookie, invalidManual)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "duration must be greater than zero") {
+		t.Fatalf("manual zero duration should render validation error, got %d", rec.Code)
+	}
+
+	invalidManual.Set("minutes", "60")
+	rec = postFormWithCookie(app, "/timesheets", cookie, invalidManual)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "minutes must be between 0 and 59") {
+		t.Fatalf("manual invalid minutes should render validation error, got %d", rec.Code)
+	}
+
+	manual := cloneValues(base)
+	manual.Set("entry_mode", "manual")
+	manual.Set("date", pastDate)
+	manual.Set("hours", "1")
+	manual.Set("minutes", "30")
+	manual.Set("description", "Manual duration save")
+	rec = postFormWithCookie(app, "/timesheets", cookie, manual)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("manual timesheet create returned %d", rec.Code)
+	}
+	manualEntry := mustFindTimesheetByDescription(t, store, ctx, "Manual duration save")
+	if manualEntry.DurationSeconds != 90*60 {
+		t.Fatalf("manual duration = %d, want 5400", manualEntry.DurationSeconds)
+	}
+	if manualEntry.StartedAt.Local().Format("2006-01-02") != pastDate {
+		t.Fatalf("manual started date = %s, want %s", manualEntry.StartedAt.Local().Format("2006-01-02"), pastDate)
+	}
+
+	invalidRange := cloneValues(base)
+	invalidRange.Set("entry_mode", "range")
+	invalidRange.Set("start", pastDate+"T12:00")
+	invalidRange.Set("end", pastDate+"T11:00")
+	invalidRange.Set("break_minutes", "0")
+	rec = postFormWithCookie(app, "/timesheets", cookie, invalidRange)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "end must be after start") {
+		t.Fatalf("range invalid order should render validation error, got %d", rec.Code)
+	}
+
+	rangeForm := cloneValues(base)
+	rangeForm.Set("entry_mode", "range")
+	rangeForm.Set("start", pastDate+"T23:00")
+	rangeForm.Set("end", time.Now().AddDate(0, 0, -1).Format("2006-01-02")+"T01:15")
+	rangeForm.Set("break_minutes", "15")
+	rangeForm.Set("description", "Range duration save")
+	rec = postFormWithCookie(app, "/timesheets", cookie, rangeForm)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("range timesheet create returned %d", rec.Code)
+	}
+	rangeEntry := mustFindTimesheetByDescription(t, store, ctx, "Range duration save")
+	if rangeEntry.DurationSeconds != 2*3600 {
+		t.Fatalf("range duration = %d, want 7200", rangeEntry.DurationSeconds)
+	}
+	if getWithCookie(app, "/timesheets", cookie).Code != http.StatusOK {
+		t.Fatal("timesheets should render after saving both entry modes")
+	}
+}
+
 func TestTimesheetEditFlowUpdatesDashboardListCalendarReportsAndCreateStillWorks(t *testing.T) {
 	app, store := testApp(t)
 	defer store.Close()
@@ -1272,6 +1394,29 @@ func postFormWithCookie(app *Server, target string, cookie *http.Cookie, form ur
 	rec := httptest.NewRecorder()
 	app.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func cloneValues(values url.Values) url.Values {
+	out := url.Values{}
+	for key, items := range values {
+		out[key] = append([]string(nil), items...)
+	}
+	return out
+}
+
+func mustFindTimesheetByDescription(t *testing.T, store *sqlite.Store, ctx context.Context, description string) domain.Timesheet {
+	t.Helper()
+	items, _, err := store.ListTimesheets(ctx, sqlite.TimesheetFilter{WorkspaceID: 1, Page: 1, Size: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Description == description {
+			return item
+		}
+	}
+	t.Fatalf("timesheet with description %q not found", description)
+	return domain.Timesheet{}
 }
 
 func csrfFromBody(t *testing.T, body string) string {
