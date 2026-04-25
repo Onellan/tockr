@@ -298,11 +298,12 @@ func EntityList[T any](title string, user *NavUser, headers []string, rows [][]s
 	return Layout(title, user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, title, "Directory", "Create and maintain the records used by time entries and reporting.")
 		if form != nil {
-			_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create `+esc(singularTitle(title))+`</h2><p>Keep required fields tight and searchable.</p></div></div>`)
+			createTitle := "Create " + singularTitle(title)
+			renderCreateCardStart(w, createTitle, "Keep required fields tight and searchable.", createCardCollapsedByDefault(title))
 			if err := form.Render(ctx, w); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprint(w, `</section>`)
+			renderCreateCardEnd(w, createCardCollapsedByDefault(title))
 		}
 		dataTable(w, headers, rows)
 		return nil
@@ -313,15 +314,41 @@ func EntityListRaw(title string, user *NavUser, headers []string, rows [][]strin
 	return Layout(title, user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, title, "Directory", "Create and maintain the records used by time entries and reporting.")
 		if form != nil {
-			_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create `+esc(singularTitle(title))+`</h2><p>Keep required fields tight and searchable.</p></div></div>`)
+			createTitle := "Create " + singularTitle(title)
+			renderCreateCardStart(w, createTitle, "Keep required fields tight and searchable.", createCardCollapsedByDefault(title))
 			if err := form.Render(ctx, w); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprint(w, `</section>`)
+			renderCreateCardEnd(w, createCardCollapsedByDefault(title))
 		}
 		dataTableRaw(w, headers, rows)
 		return nil
 	}))
+}
+
+func createCardCollapsedByDefault(title string) bool {
+	switch strings.ToLower(strings.TrimSpace(title)) {
+	case "clients", "projects", "work types", "tasks", "groups":
+		return true
+	default:
+		return false
+	}
+}
+
+func renderCreateCardStart(w io.Writer, title, description string, collapsed bool) {
+	if collapsed {
+		_, _ = fmt.Fprintf(w, `<details class="panel form-panel collapsible-create-card"><summary class="panel-head collapsible-create-summary"><div><h2>%s</h2><p>%s</p></div><span class="collapse-indicator" aria-hidden="true"></span></summary>`, esc(title), esc(description))
+		return
+	}
+	_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>%s</h2><p>%s</p></div></div>`, esc(title), esc(description))
+}
+
+func renderCreateCardEnd(w io.Writer, collapsed bool) {
+	if collapsed {
+		_, _ = fmt.Fprint(w, `</details>`)
+		return
+	}
+	_, _ = fmt.Fprint(w, `</section>`)
 }
 
 func CustomerForm(user *NavUser, c *domain.Customer) templ.Component {
@@ -956,9 +983,9 @@ func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selecto
 	return Layout("Project templates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Project templates", "Project setup", "Create repeatable engineering project blueprints with standard phases, tasks, and default controls.")
 		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How templates work:</strong> Capture your standard project setup once, including typical work types and task bundles, then reuse it whenever a similar engineering job starts.</div>`)
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create template</h2><p>Define defaults including tasks and activities (one per line).</p></div></div>`)
+		renderCreateCardStart(w, "Create template", "Define defaults including tasks and activities (one per line).", true)
 		renderProjectTemplateForm(w, user, domain.ProjectTemplate{Visible: true, Billable: true, BudgetAlertPercent: 80}, "/project-templates")
-		_, _ = fmt.Fprint(w, `</section>`)
+		renderCreateCardEnd(w, true)
 		rows := [][]string{}
 		for _, template := range templates {
 			status := "Active"
@@ -2070,7 +2097,9 @@ func ExchangeRates(user *NavUser, rates []domain.ExchangeRate) templ.Component {
 func Workstreams(user *NavUser, items []domain.Workstream) templ.Component {
 	return Layout("Workstreams", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Workstreams", "Projects / Delivery", "Define discipline or phase categories (e.g. Civil, Mechanical, Electrical) that can be assigned to projects.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create workstream</h2><p>Add discipline or phase categories to assign to projects.</p></div></div><form class="form-grid" method="post" action="/workstreams"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required placeholder="e.g. Civil Engineering"></label><label class="wide">Description<textarea name="description" placeholder="Optional description"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><div class="form-actions"><button class="primary">Save workstream</button></div></form></section>`, esc(user.CSRF))
+		renderCreateCardStart(w, "Create workstream", "Add discipline or phase categories to assign to projects.", true)
+		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/workstreams"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required placeholder="e.g. Civil Engineering"></label><label class="wide">Description<textarea name="description" placeholder="Optional description"></textarea></label><label class="check"><input type="checkbox" name="visible" checked> Visible</label><div class="form-actions"><button class="primary">Save workstream</button></div></form>`, esc(user.CSRF))
+		renderCreateCardEnd(w, true)
 		if len(items) == 0 {
 			_, _ = fmt.Fprint(w, `<div class="empty-state"><strong>No workstreams yet</strong><span>Create the first discipline or phase category above.</span></div>`)
 			return nil
