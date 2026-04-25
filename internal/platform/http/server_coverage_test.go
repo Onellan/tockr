@@ -67,7 +67,7 @@ func TestUnauthenticatedAccessRedirectsToLogin(t *testing.T) {
 		"/", "/account", "/customers", "/projects", "/tasks", "/activities",
 		"/tags", "/groups", "/rates", "/timesheets", "/calendar", "/reports",
 		"/invoices", "/workstreams", "/admin", "/admin/users",
-		"/admin/schedule", "/admin/exchange-rates", "/admin/recalculate",
+		"/admin/schedule", "/admin/demo-data", "/admin/exchange-rates", "/admin/recalculate",
 		"/reports/utilization",
 	}
 	for _, route := range protectedRoutes {
@@ -316,6 +316,69 @@ func TestWorkScheduleSettingsForbiddenForRegularUser(t *testing.T) {
 	cookie := loginCookie(t, app, "reg@example.com", "reg12345")
 	if rec := getWithCookie(app, "/admin/schedule", cookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("GET /admin/schedule for regular user = %d, want 403", rec.Code)
+	}
+}
+
+func TestAdminDemoDataPageAndActions(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	workspaceID, err := store.DefaultWorkspaceForOrganization(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/admin/demo-data", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/demo-data returned %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, snippet := range []string{"Add demo data", "Remove demo data", "Default workspace target"} {
+		if !strings.Contains(body, snippet) {
+			t.Fatalf("demo data page missing %q", snippet)
+		}
+	}
+	csrf := csrfFromBody(t, body)
+
+	rec = postFormWithCookie(app, "/admin/demo-data/add", cookie, url.Values{"csrf": {csrf}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/demo-data/add returned %d", rec.Code)
+	}
+	var customerCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND name LIKE ?`, workspaceID, "[Demo] %").Scan(&customerCount); err != nil {
+		t.Fatal(err)
+	}
+	if customerCount == 0 {
+		t.Fatal("expected demo customers after add action")
+	}
+
+	body = getWithCookies(app, "/admin/demo-data", withCookies(cookie, rec.Result().Cookies())...).Body.String()
+	csrf = csrfFromBody(t, body)
+	rec = postFormWithCookie(app, "/admin/demo-data/remove", cookie, url.Values{"csrf": {csrf}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/demo-data/remove returned %d", rec.Code)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND name LIKE ?`, workspaceID, "[Demo] %").Scan(&customerCount); err != nil {
+		t.Fatal(err)
+	}
+	if customerCount != 0 {
+		t.Fatalf("expected demo customers to be removed, found %d", customerCount)
+	}
+}
+
+func TestAdminDemoDataForbiddenForRegularUser(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	if err := store.CreateUser(context.Background(), domain.User{
+		Email: "demo.regular@example.com", Username: "demoreg", DisplayName: "Demo Regular", Timezone: "UTC", Enabled: true,
+	}, "reg12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "demo.regular@example.com", "reg12345")
+	if rec := getWithCookie(app, "/admin/demo-data", cookie); rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /admin/demo-data for regular user = %d, want 403", rec.Code)
 	}
 }
 

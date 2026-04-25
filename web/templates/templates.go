@@ -129,6 +129,7 @@ var adminNav = []navItem{
 	{"Workspaces", "/admin/workspaces", "Administration", auth.PermManageOrg},
 	{"Work Schedule", "/admin/schedule", "Administration", auth.PermManageOrg},
 	{"Email", "/admin/email", "Administration", auth.PermManageOrg},
+	{"Demo Data", "/admin/demo-data", "Administration", auth.PermManageOrg},
 	{"Rates", "/rates", "Administration", auth.PermManageRates},
 	{"Exchange Rates", "/admin/exchange-rates", "Administration", auth.PermManageRates},
 	{"Recalculate", "/admin/recalculate", "Administration", auth.PermManageRates},
@@ -988,6 +989,19 @@ func AdminHome(user *NavUser) templ.Component {
 	}))
 }
 
+func AdminDemoData(user *NavUser, workspaceName string, notice Notice) templ.Component {
+	return Layout("Demo data", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Demo data", "Administration", "Add or remove a safe demo dataset in your default workspace for product walkthroughs.")
+		renderNotice(w, notice)
+		targetWorkspace := workspaceName
+		if strings.TrimSpace(targetWorkspace) == "" {
+			targetWorkspace = "Not found"
+		}
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Default workspace target</h2><p>This tool only affects records prefixed with [Demo] in the first workspace for your organization.</p></div></div><p class="field-hint">Current target: <strong>%s</strong></p><div class="actions-row"><form method="post" action="/admin/demo-data/add"><input type="hidden" name="csrf" value="%s"><button class="primary">Add demo data</button></form><form method="post" action="/admin/demo-data/remove" onsubmit="return confirm('Remove all [Demo] records from the default workspace?')"><input type="hidden" name="csrf" value="%s"><button class="danger">Remove demo data</button></form></div><p class="field-hint">Re-adding demo data first clears existing [Demo] records, so this action is repeatable.</p></section>`, esc(targetWorkspace), esc(user.CSRF), esc(user.CSRF))
+		return nil
+	}))
+}
+
 func ProjectMembers(user *NavUser, project domain.Project, members []domain.ProjectMember, users []domain.User, assignedGroups []domain.Group, groups []domain.Group) templ.Component {
 	return Layout("Project members", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		userLabels := userLabelMap(users)
@@ -1533,6 +1547,8 @@ func adminDescription(path string) string {
 		return "Create workspaces, update workspace settings, and manage workspace membership."
 	case "/admin/email":
 		return "Review SMTP configuration, send test email, and set account email-change policy."
+	case "/admin/demo-data":
+		return "Add or remove a reusable [Demo] dataset in the default workspace for product demonstrations."
 	case "/admin/schedule":
 		return "Configure expected working days and hours for utilization and missing-time calculations."
 	case "/rates":

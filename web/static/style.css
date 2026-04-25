@@ -1932,16 +1932,16 @@ label > .field-hint {
   .entry-desc {
     grid-column: 1 / -1;
   }
-  
+
   .project-breakdown-grid {
     grid-template-columns: 1fr;
   }
-  
+
   .project-pie-layout {
     grid-template-columns: 1fr;
     justify-items: center;
   }
-  
+
   .project-pie-legend {
     width: 100%;
   }

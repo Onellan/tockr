@@ -147,6 +147,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/admin/email", s.requirePermission(auth.PermManageOrg, s.emailSettings))
 		r.Post("/admin/email", s.requirePermission(auth.PermManageOrg, s.saveEmailSettings))
 		r.Post("/admin/email/test", s.requirePermission(auth.PermManageOrg, s.testEmailSettings))
+		r.Get("/admin/demo-data", s.requirePermission(auth.PermManageOrg, s.adminDemoData))
+		r.Post("/admin/demo-data/add", s.requirePermission(auth.PermManageOrg, s.adminDemoDataAdd))
+		r.Post("/admin/demo-data/remove", s.requirePermission(auth.PermManageOrg, s.adminDemoDataRemove))
 		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
 		r.Post("/reports/saved", s.requirePermission(auth.PermViewReports, s.saveReport))
 		r.Post("/reports/saved/{id}", s.requirePermission(auth.PermViewReports, s.editSavedReport))
@@ -2220,15 +2223,15 @@ func customerLabel(customer domain.Customer) string {
 	return strings.TrimSpace(customer.Name)
 }
 
-func projectLabel(project domain.Project, customers map[int64]string) string {
+func projectLabel(project domain.Project, _ map[int64]string) string {
 	return project.Name
 }
 
-func activityLabel(activity domain.Activity, projects map[int64]string) string {
+func activityLabel(activity domain.Activity, _ map[int64]string) string {
 	return activity.Name
 }
 
-func taskLabel(task domain.Task, projects map[int64]string) string {
+func taskLabel(task domain.Task, _ map[int64]string) string {
 	return task.Name
 }
 
@@ -2601,11 +2604,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, component templ.
 	}
 }
 
-func (s *Server) badRequest(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) badRequest(w http.ResponseWriter, _ *http.Request, err error) {
 	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
-func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) serverError(w http.ResponseWriter, _ *http.Request, err error) {
 	if err != nil {
 		s.log.Error("request failed", "err", err)
 	}
@@ -2791,6 +2794,48 @@ func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redirectWithFlash(w, r, "/admin/email", "success", "SMTP test email sent")
+}
+
+func (s *Server) adminDemoData(w http.ResponseWriter, r *http.Request) {
+	workspaceName := ""
+	workspaceID, err := s.store.DefaultWorkspaceForOrganization(r.Context(), s.access(r).OrganizationID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		s.serverError(w, r, err)
+		return
+	}
+	if workspaceID > 0 {
+		workspace, err := s.store.Workspace(r.Context(), workspaceID)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		if workspace != nil {
+			workspaceName = workspace.Name
+		}
+	}
+	s.render(w, r, templates.AdminDemoData(s.nav(r), workspaceName, s.popFlash(w, r)))
+}
+
+func (s *Server) adminDemoDataAdd(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := s.store.SeedDemoData(r.Context(), s.access(r).OrganizationID)
+	if err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to add demo data: "+err.Error())
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "add")
+	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data added to the default workspace")
+}
+
+func (s *Server) adminDemoDataRemove(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := s.store.ClearDemoData(r.Context(), s.access(r).OrganizationID)
+	if err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to remove demo data: "+err.Error())
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "remove")
+	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data removed from the default workspace")
 }
 
 // ─── Saved report edit/delete/share ───────────────────────────────────────────
