@@ -490,6 +490,10 @@ select {
   width: min(1440px, calc(100% - 48px));
 }
 
+.page-projects .table-card .table-scroll {
+  min-height: 25vh;
+}
+
 .page-head {
   display: flex;
   justify-content: space-between;
@@ -880,6 +884,24 @@ button:hover,
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
+}
+
+.project-form-flags {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: nowrap;
+}
+
+.project-form-flags .check {
+  margin: 0;
+}
+
+.project-form-flags .form-actions {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .export-row {
@@ -1634,6 +1656,15 @@ label > .field-hint {
   .compact-form input,
   .compact-form label {
     min-width: min(100%, 220px);
+  }
+
+  .project-form-flags {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .project-form-flags .form-actions {
+    margin-left: 0;
   }
 }
 

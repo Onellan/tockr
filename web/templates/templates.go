@@ -111,8 +111,8 @@ var primaryNav = []navItem{
 	{"Clients", "/customers", "Projects / Delivery", ""},
 	{"Projects", "/projects", "Projects / Delivery", ""},
 	{"Project Dashboards", "/project-dashboards", "Projects / Delivery", auth.PermManageProjects},
-	{"Work Types", "/activities", "Projects / Delivery", ""},
 	{"Workstreams", "/workstreams", "Projects / Delivery", auth.PermManageMaster},
+	{"Work Types", "/activities", "Projects / Delivery", ""},
 	{"Tasks", "/tasks", "Projects / Delivery", ""},
 	{"Groups", "/groups", "Projects / Delivery", auth.PermManageGroups},
 	{"Templates", "/project-templates", "Projects / Delivery", auth.PermManageProjects},
@@ -371,7 +371,7 @@ func ProjectForm(user *NavUser, selectors *SelectorData, project *domain.Project
 			privateChecked = checkedIf(project.Private)
 			billableChecked = checkedIf(project.Billable)
 		}
-		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s">`, esc(action), esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form class="form-grid project-form" method="post" action="%s"><input type="hidden" name="csrf" value="%s">`, esc(action), esc(user.CSRF))
 		renderSelect(w, "Customer"+tipHTML("The client this project is billed to. Determines the billing unit and default billing contact."), "customer_id", optionList(selectors, "customer"), selectedCustomer, true, "Select a customer", nil)
 		_, _ = fmt.Fprintf(w, `<label>Name %s<input name="name" value="%s" required></label>`, tipHTML("Project display name shown in timesheets, reports and invoices."), esc(name))
 		_, _ = fmt.Fprintf(w, `<label>Project ID %s<input name="number" value="%s" placeholder="auto-generated if blank"></label>`, tipHTML("Internal reference code (e.g. PR-000001). Leave blank to auto-generate."), esc(number))
@@ -380,10 +380,11 @@ func ProjectForm(user *NavUser, selectors *SelectorData, project *domain.Project
 		_, _ = fmt.Fprintf(w, `<label>Budget %s<input name="budget_cents" value="%d" placeholder="e.g. 1000000 = 10,000 in billing unit"></label>`, tipHTML("Monetary budget in minor currency units (cents/pennies). Triggers an alert when spend reaches the alert threshold."), budgetCents)
 		_, _ = fmt.Fprintf(w, `<label>Budget alert (%%) %s<input name="budget_alert_percent" value="%d"></label>`, tipHTML("Send a budget warning when this percentage of the monetary budget is consumed (e.g. 80 = alert at 80%)."), budgetAlert)
 		_, _ = fmt.Fprintf(w, `<label class="wide">Comment<textarea name="comment">%s</textarea></label>`, esc(comment))
+		_, _ = fmt.Fprint(w, `<div class="project-form-flags">`)
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible"%s> Visible %s</label>`, visibleChecked, tipHTML("Visible projects appear in timesheet entry selectors. Uncheck to archive a project."))
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="private"%s> Private %s</label>`, privateChecked, tipHTML("Private projects are only visible to explicitly assigned members."))
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable"%s> Billable %s</label>`, billableChecked, tipHTML("Billable projects are included in invoice and rate calculations."))
-		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save project</button></div></form>`)
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save project</button></div></div></form>`)
 		return nil
 	})
 }
