@@ -40,7 +40,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/project-dashboards", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
+	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/project-dashboards", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/admin/demo-data", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -68,6 +68,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 		`class="nav-link active" aria-current="page" href="/admin/users"`,
 		`href="/admin/workspaces"`,
 		`href="/admin/email"`,
+		`href="/admin/demo-data"`,
 		`href="/admin"`,
 		`href="/">Back to dashboard</a>`,
 	} {

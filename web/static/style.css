@@ -1180,6 +1180,111 @@ tr:last-child td {
   border-radius: var(--radius-sm);
 }
 
+.empty-state.compact {
+  padding: var(--space-4);
+}
+
+.project-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.project-breakdown-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.project-breakdown-card h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.project-breakdown-card p {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.project-pie-layout {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.project-pie {
+  width: 160px;
+  height: 160px;
+}
+
+.project-pie-total-label {
+  fill: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.project-pie-total-value {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.project-pie-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.project-pie-legend li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.project-pie-legend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.project-pie-legend .legend-label {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.project-pie-legend .legend-value,
+.project-pie-legend .legend-share {
+  font-variant-numeric: tabular-nums;
+}
+
+.project-contrib-tabs {
+  margin-bottom: var(--space-3);
+}
+
+.project-contrib-section {
+  margin-bottom: var(--space-4);
+}
+
+.project-contrib-section:last-child {
+  margin-bottom: 0;
+}
+
+.project-contrib-section .panel-head {
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
 /* Tooltip icon */
 .tooltip-icon {
   position: relative;
@@ -1619,6 +1724,12 @@ label > .field-hint {
   font-size: 22px;
 }
 
+@media (max-width: 1100px) {
+  .project-breakdown-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 920px) and (hover: none), (max-width: 920px) and (pointer: coarse) {
   body.nav-open {
     overflow: hidden;
@@ -1820,5 +1931,18 @@ label > .field-hint {
 
   .entry-desc {
     grid-column: 1 / -1;
+  }
+
+  .project-breakdown-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .project-pie-layout {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .project-pie-legend {
+    width: 100%;
   }
 }

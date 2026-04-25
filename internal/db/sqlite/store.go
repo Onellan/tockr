@@ -24,6 +24,8 @@ type Store struct {
 	db *sql.DB
 }
 
+const demoDataNamePrefix = "[Demo] "
+
 type Session struct {
 	ID          string
 	UserID      int64
@@ -866,6 +868,210 @@ func (s *Store) defaultWorkspaceForUser(ctx context.Context, userID int64) int64
 		}
 	}
 	return 1
+}
+
+func (s *Store) DefaultWorkspaceForOrganization(ctx context.Context, organizationID int64) (int64, error) {
+	var workspaceID int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, organizationID).Scan(&workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return workspaceID, nil
+}
+
+func (s *Store) SeedDemoData(ctx context.Context, organizationID int64) (int64, error) {
+	workspaceID, err := s.DefaultWorkspaceForOrganization(ctx, organizationID)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.clearDemoDataInWorkspace(ctx, workspaceID); err != nil {
+		return 0, err
+	}
+	if err := s.seedDemoDataInWorkspace(ctx, workspaceID); err != nil {
+		return 0, err
+	}
+	return workspaceID, nil
+}
+
+func (s *Store) ClearDemoData(ctx context.Context, organizationID int64) (int64, error) {
+	workspaceID, err := s.DefaultWorkspaceForOrganization(ctx, organizationID)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.clearDemoDataInWorkspace(ctx, workspaceID); err != nil {
+		return 0, err
+	}
+	return workspaceID, nil
+}
+
+func (s *Store) clearDemoDataInWorkspace(ctx context.Context, workspaceID int64) error {
+	pattern := demoDataNamePrefix + "%"
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	queries := []string{
+		`DELETE FROM project_templates WHERE workspace_id=? AND name LIKE ?`,
+		`DELETE FROM workstreams WHERE workspace_id=? AND name LIKE ?`,
+		`DELETE FROM activities WHERE workspace_id=? AND name LIKE ?`,
+		`DELETE FROM tasks WHERE workspace_id=? AND name LIKE ?`,
+		`DELETE FROM projects WHERE workspace_id=? AND name LIKE ?`,
+		`DELETE FROM customers WHERE workspace_id=? AND name LIKE ?`,
+		`DELETE FROM tags WHERE workspace_id=? AND name LIKE ?`,
+	}
+	for _, query := range queries {
+		if _, err := tx.ExecContext(ctx, query, workspaceID, pattern); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) seedDemoDataInWorkspace(ctx context.Context, workspaceID int64) error {
+	customer := &domain.Customer{
+		WorkspaceID: workspaceID,
+		Name:        demoDataNamePrefix + "Apex Engineering",
+		Number:      "DEMO-CUST-001",
+		Currency:    "USD",
+		Timezone:    "UTC",
+		Visible:     true,
+		Billable:    true,
+	}
+	if err := s.UpsertCustomer(ctx, customer); err != nil {
+		return err
+	}
+
+	projectOne := &domain.Project{
+		WorkspaceID: workspaceID,
+		CustomerID:  customer.ID,
+		Name:        demoDataNamePrefix + "Plant Expansion",
+		Number:      "DEMO-PR-001",
+		Visible:     true,
+		Billable:    true,
+	}
+	if err := s.UpsertProject(ctx, projectOne); err != nil {
+		return err
+	}
+	projectTwo := &domain.Project{
+		WorkspaceID: workspaceID,
+		CustomerID:  customer.ID,
+		Name:        demoDataNamePrefix + "Commissioning Support",
+		Number:      "DEMO-PR-002",
+		Visible:     true,
+		Billable:    true,
+	}
+	if err := s.UpsertProject(ctx, projectTwo); err != nil {
+		return err
+	}
+
+	workstreamDesign := &domain.Workstream{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Design", Code: "DEMO-WS-001", Visible: true}
+	if err := s.UpsertWorkstream(ctx, workstreamDesign); err != nil {
+		return err
+	}
+	workstreamField := &domain.Workstream{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Field Delivery", Code: "DEMO-WS-002", Visible: true}
+	if err := s.UpsertWorkstream(ctx, workstreamField); err != nil {
+		return err
+	}
+
+	if err := s.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: projectOne.ID, WorkstreamID: workstreamDesign.ID, Active: true}); err != nil {
+		return err
+	}
+	if err := s.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: projectOne.ID, WorkstreamID: workstreamField.ID, Active: true}); err != nil {
+		return err
+	}
+	if err := s.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: projectTwo.ID, WorkstreamID: workstreamField.ID, Active: true}); err != nil {
+		return err
+	}
+
+	activityDesign := &domain.Activity{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Engineering", Number: "DEMO-WT-001", Billable: true, Visible: true}
+	if err := s.UpsertActivity(ctx, activityDesign); err != nil {
+		return err
+	}
+	activityReview := &domain.Activity{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Quality Review", Number: "DEMO-WT-002", Billable: true, Visible: true}
+	if err := s.UpsertActivity(ctx, activityReview); err != nil {
+		return err
+	}
+	activitySite := &domain.Activity{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Site Support", Number: "DEMO-WT-003", Billable: true, Visible: true}
+	if err := s.UpsertActivity(ctx, activitySite); err != nil {
+		return err
+	}
+
+	taskModel := &domain.Task{WorkspaceID: workspaceID, ProjectID: projectOne.ID, Name: demoDataNamePrefix + "Model update", Number: "DEMO-TSK-001", Billable: true, Visible: true}
+	if err := s.UpsertTask(ctx, taskModel); err != nil {
+		return err
+	}
+	taskDrawings := &domain.Task{WorkspaceID: workspaceID, ProjectID: projectOne.ID, Name: demoDataNamePrefix + "Drawing package", Number: "DEMO-TSK-002", Billable: true, Visible: true}
+	if err := s.UpsertTask(ctx, taskDrawings); err != nil {
+		return err
+	}
+	taskCommissioning := &domain.Task{WorkspaceID: workspaceID, ProjectID: projectTwo.ID, Name: demoDataNamePrefix + "Commissioning checklist", Number: "DEMO-TSK-003", Billable: true, Visible: true}
+	if err := s.UpsertTask(ctx, taskCommissioning); err != nil {
+		return err
+	}
+
+	users, err := s.ListWorkspaceUsers(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	seedUsers := make([]int64, 0, 3)
+	for _, user := range users {
+		if !user.Enabled {
+			continue
+		}
+		seedUsers = append(seedUsers, user.ID)
+		if len(seedUsers) == 3 {
+			break
+		}
+	}
+	if len(seedUsers) == 0 && len(users) > 0 {
+		seedUsers = append(seedUsers, users[0].ID)
+	}
+	if len(seedUsers) == 0 {
+		return nil
+	}
+
+	ptr := func(value int64) *int64 { return &value }
+	type demoEntry struct {
+		projectID    int64
+		activityID   int64
+		taskID       *int64
+		workstreamID *int64
+		hours        int
+		daysAgo      int
+		description  string
+	}
+	entries := []demoEntry{
+		{projectID: projectOne.ID, activityID: activityDesign.ID, taskID: ptr(taskModel.ID), workstreamID: ptr(workstreamDesign.ID), hours: 4, daysAgo: 1, description: "Detailed design updates"},
+		{projectID: projectOne.ID, activityID: activityReview.ID, taskID: ptr(taskDrawings.ID), workstreamID: ptr(workstreamDesign.ID), hours: 3, daysAgo: 2, description: "Internal drawing review"},
+		{projectID: projectTwo.ID, activityID: activitySite.ID, taskID: ptr(taskCommissioning.ID), workstreamID: ptr(workstreamField.ID), hours: 5, daysAgo: 3, description: "Site commissioning support"},
+		{projectID: projectTwo.ID, activityID: activityReview.ID, taskID: ptr(taskCommissioning.ID), workstreamID: ptr(workstreamField.ID), hours: 2, daysAgo: 5, description: "Issue close-out review"},
+	}
+	for index, entry := range entries {
+		userID := seedUsers[index%len(seedUsers)]
+		startedAt := time.Now().UTC().AddDate(0, 0, -entry.daysAgo).Truncate(time.Hour).Add(9 * time.Hour)
+		endedAt := startedAt.Add(time.Duration(entry.hours) * time.Hour)
+		timesheet := &domain.Timesheet{
+			WorkspaceID:  workspaceID,
+			UserID:       userID,
+			CustomerID:   customer.ID,
+			ProjectID:    entry.projectID,
+			WorkstreamID: entry.workstreamID,
+			ActivityID:   entry.activityID,
+			TaskID:       entry.taskID,
+			StartedAt:    startedAt,
+			EndedAt:      &endedAt,
+			Timezone:     "UTC",
+			Billable:     true,
+			Description:  demoDataNamePrefix + entry.description,
+		}
+		if err := s.CreateTimesheet(ctx, timesheet, nil); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Store) ListGroups(ctx context.Context, workspaceID int64) ([]domain.Group, error) {
@@ -2408,7 +2614,7 @@ func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (dom
 	return summary, watchRows.Err()
 }
 
-func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContext, projectID int64) (domain.ProjectDashboard, error) {
+func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContext, projectID int64, filter domain.ProjectDashboardFilter) (domain.ProjectDashboard, error) {
 	var dashboard domain.ProjectDashboard
 	project, err := s.Project(ctx, projectID)
 	if err != nil || project == nil {
@@ -2418,6 +2624,11 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, sql.ErrNoRows
 	}
 	dashboard.Project = *project
+	dashboard.Filter = filter
+
+	filterWhere, filterArgs := projectDashboardFilterSQL(filter)
+	baseArgs := append([]any{access.WorkspaceID, projectID}, filterArgs...)
+
 	err = s.db.QueryRowContext(ctx, `SELECT
 		COALESCE(SUM(duration_seconds),0),
 		COALESCE(SUM(CASE WHEN billable=1 THEN rate_cents*duration_seconds/3600 ELSE 0 END),0),
@@ -2425,7 +2636,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		COALESCE(SUM(CASE WHEN billable=1 AND exported=0 THEN rate_cents*duration_seconds/3600 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN billable=1 THEN duration_seconds ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN billable=0 THEN duration_seconds ELSE 0 END),0)
-		FROM timesheets WHERE workspace_id=? AND project_id=?`, access.WorkspaceID, projectID).
+		FROM timesheets t WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere, baseArgs...).
 		Scan(&dashboard.TrackedSeconds, &dashboard.BillableCents, &dashboard.UnbilledSeconds, &dashboard.UnbilledCents, &dashboard.BillableSeconds, &dashboard.NonBillableSeconds)
 	if err != nil {
 		return dashboard, err
@@ -2444,16 +2655,31 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 	}
 	dashboard.Alert = (project.EstimateSeconds > 0 && dashboard.EstimatePercent >= threshold) || (project.BudgetCents > 0 && dashboard.BudgetPercent >= threshold)
 
-	taskRows, err := s.db.QueryContext(ctx, `SELECT ta.id, ta.name,
+	taskRows, err := s.db.QueryContext(ctx, `SELECT
+		COALESCE(ta.id, 0),
+		CASE
+			WHEN t.task_id IS NULL THEN 'Unassigned task'
+			WHEN ta.id IS NULL THEN 'Unknown task #' || CAST(t.task_id AS TEXT)
+			WHEN ta.archived=1 THEN ta.name || ' (archived)'
+			ELSE ta.name
+		END,
 		COALESCE(SUM(t.duration_seconds),0),
 		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0),
-		ta.billable
-		FROM tasks ta
-		LEFT JOIN timesheets t ON t.task_id=ta.id AND t.workspace_id=ta.workspace_id
-		WHERE ta.workspace_id=? AND ta.project_id=?
-		GROUP BY ta.id
-		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, ta.name
-		LIMIT 6`, access.WorkspaceID, projectID)
+		COALESCE(ta.billable, 1)
+		FROM timesheets t
+		LEFT JOIN tasks ta ON ta.id=t.task_id AND ta.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			COALESCE(ta.id, 0),
+			CASE
+				WHEN t.task_id IS NULL THEN 'Unassigned task'
+				WHEN ta.id IS NULL THEN 'Unknown task #' || CAST(t.task_id AS TEXT)
+				WHEN ta.archived=1 THEN ta.name || ' (archived)'
+				ELSE ta.name
+			END,
+			COALESCE(ta.billable, 1)
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, 2
+		LIMIT 6`, baseArgs...)
 	if err != nil {
 		return dashboard, err
 	}
@@ -2474,10 +2700,10 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		COALESCE(SUM(CASE WHEN t.billable=1 THEN t.duration_seconds ELSE 0 END),0)
 		FROM users u
 		JOIN timesheets t ON t.user_id=u.id
-		WHERE t.workspace_id=? AND t.project_id=?
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
 		GROUP BY u.id
 		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, u.display_name
-		LIMIT 6`, access.WorkspaceID, projectID)
+		LIMIT 6`, baseArgs...)
 	if err != nil {
 		return dashboard, err
 	}
@@ -2492,7 +2718,313 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 	if err := contributorRows.Err(); err != nil {
 		return dashboard, err
 	}
+
+	workstreamRows, err := s.db.QueryContext(ctx, `SELECT
+		COALESCE(w.id, 0),
+		CASE
+			WHEN t.workstream_id IS NULL THEN 'Unassigned workstream'
+			WHEN w.id IS NULL THEN 'Unknown workstream #' || CAST(t.workstream_id AS TEXT)
+			ELSE w.name
+		END,
+		COALESCE(SUM(t.duration_seconds),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0)
+		FROM timesheets t
+		LEFT JOIN workstreams w ON w.id=t.workstream_id AND w.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			COALESCE(w.id, 0),
+			CASE
+				WHEN t.workstream_id IS NULL THEN 'Unassigned workstream'
+				WHEN w.id IS NULL THEN 'Unknown workstream #' || CAST(t.workstream_id AS TEXT)
+				ELSE w.name
+			END
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, 2`, baseArgs...)
+	if err != nil {
+		return dashboard, err
+	}
+	defer workstreamRows.Close()
+	for workstreamRows.Next() {
+		var item domain.ProjectBreakdownSlice
+		if err := workstreamRows.Scan(&item.ItemID, &item.Name, &item.TrackedSeconds, &item.UnbilledSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.WorkstreamBreakdown = append(dashboard.WorkstreamBreakdown, item)
+	}
+	if err := workstreamRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	workTypeRows, err := s.db.QueryContext(ctx, `SELECT
+		COALESCE(a.id, 0),
+		CASE
+			WHEN t.activity_id IS NULL THEN 'Unassigned work type'
+			WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+			ELSE a.name
+		END,
+		COALESCE(SUM(t.duration_seconds),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0)
+		FROM timesheets t
+		LEFT JOIN activities a ON a.id=t.activity_id AND a.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			COALESCE(a.id, 0),
+			CASE
+				WHEN t.activity_id IS NULL THEN 'Unassigned work type'
+				WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+				ELSE a.name
+			END
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, 2`, baseArgs...)
+	if err != nil {
+		return dashboard, err
+	}
+	defer workTypeRows.Close()
+	for workTypeRows.Next() {
+		var item domain.ProjectBreakdownSlice
+		if err := workTypeRows.Scan(&item.ItemID, &item.Name, &item.TrackedSeconds, &item.UnbilledSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.WorkTypeBreakdown = append(dashboard.WorkTypeBreakdown, item)
+	}
+	if err := workTypeRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	taskBreakdownRows, err := s.db.QueryContext(ctx, `SELECT
+		COALESCE(ta.id, 0),
+		CASE
+			WHEN t.task_id IS NULL THEN 'Unassigned task'
+			WHEN ta.id IS NULL THEN 'Unknown task #' || CAST(t.task_id AS TEXT)
+			WHEN ta.archived=1 THEN ta.name || ' (archived)'
+			ELSE ta.name
+		END,
+		COALESCE(SUM(t.duration_seconds),0),
+		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0)
+		FROM timesheets t
+		LEFT JOIN tasks ta ON ta.id=t.task_id AND ta.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			COALESCE(ta.id, 0),
+			CASE
+				WHEN t.task_id IS NULL THEN 'Unassigned task'
+				WHEN ta.id IS NULL THEN 'Unknown task #' || CAST(t.task_id AS TEXT)
+				WHEN ta.archived=1 THEN ta.name || ' (archived)'
+				ELSE ta.name
+			END
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, 2`, baseArgs...)
+	if err != nil {
+		return dashboard, err
+	}
+	defer taskBreakdownRows.Close()
+	for taskBreakdownRows.Next() {
+		var item domain.ProjectBreakdownSlice
+		if err := taskBreakdownRows.Scan(&item.ItemID, &item.Name, &item.TrackedSeconds, &item.UnbilledSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.TaskBreakdown = append(dashboard.TaskBreakdown, item)
+	}
+	if err := taskBreakdownRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	workstreamContributionRows, err := s.db.QueryContext(ctx, `SELECT
+		u.id,
+		u.display_name,
+		COALESCE(w.id, 0),
+		CASE
+			WHEN t.workstream_id IS NULL THEN 'Unassigned workstream'
+			WHEN w.id IS NULL THEN 'Unknown workstream #' || CAST(t.workstream_id AS TEXT)
+			ELSE w.name
+		END,
+		COALESCE(SUM(t.duration_seconds),0)
+		FROM timesheets t
+		JOIN users u ON u.id=t.user_id
+		LEFT JOIN workstreams w ON w.id=t.workstream_id AND w.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			u.id,
+			u.display_name,
+			COALESCE(w.id, 0),
+			CASE
+				WHEN t.workstream_id IS NULL THEN 'Unassigned workstream'
+				WHEN w.id IS NULL THEN 'Unknown workstream #' || CAST(t.workstream_id AS TEXT)
+				ELSE w.name
+			END
+		HAVING COALESCE(SUM(t.duration_seconds),0) > 0
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, u.display_name, 4`, baseArgs...)
+	if err != nil {
+		return dashboard, err
+	}
+	defer workstreamContributionRows.Close()
+	for workstreamContributionRows.Next() {
+		var item domain.ProjectContributionSummary
+		if err := workstreamContributionRows.Scan(&item.UserID, &item.DisplayName, &item.ItemID, &item.ItemName, &item.TrackedSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.WorkstreamContributors = append(dashboard.WorkstreamContributors, item)
+	}
+	if err := workstreamContributionRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	workTypeContributionRows, err := s.db.QueryContext(ctx, `SELECT
+		u.id,
+		u.display_name,
+		COALESCE(a.id, 0),
+		CASE
+			WHEN t.activity_id IS NULL THEN 'Unassigned work type'
+			WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+			ELSE a.name
+		END,
+		COALESCE(SUM(t.duration_seconds),0)
+		FROM timesheets t
+		JOIN users u ON u.id=t.user_id
+		LEFT JOIN activities a ON a.id=t.activity_id AND a.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			u.id,
+			u.display_name,
+			COALESCE(a.id, 0),
+			CASE
+				WHEN t.activity_id IS NULL THEN 'Unassigned work type'
+				WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+				ELSE a.name
+			END
+		HAVING COALESCE(SUM(t.duration_seconds),0) > 0
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, u.display_name, 4`, baseArgs...)
+	if err != nil {
+		return dashboard, err
+	}
+	defer workTypeContributionRows.Close()
+	for workTypeContributionRows.Next() {
+		var item domain.ProjectContributionSummary
+		if err := workTypeContributionRows.Scan(&item.UserID, &item.DisplayName, &item.ItemID, &item.ItemName, &item.TrackedSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.WorkTypeContributors = append(dashboard.WorkTypeContributors, item)
+	}
+	if err := workTypeContributionRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	taskContributionRows, err := s.db.QueryContext(ctx, `SELECT
+		u.id,
+		u.display_name,
+		COALESCE(ta.id, 0),
+		CASE
+			WHEN t.task_id IS NULL THEN 'Unassigned task'
+			WHEN ta.id IS NULL THEN 'Unknown task #' || CAST(t.task_id AS TEXT)
+			WHEN ta.archived=1 THEN ta.name || ' (archived)'
+			ELSE ta.name
+		END,
+		COALESCE(SUM(t.duration_seconds),0)
+		FROM timesheets t
+		JOIN users u ON u.id=t.user_id
+		LEFT JOIN tasks ta ON ta.id=t.task_id AND ta.workspace_id=t.workspace_id
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		GROUP BY
+			u.id,
+			u.display_name,
+			COALESCE(ta.id, 0),
+			CASE
+				WHEN t.task_id IS NULL THEN 'Unassigned task'
+				WHEN ta.id IS NULL THEN 'Unknown task #' || CAST(t.task_id AS TEXT)
+				WHEN ta.archived=1 THEN ta.name || ' (archived)'
+				ELSE ta.name
+			END
+		HAVING COALESCE(SUM(t.duration_seconds),0) > 0
+		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, u.display_name, 4`, baseArgs...)
+	if err != nil {
+		return dashboard, err
+	}
+	defer taskContributionRows.Close()
+	for taskContributionRows.Next() {
+		var item domain.ProjectContributionSummary
+		if err := taskContributionRows.Scan(&item.UserID, &item.DisplayName, &item.ItemID, &item.ItemName, &item.TrackedSeconds); err != nil {
+			return dashboard, err
+		}
+		dashboard.TaskContributors = append(dashboard.TaskContributors, item)
+	}
+	if err := taskContributionRows.Err(); err != nil {
+		return dashboard, err
+	}
+
+	disambiguateProjectBreakdownNames(dashboard.WorkstreamBreakdown)
+	disambiguateProjectBreakdownNames(dashboard.WorkTypeBreakdown)
+	disambiguateProjectBreakdownNames(dashboard.TaskBreakdown)
+	disambiguateProjectContributionItemNames(dashboard.WorkstreamContributors)
+	disambiguateProjectContributionItemNames(dashboard.WorkTypeContributors)
+	disambiguateProjectContributionItemNames(dashboard.TaskContributors)
 	return dashboard, nil
+}
+
+func projectDashboardFilterSQL(filter domain.ProjectDashboardFilter) (string, []any) {
+	where := ""
+	args := []any{}
+	if filter.Begin != nil {
+		where += " AND t.started_at>=?"
+		args = append(args, formatTime(filter.Begin.UTC()))
+	}
+	if filter.End != nil {
+		endExclusive := filter.End.UTC().AddDate(0, 0, 1)
+		where += " AND t.started_at<?"
+		args = append(args, formatTime(endExclusive))
+	}
+	if filter.WorkstreamID > 0 {
+		where += " AND t.workstream_id=?"
+		args = append(args, filter.WorkstreamID)
+	}
+	if filter.ActivityID > 0 {
+		where += " AND t.activity_id=?"
+		args = append(args, filter.ActivityID)
+	}
+	if filter.TaskID > 0 {
+		where += " AND t.task_id=?"
+		args = append(args, filter.TaskID)
+	}
+	if filter.UserID > 0 {
+		where += " AND t.user_id=?"
+		args = append(args, filter.UserID)
+	}
+	if filter.GroupID > 0 {
+		where += " AND t.user_id IN (SELECT user_id FROM group_members WHERE group_id=?)"
+		args = append(args, filter.GroupID)
+	}
+	return where, args
+}
+
+func disambiguateProjectBreakdownNames(items []domain.ProjectBreakdownSlice) {
+	nameCounts := map[string]int{}
+	for _, item := range items {
+		name := strings.TrimSpace(item.Name)
+		if name != "" {
+			nameCounts[name]++
+		}
+	}
+	for i := range items {
+		name := strings.TrimSpace(items[i].Name)
+		if items[i].ItemID > 0 && name != "" && nameCounts[name] > 1 {
+			items[i].Name = fmt.Sprintf("%s (#%d)", name, items[i].ItemID)
+		}
+	}
+}
+
+func disambiguateProjectContributionItemNames(items []domain.ProjectContributionSummary) {
+	nameIDs := map[string]map[int64]bool{}
+	for _, item := range items {
+		name := strings.TrimSpace(item.ItemName)
+		if name != "" {
+			if nameIDs[name] == nil {
+				nameIDs[name] = map[int64]bool{}
+			}
+			nameIDs[name][item.ItemID] = true
+		}
+	}
+	for i := range items {
+		name := strings.TrimSpace(items[i].ItemName)
+		if items[i].ItemID > 0 && name != "" && len(nameIDs[name]) > 1 {
+			items[i].ItemName = fmt.Sprintf("%s (#%d)", name, items[i].ItemID)
+		}
+	}
 }
 
 func (s *Store) CreateWebhookEndpoint(ctx context.Context, w *domain.WebhookEndpoint) error {

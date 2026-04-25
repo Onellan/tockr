@@ -67,7 +67,7 @@ func TestUnauthenticatedAccessRedirectsToLogin(t *testing.T) {
 		"/", "/account", "/customers", "/projects", "/tasks", "/activities",
 		"/tags", "/groups", "/rates", "/timesheets", "/calendar", "/reports",
 		"/invoices", "/workstreams", "/admin", "/admin/users",
-		"/admin/schedule", "/admin/exchange-rates", "/admin/recalculate",
+		"/admin/schedule", "/admin/demo-data", "/admin/exchange-rates", "/admin/recalculate",
 		"/reports/utilization",
 	}
 	for _, route := range protectedRoutes {
@@ -316,6 +316,69 @@ func TestWorkScheduleSettingsForbiddenForRegularUser(t *testing.T) {
 	cookie := loginCookie(t, app, "reg@example.com", "reg12345")
 	if rec := getWithCookie(app, "/admin/schedule", cookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("GET /admin/schedule for regular user = %d, want 403", rec.Code)
+	}
+}
+
+func TestAdminDemoDataPageAndActions(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+
+	ctx := context.Background()
+	workspaceID, err := store.DefaultWorkspaceForOrganization(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	rec := getWithCookie(app, "/admin/demo-data", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/demo-data returned %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, snippet := range []string{"Add demo data", "Remove demo data", "Default workspace target"} {
+		if !strings.Contains(body, snippet) {
+			t.Fatalf("demo data page missing %q", snippet)
+		}
+	}
+	csrf := csrfFromBody(t, body)
+
+	rec = postFormWithCookie(app, "/admin/demo-data/add", cookie, url.Values{"csrf": {csrf}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/demo-data/add returned %d", rec.Code)
+	}
+	var customerCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND name LIKE ?`, workspaceID, "[Demo] %").Scan(&customerCount); err != nil {
+		t.Fatal(err)
+	}
+	if customerCount == 0 {
+		t.Fatal("expected demo customers after add action")
+	}
+
+	body = getWithCookies(app, "/admin/demo-data", withCookies(cookie, rec.Result().Cookies())...).Body.String()
+	csrf = csrfFromBody(t, body)
+	rec = postFormWithCookie(app, "/admin/demo-data/remove", cookie, url.Values{"csrf": {csrf}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /admin/demo-data/remove returned %d", rec.Code)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND name LIKE ?`, workspaceID, "[Demo] %").Scan(&customerCount); err != nil {
+		t.Fatal(err)
+	}
+	if customerCount != 0 {
+		t.Fatalf("expected demo customers to be removed, found %d", customerCount)
+	}
+}
+
+func TestAdminDemoDataForbiddenForRegularUser(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	if err := store.CreateUser(context.Background(), domain.User{
+		Email: "demo.regular@example.com", Username: "demoreg", DisplayName: "Demo Regular", Timezone: "UTC", Enabled: true,
+	}, "reg12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "demo.regular@example.com", "reg12345")
+	if rec := getWithCookie(app, "/admin/demo-data", cookie); rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /admin/demo-data for regular user = %d, want 403", rec.Code)
 	}
 }
 
@@ -1116,8 +1179,10 @@ func TestProjectDashboardRendersCorrectly(t *testing.T) {
 		t.Fatalf("GET /projects/{id}/dashboard returned %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, project.Name) {
-		t.Fatalf("project dashboard missing project name %q", project.Name)
+	for _, expected := range []string{project.Name, "Project effort filters", "Captured time distribution", "Key contributors by category"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("project dashboard missing %q", expected)
+		}
 	}
 }
 
@@ -1153,9 +1218,38 @@ func TestProjectDashboardsHubRendersAndLoadsSelection(t *testing.T) {
 		t.Fatalf("GET /project-dashboards?project_id= returned %d", rec.Code)
 	}
 	body = rec.Body.String()
-	for _, expected := range []string{project.Name, "Tracked", "Key contributors"} {
+	for _, expected := range []string{project.Name, "Tracked", "Captured time distribution", "Key contributors by category"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("selected project dashboard missing %q", expected)
+		}
+	}
+}
+
+func TestProjectDashboardFilterQueryRendersSelections(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	_, project, activity, task := seedSelectorFixtures(t, store)
+	ws := &domain.Workstream{WorkspaceID: 1, Name: "Engineering", Visible: true}
+	if err := store.UpsertWorkstream(context.Background(), ws); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	rec := getWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/dashboard?workstream_id="+strconv.FormatInt(ws.ID, 10)+"&activity_id="+strconv.FormatInt(activity.ID, 10)+"&task_id="+strconv.FormatInt(task.ID, 10)+"&begin=2026-04-01&end=2026-04-30", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("filtered dashboard returned %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, expected := range []string{
+		`name="begin" value="2026-04-01"`,
+		`name="end" value="2026-04-30"`,
+		`name="workstream_id"`,
+		`name="activity_id"`,
+		`name="task_id"`,
+		`Apply filters`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("filtered dashboard missing %q", expected)
 		}
 	}
 }

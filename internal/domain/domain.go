@@ -409,6 +409,31 @@ type ReportFilter struct {
 	Billable   *bool
 }
 
+type ProjectDashboardFilter struct {
+	Begin        *time.Time
+	End          *time.Time
+	WorkstreamID int64
+	ActivityID   int64
+	TaskID       int64
+	UserID       int64
+	GroupID      int64
+}
+
+type ProjectBreakdownSlice struct {
+	ItemID          int64
+	Name            string
+	TrackedSeconds  int64
+	UnbilledSeconds int64
+}
+
+type ProjectContributionSummary struct {
+	UserID         int64
+	DisplayName    string
+	ItemID         int64
+	ItemName       string
+	TrackedSeconds int64
+}
+
 type DashboardRecentWork struct {
 	TimesheetID     int64
 	CustomerID      int64
@@ -462,20 +487,27 @@ type ProjectContributorSummary struct {
 }
 
 type ProjectDashboard struct {
-	Project            Project
-	TrackedSeconds     int64
-	BillableCents      int64
-	UnbilledSeconds    int64
-	UnbilledCents      int64
-	BillableSeconds    int64
-	NonBillableSeconds int64
-	EstimatePercent    int64
-	BudgetPercent      int64
-	OverEstimate       bool
-	OverBudget         bool
-	Alert              bool
-	TaskSummaries      []ProjectTaskSummary
-	Contributors       []ProjectContributorSummary
+	Project                Project
+	Filter                 ProjectDashboardFilter
+	TrackedSeconds         int64
+	BillableCents          int64
+	UnbilledSeconds        int64
+	UnbilledCents          int64
+	BillableSeconds        int64
+	NonBillableSeconds     int64
+	EstimatePercent        int64
+	BudgetPercent          int64
+	OverEstimate           bool
+	OverBudget             bool
+	Alert                  bool
+	TaskSummaries          []ProjectTaskSummary
+	Contributors           []ProjectContributorSummary
+	WorkstreamBreakdown    []ProjectBreakdownSlice
+	WorkTypeBreakdown      []ProjectBreakdownSlice
+	TaskBreakdown          []ProjectBreakdownSlice
+	WorkstreamContributors []ProjectContributionSummary
+	WorkTypeContributors   []ProjectContributionSummary
+	TaskContributors       []ProjectContributionSummary
 }
 
 type ProjectTemplate struct {

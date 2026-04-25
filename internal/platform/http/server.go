@@ -147,6 +147,9 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Get("/admin/email", s.requirePermission(auth.PermManageOrg, s.emailSettings))
 		r.Post("/admin/email", s.requirePermission(auth.PermManageOrg, s.saveEmailSettings))
 		r.Post("/admin/email/test", s.requirePermission(auth.PermManageOrg, s.testEmailSettings))
+		r.Get("/admin/demo-data", s.requirePermission(auth.PermManageOrg, s.adminDemoData))
+		r.Post("/admin/demo-data/add", s.requirePermission(auth.PermManageOrg, s.adminDemoDataAdd))
+		r.Post("/admin/demo-data/remove", s.requirePermission(auth.PermManageOrg, s.adminDemoDataRemove))
 		r.Get("/reports", s.requirePermission(auth.PermViewReports, s.reports))
 		r.Post("/reports/saved", s.requirePermission(auth.PermViewReports, s.saveReport))
 		r.Post("/reports/saved/{id}", s.requirePermission(auth.PermViewReports, s.editSavedReport))
@@ -723,15 +726,16 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) projectDashboards(w http.ResponseWriter, r *http.Request) {
-	selectData, err := s.selectorData(r, false, false)
+	selectData, err := s.selectorData(r, true, true)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
 	selectedProjectID := int64Param(r, "project_id")
+	filter := projectDashboardFilterFromRequest(r)
 	var dashboard *domain.ProjectDashboard
 	if selectedProjectID > 0 {
-		item, err := s.store.ProjectDashboard(r.Context(), s.access(r), selectedProjectID)
+		item, err := s.store.ProjectDashboard(r.Context(), s.access(r), selectedProjectID, filter)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				http.NotFound(w, r)
@@ -742,16 +746,21 @@ func (s *Server) projectDashboards(w http.ResponseWriter, r *http.Request) {
 		}
 		dashboard = &item
 	}
-	s.render(w, r, templates.ProjectDashboards(s.nav(r), selectData.Projects, selectedProjectID, dashboard))
+	s.render(w, r, templates.ProjectDashboards(s.nav(r), selectData.Projects, selectedProjectID, dashboard, selectData))
 }
 
 func (s *Server) projectDashboard(w http.ResponseWriter, r *http.Request) {
-	dashboard, err := s.store.ProjectDashboard(r.Context(), s.access(r), pathID(r))
+	selectData, err := s.selectorData(r, true, true)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	dashboard, err := s.store.ProjectDashboard(r.Context(), s.access(r), pathID(r), projectDashboardFilterFromRequest(r))
 	if err != nil || dashboard.Project.ID == 0 {
 		http.NotFound(w, r)
 		return
 	}
-	s.render(w, r, templates.ProjectDashboard(s.nav(r), dashboard))
+	s.render(w, r, templates.ProjectDashboard(s.nav(r), dashboard, selectData))
 }
 
 func (s *Server) projectMembers(w http.ResponseWriter, r *http.Request) {
@@ -2214,15 +2223,15 @@ func customerLabel(customer domain.Customer) string {
 	return strings.TrimSpace(customer.Name)
 }
 
-func projectLabel(project domain.Project, customers map[int64]string) string {
+func projectLabel(project domain.Project, _ map[int64]string) string {
 	return project.Name
 }
 
-func activityLabel(activity domain.Activity, projects map[int64]string) string {
+func activityLabel(activity domain.Activity, _ map[int64]string) string {
 	return activity.Name
 }
 
-func taskLabel(task domain.Task, projects map[int64]string) string {
+func taskLabel(task domain.Task, _ map[int64]string) string {
 	return task.Name
 }
 
@@ -2595,11 +2604,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, component templ.
 	}
 }
 
-func (s *Server) badRequest(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) badRequest(w http.ResponseWriter, _ *http.Request, err error) {
 	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
-func (s *Server) serverError(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) serverError(w http.ResponseWriter, _ *http.Request, err error) {
 	if err != nil {
 		s.log.Error("request failed", "err", err)
 	}
@@ -2785,6 +2794,48 @@ func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redirectWithFlash(w, r, "/admin/email", "success", "SMTP test email sent")
+}
+
+func (s *Server) adminDemoData(w http.ResponseWriter, r *http.Request) {
+	workspaceName := ""
+	workspaceID, err := s.store.DefaultWorkspaceForOrganization(r.Context(), s.access(r).OrganizationID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		s.serverError(w, r, err)
+		return
+	}
+	if workspaceID > 0 {
+		workspace, err := s.store.Workspace(r.Context(), workspaceID)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		if workspace != nil {
+			workspaceName = workspace.Name
+		}
+	}
+	s.render(w, r, templates.AdminDemoData(s.nav(r), workspaceName, s.popFlash(w, r)))
+}
+
+func (s *Server) adminDemoDataAdd(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := s.store.SeedDemoData(r.Context(), s.access(r).OrganizationID)
+	if err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to add demo data: "+err.Error())
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "add")
+	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data added to the default workspace")
+}
+
+func (s *Server) adminDemoDataRemove(w http.ResponseWriter, r *http.Request) {
+	workspaceID, err := s.store.ClearDemoData(r.Context(), s.access(r).OrganizationID)
+	if err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to remove demo data: "+err.Error())
+		return
+	}
+	uid := s.state(r).User.ID
+	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "remove")
+	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data removed from the default workspace")
 }
 
 // ─── Saved report edit/delete/share ───────────────────────────────────────────
@@ -3303,6 +3354,18 @@ func parseDateParam(r *http.Request, key string) *time.Time {
 		return nil
 	}
 	return &parsed
+}
+
+func projectDashboardFilterFromRequest(r *http.Request) domain.ProjectDashboardFilter {
+	return domain.ProjectDashboardFilter{
+		Begin:        parseDateParam(r, "begin"),
+		End:          parseDateParam(r, "end"),
+		WorkstreamID: int64Param(r, "workstream_id"),
+		ActivityID:   int64Param(r, "activity_id"),
+		TaskID:       int64Param(r, "task_id"),
+		UserID:       int64Param(r, "user_id"),
+		GroupID:      int64Param(r, "group_id"),
+	}
 }
 
 func formInt(r *http.Request, key string) int64 {
