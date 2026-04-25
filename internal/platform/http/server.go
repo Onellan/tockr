@@ -49,9 +49,15 @@ type requestState struct {
 	Access  domain.AccessContext
 }
 
+type flashMessage struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+}
+
 type contextKey string
 
 const stateKey contextKey = "state"
+const flashCookieName = "tockr_flash"
 
 func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	s := &Server{cfg: cfg, store: store, log: log}
@@ -263,7 +269,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, templates.Login(r.URL.Query().Get("message")))
+	s.render(w, r, templates.Login(s.popFlash(w, r)))
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +279,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.store.FindUserByEmail(r.Context(), r.FormValue("email"))
 	if err != nil || user == nil || !auth.CheckPassword(user.PasswordHash, r.FormValue("password")) || !user.Enabled {
-		http.Redirect(w, r, "/login?message=Invalid+credentials", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/login", "error", "Invalid credentials")
 		return
 	}
 	if s.totpAvailable() && user.TOTPEnabled {
@@ -288,7 +294,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !valid {
-			http.Redirect(w, r, "/login?message=Two-factor+code+required", http.StatusSeeOther)
+			s.redirectWithFlash(w, r, "/login", "error", "Two-factor code required")
 			return
 		}
 	}
@@ -301,14 +307,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), &user.ID, "login", "user", &user.ID, "")
 	http.SetCookie(w, s.cookie(session.ID))
 	if s.totpRequired() && !user.TOTPEnabled {
-		http.Redirect(w, r, "/account?message=Two-factor+setup+is+required", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "warning", "Two-factor setup is required")
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) forgotPasswordPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, templates.ForgotPassword(r.URL.Query().Get("message")))
+	s.render(w, r, templates.ForgotPassword(s.popFlash(w, r)))
 }
 
 func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
@@ -319,7 +325,7 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	generic := "If that email exists, a reset link has been sent."
 	sender := emailer.NewSender(s.cfg)
 	if err := sender.Validate(); err != nil {
-		http.Redirect(w, r, "/forgot-password?message=Password+reset+email+is+not+configured.+Contact+an+administrator.", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/forgot-password", "error", "Password reset email is not configured. Contact an administrator.")
 		return
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
@@ -345,11 +351,11 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		}
 		s.store.Audit(r.Context(), &user.ID, "request", "password_reset", &user.ID, "")
 	}
-	http.Redirect(w, r, "/forgot-password?message="+url.QueryEscape(generic), http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/forgot-password", "info", generic)
 }
 
 func (s *Server) resetPasswordPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, templates.ResetPassword(r.URL.Query().Get("token"), r.URL.Query().Get("message")))
+	s.render(w, r, templates.ResetPassword(r.URL.Query().Get("token"), s.popFlash(w, r)))
 }
 
 func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
@@ -360,7 +366,7 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSpace(r.FormValue("token"))
 	password := r.FormValue("password")
 	if len(password) < 8 || password != r.FormValue("confirm") {
-		http.Redirect(w, r, "/reset-password?token="+url.QueryEscape(token)+"&message=Password+confirmation+does+not+match", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/reset-password?token="+url.QueryEscape(token), "error", "Password confirmation does not match")
 		return
 	}
 	userID, ok, err := s.store.ResetPasswordWithToken(r.Context(), token, password)
@@ -369,11 +375,11 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		http.Redirect(w, r, "/reset-password?message=Reset+link+is+invalid+or+expired", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/reset-password", "error", "Reset link is invalid or expired")
 		return
 	}
 	s.store.Audit(r.Context(), &userID, "reset", "account", &userID, "password")
-	http.Redirect(w, r, "/login?message=Password+updated", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/login", "success", "Password updated")
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -393,7 +399,7 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 		secret = auth.NewTOTPSecret()
 		uri = auth.TOTPURI("Tockr", state.User.Email, secret)
 	}
-	s.render(w, r, templates.Account(s.nav(r), *state.User, s.cfg.TOTPMode, secret, uri, nil, r.URL.Query().Get("message")))
+	s.render(w, r, templates.Account(s.nav(r), *state.User, s.cfg.TOTPMode, secret, uri, nil, s.popFlash(w, r)))
 }
 
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +418,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Audit(r.Context(), &userID, "update", "account", &userID, "profile")
-	http.Redirect(w, r, "/account?message=Profile+updated", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/account", "success", "Profile updated")
 }
 
 func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
@@ -420,11 +426,11 @@ func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
 	state := s.state(r)
 	newEmail := normalizeEmail(r.FormValue("new_email"))
 	if _, err := mail.ParseAddress(newEmail); err != nil || !strings.Contains(newEmail, "@") {
-		http.Redirect(w, r, "/account?message=Enter+a+valid+email+address", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "error", "Enter a valid email address")
 		return
 	}
 	if strings.EqualFold(newEmail, state.User.Email) {
-		http.Redirect(w, r, "/account?message=That+email+is+already+on+your+account", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "info", "That email is already on your account")
 		return
 	}
 	existing, err := s.store.FindUserByEmail(r.Context(), newEmail)
@@ -433,12 +439,12 @@ func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		http.Redirect(w, r, "/account?message=That+email+is+already+in+use", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "error", "That email is already in use")
 		return
 	}
 	sender := emailer.NewSender(s.cfg)
 	if err := sender.Validate(); err != nil {
-		http.Redirect(w, r, "/account?message=Email+sending+is+not+configured", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "error", "Email sending is not configured")
 		return
 	}
 	code := numericCode(6)
@@ -455,7 +461,7 @@ func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Audit(r.Context(), &state.User.ID, "request", "account_email", &state.User.ID, newEmail)
-	http.Redirect(w, r, "/account/email/verify?message=Verification+code+sent", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/account/email/verify", "success", "Verification code sent")
 }
 
 func (s *Server) verifyEmailPage(w http.ResponseWriter, r *http.Request) {
@@ -465,7 +471,7 @@ func (s *Server) verifyEmailPage(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.VerifyEmail(s.nav(r), pending, expires, r.URL.Query().Get("message")))
+	s.render(w, r, templates.VerifyEmail(s.nav(r), pending, expires, s.popFlash(w, r)))
 }
 
 func (s *Server) verifyEmailChange(w http.ResponseWriter, r *http.Request) {
@@ -477,7 +483,7 @@ func (s *Server) verifyEmailChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		http.Redirect(w, r, "/account/email/verify?message=Verification+code+is+invalid+or+expired", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account/email/verify", "error", "Verification code is invalid or expired")
 		return
 	}
 	settings := s.store.EmailSettings(r.Context())
@@ -489,19 +495,19 @@ func (s *Server) verifyEmailChange(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.store.Audit(r.Context(), &state.User.ID, "verify", "account_email", &state.User.ID, oldEmail+" -> "+newEmail)
-	http.Redirect(w, r, "/account?message=Email+address+updated", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/account", "success", "Email address updated")
 }
 
 func (s *Server) updatePassword(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	password := r.FormValue("password")
 	if len(password) < 8 || password != r.FormValue("confirm") {
-		http.Redirect(w, r, "/account?message=Password+confirmation+does+not+match", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "error", "Password confirmation does not match")
 		return
 	}
 	user := s.state(r).User
 	if !auth.CheckPassword(user.PasswordHash, r.FormValue("current_password")) {
-		http.Redirect(w, r, "/account?message=Current+password+is+incorrect", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "error", "Current password is incorrect")
 		return
 	}
 	userID := user.ID
@@ -510,7 +516,7 @@ func (s *Server) updatePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Audit(r.Context(), &userID, "update", "account", &userID, "password")
-	http.Redirect(w, r, "/account?message=Password+updated", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/account", "success", "Password updated")
 }
 
 func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
@@ -521,7 +527,7 @@ func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	secret := strings.TrimSpace(r.FormValue("secret"))
 	if !auth.VerifyTOTP(secret, r.FormValue("code"), time.Now().UTC()) {
-		http.Redirect(w, r, "/account?message=Invalid+two-factor+code", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "error", "Invalid two-factor code")
 		return
 	}
 	codes := auth.NewRecoveryCodes(8)
@@ -534,15 +540,15 @@ func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), &userID, "enable", "totp", &userID, "")
 	nav := s.nav(r)
 	if user != nil {
-		s.render(w, r, templates.Account(nav, *user, s.cfg.TOTPMode, "", "", codes, "Two-factor authentication enabled"))
+		s.render(w, r, templates.Account(nav, *user, s.cfg.TOTPMode, "", "", codes, templates.Notice{Kind: "success", Message: "Two-factor authentication enabled"}))
 		return
 	}
-	http.Redirect(w, r, "/account?message=Two-factor+authentication+enabled", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/account", "success", "Two-factor authentication enabled")
 }
 
 func (s *Server) disableTOTP(w http.ResponseWriter, r *http.Request) {
 	if s.totpRequired() {
-		http.Redirect(w, r, "/account?message=Two-factor+is+required+for+this+deployment", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/account", "warning", "Two-factor is required for this deployment")
 		return
 	}
 	userID := s.state(r).User.ID
@@ -551,7 +557,7 @@ func (s *Server) disableTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Audit(r.Context(), &userID, "disable", "totp", &userID, "")
-	http.Redirect(w, r, "/account?message=Two-factor+authentication+disabled", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/account", "success", "Two-factor authentication disabled")
 }
 
 func (s *Server) switchWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -1190,7 +1196,9 @@ func (s *Server) timesheets(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Timesheets(s.nav(r), items, selectors, favorites, dashboardRecentFromTimesheets(items), timesheetPrefillFromRequest(r), s.editableTimesheetIDs(r, items)))
+	prefill := timesheetPrefillFromRequest(r)
+	prefill.Notice = s.popFlash(w, r)
+	s.render(w, r, templates.Timesheets(s.nav(r), items, selectors, favorites, dashboardRecentFromTimesheets(items), prefill, s.editableTimesheetIDs(r, items)))
 }
 
 func (s *Server) calendar(w http.ResponseWriter, r *http.Request) {
@@ -1228,7 +1236,7 @@ func (s *Server) editTimesheet(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.EditTimesheet(s.nav(r), selectors, timesheetPrefillFromEntry(*entry), r.URL.Query().Get("message"), entry.Exported))
+	s.render(w, r, templates.EditTimesheet(s.nav(r), selectors, timesheetPrefillFromEntry(*entry), "", entry.Exported))
 }
 
 func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
@@ -1336,7 +1344,7 @@ func (s *Server) updateTimesheet(w http.ResponseWriter, r *http.Request) {
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "update", "timesheet", &entry.ID, "")
 	s.queueEvent(r.Context(), s.access(r).WorkspaceID, "timesheet.updated", entry)
-	http.Redirect(w, r, "/timesheets?message="+url.QueryEscape("Entry updated"), http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/timesheets", "success", "Entry updated")
 }
 
 func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
@@ -1914,7 +1922,7 @@ func (s *Server) requireLogin(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if s.mustSetupTOTP(r) {
-			http.Redirect(w, r, "/account?message=Two-factor+setup+is+required", http.StatusSeeOther)
+			s.redirectWithFlash(w, r, "/account", "warning", "Two-factor setup is required")
 			return
 		}
 		next(w, r)
@@ -1928,7 +1936,7 @@ func (s *Server) requireLoginMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if s.mustSetupTOTP(r) {
-			http.Redirect(w, r, "/account?message=Two-factor+setup+is+required", http.StatusSeeOther)
+			s.redirectWithFlash(w, r, "/account", "warning", "Two-factor setup is required")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -2521,6 +2529,49 @@ func (s *Server) cookie(sessionID string) *http.Cookie {
 	return &http.Cookie{Name: "tockr_session", Value: s.sign(sessionID), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(14 * 24 * time.Hour)}
 }
 
+func (s *Server) flashCookie(kind, message string) *http.Cookie {
+	body, _ := json.Marshal(flashMessage{Kind: kind, Message: message})
+	value := base64.RawURLEncoding.EncodeToString(body)
+	return &http.Cookie{Name: flashCookieName, Value: s.sign(value), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(5 * time.Minute)}
+}
+
+func (s *Server) clearFlashCookie() *http.Cookie {
+	return &http.Cookie{Name: flashCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode}
+}
+
+func (s *Server) setFlash(w http.ResponseWriter, kind, message string) {
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+	http.SetCookie(w, s.flashCookie(kind, message))
+}
+
+func (s *Server) redirectWithFlash(w http.ResponseWriter, r *http.Request, location, kind, message string) {
+	s.setFlash(w, kind, message)
+	http.Redirect(w, r, location, http.StatusSeeOther)
+}
+
+func (s *Server) popFlash(w http.ResponseWriter, r *http.Request) templates.Notice {
+	cookie, err := r.Cookie(flashCookieName)
+	if err != nil {
+		return templates.Notice{}
+	}
+	http.SetCookie(w, s.clearFlashCookie())
+	value, ok := s.unsign(cookie.Value)
+	if !ok {
+		return templates.Notice{}
+	}
+	body, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return templates.Notice{}
+	}
+	var flash flashMessage
+	if err := json.Unmarshal(body, &flash); err != nil {
+		return templates.Notice{}
+	}
+	return templates.Notice{Kind: flash.Kind, Message: flash.Message}
+}
+
 func (s *Server) sign(value string) string {
 	mac := hmac.New(sha256.New, []byte(s.cfg.SessionSecret))
 	_, _ = mac.Write([]byte(value))
@@ -2703,7 +2754,7 @@ func (s *Server) saveWorkScheduleSettings(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) emailSettings(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, templates.EmailSettings(s.nav(r), s.smtpSettingsView(), s.store.EmailSettings(r.Context()), r.URL.Query().Get("message")))
+	s.render(w, r, templates.EmailSettings(s.nav(r), s.smtpSettingsView(), s.store.EmailSettings(r.Context()), s.popFlash(w, r)))
 }
 
 func (s *Server) saveEmailSettings(w http.ResponseWriter, r *http.Request) {
@@ -2715,14 +2766,14 @@ func (s *Server) saveEmailSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "update", "email_settings", nil, "")
-	http.Redirect(w, r, "/admin/email?message=Email+settings+saved", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/admin/email", "success", "Email settings saved")
 }
 
 func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	to := strings.TrimSpace(r.FormValue("to"))
 	if _, err := mail.ParseAddress(to); err != nil {
-		http.Redirect(w, r, "/admin/email?message=Enter+a+valid+test+recipient", http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/admin/email", "error", "Enter a valid test recipient")
 		return
 	}
 	if err := emailer.NewSender(s.cfg).Send(emailer.Message{
@@ -2730,10 +2781,10 @@ func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 		Subject: "Tockr SMTP test",
 		Text:    "This is a Tockr SMTP test email. If you received it, email sending is working.",
 	}); err != nil {
-		http.Redirect(w, r, "/admin/email?message="+url.QueryEscape("SMTP test failed: "+err.Error()), http.StatusSeeOther)
+		s.redirectWithFlash(w, r, "/admin/email", "error", "SMTP test failed: "+err.Error())
 		return
 	}
-	http.Redirect(w, r, "/admin/email?message=SMTP+test+email+sent", http.StatusSeeOther)
+	s.redirectWithFlash(w, r, "/admin/email", "success", "SMTP test email sent")
 }
 
 // ─── Saved report edit/delete/share ───────────────────────────────────────────
@@ -3043,7 +3094,7 @@ func (s *Server) recalculate(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.Recalculate(s.nav(r), preview, selectors, projectID, q.Get("since")))
+	s.render(w, r, templates.Recalculate(s.nav(r), preview, selectors, projectID, q.Get("since"), s.popFlash(w, r)))
 }
 
 func (s *Server) applyRecalculate(w http.ResponseWriter, r *http.Request) {
@@ -3066,8 +3117,8 @@ func (s *Server) applyRecalculate(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := s.state(r).User.ID
 	s.store.Audit(r.Context(), &uid, "recalculate", "rates", nil, fmt.Sprintf("updated %d timesheets", count))
-	http.Redirect(w, r, fmt.Sprintf("/admin/recalculate?project_id=%d&since=%s&applied=%d",
-		projectID, r.FormValue("since"), count), http.StatusSeeOther)
+	s.redirectWithFlash(w, r, fmt.Sprintf("/admin/recalculate?project_id=%d&since=%s",
+		projectID, url.QueryEscape(r.FormValue("since"))), "success", fmt.Sprintf("Recalculated %d timesheets", count))
 }
 
 func (s *Server) writeInvoiceFile(inv *domain.Invoice) error {
@@ -3556,7 +3607,6 @@ func timesheetPrefillFromRequest(r *http.Request) templates.TimesheetPrefill {
 		Description:   strings.TrimSpace(q.Get("description")),
 		Tags:          strings.TrimSpace(q.Get("tags")),
 		Billable:      true,
-		Message:       strings.TrimSpace(q.Get("message")),
 	}
 	if breakMinutes := strings.TrimSpace(q.Get("break_minutes")); breakMinutes != "" {
 		prefill.BreakMinutes = breakMinutes

@@ -99,9 +99,37 @@ func TestInvalidLoginCredentials(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		rec := httptest.NewRecorder()
 		app.Handler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Invalid") {
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
 			t.Errorf("bad credentials (%q/%q) returned %d loc=%s", tc.email, tc.password, rec.Code, rec.Header().Get("Location"))
 		}
+		body := getPublic(app, "/login", rec.Result().Cookies()...).Body.String()
+		if !strings.Contains(body, "Invalid credentials") {
+			t.Errorf("bad credentials (%q/%q) did not show flash message", tc.email, tc.password)
+		}
+	}
+}
+
+func TestFlashMessageShowsOnceAndDoesNotUseURLParameters(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+
+	rec := postPublicForm(app, "/login", url.Values{
+		"email":    {"admin@example.com"},
+		"password": {"wrongpassword"},
+	})
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+		t.Fatalf("bad login returned %d loc=%s", rec.Code, rec.Header().Get("Location"))
+	}
+	if strings.Contains(rec.Header().Get("Location"), "message=") || strings.Contains(rec.Header().Get("Location"), "error=") {
+		t.Fatalf("flash message leaked into redirect URL: %s", rec.Header().Get("Location"))
+	}
+	first := getPublic(app, "/login", rec.Result().Cookies()...)
+	if !strings.Contains(first.Body.String(), "Invalid credentials") {
+		t.Fatal("login page should show flash message after redirect")
+	}
+	second := getPublic(app, "/login", first.Result().Cookies()...)
+	if strings.Contains(second.Body.String(), "Invalid credentials") {
+		t.Fatal("flash message should clear after it is shown")
 	}
 }
 
@@ -151,8 +179,11 @@ func TestUpdateAccountPasswordSuccess(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r2 := httptest.NewRecorder()
 	app.Handler().ServeHTTP(r2, req)
-	if !strings.Contains(r2.Header().Get("Location"), "Invalid") {
+	if r2.Code != http.StatusSeeOther || r2.Header().Get("Location") != "/login" {
 		t.Fatal("old password should not work after change")
+	}
+	if body := getPublic(app, "/login", r2.Result().Cookies()...).Body.String(); !strings.Contains(body, "Invalid credentials") {
+		t.Fatal("old password failure should show invalid credentials flash")
 	}
 }
 
@@ -168,8 +199,11 @@ func TestUpdateAccountPasswordWrongCurrent(t *testing.T) {
 		"password":         {"newpass99"},
 		"confirm":          {"newpass99"},
 	})
-	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "incorrect") {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account" {
 		t.Fatalf("wrong current password returned %d loc=%s", rec.Code, rec.Header().Get("Location"))
+	}
+	if body := getWithCookies(app, "/account", withCookies(cookie, rec.Result().Cookies())...).Body.String(); !strings.Contains(body, "Current password is incorrect") {
+		t.Fatal("wrong current password should show account flash")
 	}
 }
 
@@ -185,8 +219,11 @@ func TestUpdateAccountPasswordMismatch(t *testing.T) {
 		"password":         {"newpass99"},
 		"confirm":          {"different"},
 	})
-	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "confirmation") {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account" {
 		t.Fatalf("password mismatch returned %d loc=%s", rec.Code, rec.Header().Get("Location"))
+	}
+	if body := getWithCookies(app, "/account", withCookies(cookie, rec.Result().Cookies())...).Body.String(); !strings.Contains(body, "Password confirmation does not match") {
+		t.Fatal("password mismatch should show account flash")
 	}
 }
 

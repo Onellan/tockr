@@ -71,33 +71,45 @@ func TestEmailChangeRequestValidationAndOTPFlow(t *testing.T) {
 	}
 	csrf := csrfFromBody(t, body)
 	rec := postFormWithCookie(app, "/account/email", cookie, url.Values{"csrf": {csrf}, "new_email": {"bad-email"}})
-	if !strings.Contains(rec.Header().Get("Location"), "valid+email") {
+	if rec.Header().Get("Location") != "/account" {
 		t.Fatalf("invalid email location = %s", rec.Header().Get("Location"))
 	}
+	if body := getWithCookies(app, "/account", withCookies(cookie, rec.Result().Cookies())...).Body.String(); !strings.Contains(body, "Enter a valid email address") {
+		t.Fatal("invalid email should show account flash")
+	}
 	rec = postFormWithCookie(app, "/account/email", cookie, url.Values{"csrf": {csrf}, "new_email": {"taken@example.com"}})
-	if !strings.Contains(rec.Header().Get("Location"), "already+in+use") {
+	if rec.Header().Get("Location") != "/account" {
 		t.Fatalf("duplicate email location = %s", rec.Header().Get("Location"))
 	}
+	if body := getWithCookies(app, "/account", withCookies(cookie, rec.Result().Cookies())...).Body.String(); !strings.Contains(body, "That email is already in use") {
+		t.Fatal("duplicate email should show account flash")
+	}
 	rec = postFormWithCookie(app, "/account/email", cookie, url.Values{"csrf": {csrf}, "new_email": {"new-admin@example.com"}})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("email change request returned %d", rec.Code)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account/email/verify" {
+		t.Fatalf("email change request returned %d location=%s", rec.Code, rec.Header().Get("Location"))
 	}
 	code := firstCode(t, smtp.next(t))
 	if loginCookie(t, app, "admin@example.com", "admin12345") == nil {
 		t.Fatal("old email should still log in before OTP verification")
 	}
-	verifyBody := getWithCookie(app, "/account/email/verify", cookie).Body.String()
+	verifyBody := getWithCookies(app, "/account/email/verify", withCookies(cookie, rec.Result().Cookies())...).Body.String()
 	if !strings.Contains(verifyBody, "new-admin@example.com") {
 		t.Fatal("verify page missing pending email")
 	}
+	if !strings.Contains(verifyBody, "Verification code sent") {
+		t.Fatal("verify page missing sent-code flash")
+	}
 	csrf = csrfFromBody(t, verifyBody)
 	rec = postFormWithCookie(app, "/account/email/verify", cookie, url.Values{"csrf": {csrf}, "code": {"000000"}})
-	if !strings.Contains(rec.Header().Get("Location"), "invalid+or+expired") {
+	if rec.Header().Get("Location") != "/account/email/verify" {
 		t.Fatalf("wrong OTP location = %s", rec.Header().Get("Location"))
 	}
+	if body := getWithCookies(app, "/account/email/verify", withCookies(cookie, rec.Result().Cookies())...).Body.String(); !strings.Contains(body, "Verification code is invalid or expired") {
+		t.Fatal("wrong OTP should show verify flash")
+	}
 	rec = postFormWithCookie(app, "/account/email/verify", cookie, url.Values{"csrf": {csrf}, "code": {code}})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("OTP verify returned %d", rec.Code)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account" {
+		t.Fatalf("OTP verify returned %d location=%s", rec.Code, rec.Header().Get("Location"))
 	}
 	notification := smtp.next(t)
 	if !strings.Contains(notification, "new-admin@example.com") || !strings.Contains(notification, "admin@example.com") {
@@ -108,7 +120,7 @@ func TestEmailChangeRequestValidationAndOTPFlow(t *testing.T) {
 		t.Fatal("active email was not changed")
 	}
 	rec = postFormWithCookie(app, "/account/email/verify", cookie, url.Values{"csrf": {csrf}, "code": {code}})
-	if !strings.Contains(rec.Header().Get("Location"), "invalid+or+expired") {
+	if rec.Header().Get("Location") != "/account/email/verify" {
 		t.Fatal("OTP should be single-use")
 	}
 	if loginCookie(t, app, "new-admin@example.com", "admin12345") == nil {
@@ -131,8 +143,11 @@ func TestEmailChangeOTPExpiry(t *testing.T) {
 	verifyBody := getWithCookie(app, "/account/email/verify", cookie).Body.String()
 	csrf = csrfFromBody(t, verifyBody)
 	rec := postFormWithCookie(app, "/account/email/verify", cookie, url.Values{"csrf": {csrf}, "code": {code}})
-	if !strings.Contains(rec.Header().Get("Location"), "invalid+or+expired") {
+	if rec.Header().Get("Location") != "/account/email/verify" {
 		t.Fatalf("expired OTP location = %s", rec.Header().Get("Location"))
+	}
+	if body := getWithCookies(app, "/account/email/verify", withCookies(cookie, rec.Result().Cookies())...).Body.String(); !strings.Contains(body, "Verification code is invalid or expired") {
+		t.Fatal("expired OTP should show verify flash")
 	}
 	if user, _ := store.FindUserByEmail(context.Background(), "expired@example.com"); user != nil {
 		t.Fatal("expired OTP should not change active email")
@@ -146,8 +161,11 @@ func TestPasswordResetGenericResponseSuccessExpiryAndReuse(t *testing.T) {
 
 	for _, email := range []string{"missing@example.com", "admin@example.com"} {
 		rec := postPublicForm(app, "/forgot-password", url.Values{"email": {email}})
-		if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "If+that+email+exists") {
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/forgot-password" {
 			t.Fatalf("forgot response for %s was %d %s", email, rec.Code, rec.Header().Get("Location"))
+		}
+		if body := getPublic(app, "/forgot-password", rec.Result().Cookies()...).Body.String(); !strings.Contains(body, "If that email exists") {
+			t.Fatalf("forgot flash missing for %s", email)
 		}
 	}
 	token := firstResetToken(t, smtp.next(t))
@@ -156,18 +174,24 @@ func TestPasswordResetGenericResponseSuccessExpiryAndReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := postPublicForm(app, "/reset-password", url.Values{"token": {token}, "password": {"resetpass99"}, "confirm": {"resetpass99"}})
-	if !strings.Contains(rec.Header().Get("Location"), "invalid+or+expired") {
+	if rec.Header().Get("Location") != "/reset-password" {
 		t.Fatalf("expired reset location = %s", rec.Header().Get("Location"))
+	}
+	if body := getPublic(app, "/reset-password", rec.Result().Cookies()...).Body.String(); !strings.Contains(body, "Reset link is invalid or expired") {
+		t.Fatal("expired reset should show flash")
 	}
 
 	postPublicForm(app, "/forgot-password", url.Values{"email": {"admin@example.com"}})
 	token = firstResetToken(t, smtp.next(t))
 	rec = postPublicForm(app, "/reset-password", url.Values{"token": {token}, "password": {"resetpass99"}, "confirm": {"resetpass99"}})
-	if rec.Code != http.StatusSeeOther || !strings.Contains(rec.Header().Get("Location"), "Password+updated") {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
 		t.Fatalf("reset success returned %d %s", rec.Code, rec.Header().Get("Location"))
 	}
+	if body := getPublic(app, "/login", rec.Result().Cookies()...).Body.String(); !strings.Contains(body, "Password updated") {
+		t.Fatal("reset success should show login flash")
+	}
 	rec = postPublicForm(app, "/reset-password", url.Values{"token": {token}, "password": {"againpass99"}, "confirm": {"againpass99"}})
-	if !strings.Contains(rec.Header().Get("Location"), "invalid+or+expired") {
+	if rec.Header().Get("Location") != "/reset-password" {
 		t.Fatal("reset token should be single-use")
 	}
 	if loginCookie(t, app, "admin@example.com", "resetpass99") == nil {
@@ -185,8 +209,11 @@ func TestAuthEmailPagesRenderAndMisconfiguredSMTPIsClear(t *testing.T) {
 		t.Fatalf("reset page returned %d", rec.Code)
 	}
 	rec := postPublicForm(app, "/forgot-password", url.Values{"email": {"admin@example.com"}})
-	if !strings.Contains(rec.Header().Get("Location"), "not+configured") {
+	if rec.Header().Get("Location") != "/forgot-password" {
 		t.Fatalf("misconfigured forgot location = %s", rec.Header().Get("Location"))
+	}
+	if body := getPublic(app, "/forgot-password", rec.Result().Cookies()...).Body.String(); !strings.Contains(body, "Password reset email is not configured") {
+		t.Fatal("misconfigured forgot should show flash")
 	}
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 	body := getWithCookie(app, "/admin/email", cookie).Body.String()
@@ -226,9 +253,15 @@ func postPublicForm(app *Server, target string, form url.Values) *httptest.Respo
 	return rec
 }
 
-func getPublic(app *Server, target string) *httptest.ResponseRecorder {
+func getPublic(app *Server, target string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	for _, cookie := range cookies {
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+	}
+	app.Handler().ServeHTTP(rec, req)
 	return rec
 }
 
