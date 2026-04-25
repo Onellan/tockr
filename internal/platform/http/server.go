@@ -129,6 +129,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/tags", s.requirePermission(auth.PermTrackTime, s.saveTag))
 		r.Get("/groups", s.requirePermission(auth.PermManageGroups, s.groups))
 		r.Post("/groups", s.requirePermission(auth.PermManageGroups, s.saveGroup))
+		r.Post("/groups/{id}", s.requirePermission(auth.PermManageGroups, s.saveGroup))
 		r.Get("/groups/{id}/members", s.requirePermission(auth.PermManageGroups, s.groupMembers))
 		r.Post("/groups/{id}/members", s.requirePermission(auth.PermManageGroups, s.groupMemberSave))
 		r.Post("/groups/{id}/members/remove", s.requirePermission(auth.PermManageGroups, s.groupMemberRemove))
@@ -711,7 +712,7 @@ func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid customer", http.StatusForbidden)
 		return
 	}
-	p := &domain.Project{ID: pathID(r), WorkspaceID: s.access(r).WorkspaceID, CustomerID: customerID, Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formInt(r, "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
+	p := &domain.Project{ID: pathID(r), WorkspaceID: s.access(r).WorkspaceID, CustomerID: customerID, Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formIntAny(r, "budget", "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertProject(r.Context(), p); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -1035,21 +1036,48 @@ func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows := [][]string{}
+	csrf := s.nav(r).CSRF
 	for _, group := range groups {
-		rows = append(rows, []string{group.Name, group.Description, fmt.Sprintf(`<a class="table-action" href="/groups/%d/members">Members</a>`, group.ID)})
+		actions := fmt.Sprintf(`<details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/groups/%d"><input type="hidden" name="csrf" value="%s"><div class="inline-edit-col"><label>Name<input name="name" value="%s" required></label></div><div class="inline-edit-col"><label>Description<textarea name="description">%s</textarea></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></form></details><a class="table-action" href="/groups/%d/members">Members</a>`, group.ID, html.EscapeString(csrf), html.EscapeString(group.Name), html.EscapeString(group.Description), group.ID)
+		rows = append(rows, []string{group.Name, group.Description, actions})
 	}
 	s.render(w, r, templates.EntityListRaw("Groups", s.nav(r), []string{"Name", "Description", "Action"}, rows, templates.GroupForm(s.nav(r))))
 }
 
 func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	id, err := s.store.CreateGroup(r.Context(), s.access(r).WorkspaceID, r.FormValue("name"), r.FormValue("description"))
-	if err != nil {
-		s.serverError(w, r, err)
-		return
+	groupID := pathID(r)
+	name := r.FormValue("name")
+	description := r.FormValue("description")
+	var err error
+	if groupID > 0 {
+		group, groupErr := s.store.Group(r.Context(), groupID)
+		if groupErr != nil {
+			s.serverError(w, r, groupErr)
+			return
+		}
+		if group == nil || group.WorkspaceID != s.access(r).WorkspaceID {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		err = s.store.UpdateGroup(r.Context(), &domain.Group{ID: groupID, WorkspaceID: s.access(r).WorkspaceID, Name: name, Description: description})
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	} else {
+		groupID, err = s.store.CreateGroup(r.Context(), s.access(r).WorkspaceID, name, description)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	uid := s.state(r).User.ID
-	s.store.Audit(r.Context(), &uid, "create", "group", &id, r.FormValue("name"))
+	action := "create"
+	if pathID(r) > 0 {
+		action = "update"
+	}
+	s.store.Audit(r.Context(), &uid, action, "group", &groupID, name)
 	http.Redirect(w, r, "/groups", http.StatusSeeOther)
 }
 
@@ -1145,8 +1173,8 @@ func (s *Server) saveRate(w http.ResponseWriter, r *http.Request) {
 		TaskID:              formOptionalInt(r, "task_id"),
 		UserID:              formOptionalInt(r, "user_id"),
 		Kind:                "hourly",
-		AmountCents:         formInt(r, "amount_cents"),
-		InternalAmountCents: formOptionalInt(r, "internal_amount_cents"),
+		AmountCents:         formIntAny(r, "amount", "amount_cents"),
+		InternalAmountCents: formOptionalIntAny(r, "internal_amount", "internal_amount_cents"),
 		Fixed:               checkbox(r, "fixed"),
 		EffectiveFrom:       formDateOrEpoch(r, "effective_from"),
 		EffectiveTo:         formOptionalDate(r, "effective_to"),
@@ -1171,7 +1199,7 @@ func (s *Server) saveUserCostRate(w http.ResponseWriter, r *http.Request) {
 	rate := &domain.UserCostRate{
 		WorkspaceID:   s.access(r).WorkspaceID,
 		UserID:        userID,
-		AmountCents:   formInt(r, "amount_cents"),
+		AmountCents:   formIntAny(r, "amount", "amount_cents"),
 		EffectiveFrom: formDateOrEpoch(r, "effective_from"),
 		EffectiveTo:   formOptionalDate(r, "effective_to"),
 	}
@@ -1494,7 +1522,7 @@ func (s *Server) createInvoice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid customer", http.StatusForbidden)
 		return
 	}
-	inv, err := s.store.CreateInvoice(r.Context(), s.access(r), s.state(r).User.ID, customerID, begin, end.Add(24*time.Hour), formInt(r, "tax")*100)
+	inv, err := s.store.CreateInvoice(r.Context(), s.access(r), s.state(r).User.ID, customerID, begin, end.Add(24*time.Hour), formInt(r, "tax"))
 	if err != nil {
 		s.badRequest(w, r, err)
 		return
@@ -2696,7 +2724,7 @@ func (s *Server) saveProjectWorkstream(w http.ResponseWriter, r *http.Request) {
 	pw := &domain.ProjectWorkstream{
 		ProjectID:    projectID,
 		WorkstreamID: wsID,
-		BudgetCents:  formInt(r, "budget_cents"),
+		BudgetCents:  formIntAny(r, "budget", "budget_cents"),
 		Active:       true,
 	}
 	if err := s.store.UpsertProjectWorkstream(r.Context(), pw); err != nil {
@@ -3002,7 +3030,7 @@ func (s *Server) exportReports(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="report.csv"`)
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"Name", "Count", "TrackedSeconds", "AmountCents"})
+	_ = cw.Write([]string{"Name", "Count", "TrackedSeconds", "Amount"})
 	for _, row := range rows {
 		_ = cw.Write([]string{
 			fmt.Sprintf("%v", row["name"]),
@@ -3276,8 +3304,8 @@ func htmlEscape(s string) string {
 	return s
 }
 
-func formatCents(cents int64) string {
-	return fmt.Sprintf("%.2f", float64(cents)/100)
+func formatCents(amount int64) string {
+	return fmt.Sprintf("%.2f", float64(amount))
 }
 
 func (s *Server) queueEvent(ctx context.Context, workspaceID int64, event string, payload any) {
@@ -3373,6 +3401,21 @@ func formInt(r *http.Request, key string) int64 {
 	return value
 }
 
+func formIntAny(r *http.Request, keys ...string) int64 {
+	for _, key := range keys {
+		value := strings.TrimSpace(r.FormValue(key))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return parsed
+	}
+	return 0
+}
+
 func formIntList(r *http.Request, key string) []int64 {
 	raw := r.Form[key]
 	out := make([]int64, 0, len(raw))
@@ -3394,6 +3437,17 @@ func formOptionalInt(r *http.Request, key string) *int64 {
 	}
 	value := formInt(r, key)
 	return &value
+}
+
+func formOptionalIntAny(r *http.Request, keys ...string) *int64 {
+	for _, key := range keys {
+		if strings.TrimSpace(r.FormValue(key)) == "" {
+			continue
+		}
+		value := formInt(r, key)
+		return &value
+	}
+	return nil
 }
 
 func formDateOrEpoch(r *http.Request, key string) time.Time {
@@ -3462,7 +3516,7 @@ func projectTemplateFromForm(r *http.Request) domain.ProjectTemplate {
 		Private:            checkbox(r, "private"),
 		Billable:           checkbox(r, "billable"),
 		EstimateSeconds:    formInt(r, "estimate_hours") * 3600,
-		BudgetCents:        formInt(r, "budget_cents"),
+		BudgetCents:        formIntAny(r, "budget", "budget_cents"),
 		BudgetAlertPercent: defaultInt64(formInt(r, "budget_alert_percent"), 80),
 		Archived:           checkbox(r, "archived"),
 		Tasks:              projectTemplateTasksFromText(r.FormValue("tasks")),

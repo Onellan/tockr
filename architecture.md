@@ -27,7 +27,7 @@ Tockr is a lightweight Kimai-inspired time tracking application designed for Ras
 
 ## Pi-Friendly Decisions
 
-- Money is stored as integer cents.
+- Money is stored as integer primary currency units.
 - Timestamps are stored as UTC RFC3339 text.
 - Lists are paginated by default.
 - Reports are aggregation queries, not background materialization.

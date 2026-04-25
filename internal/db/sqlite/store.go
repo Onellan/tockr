@@ -1116,6 +1116,11 @@ func (s *Store) CreateGroup(ctx context.Context, workspaceID int64, name, descri
 	return res.LastInsertId()
 }
 
+func (s *Store) UpdateGroup(ctx context.Context, group *domain.Group) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE groups SET name=?, description=? WHERE id=? AND workspace_id=?`, strings.TrimSpace(group.Name), strings.TrimSpace(group.Description), group.ID, group.WorkspaceID)
+	return err
+}
+
 func (s *Store) AddUserToGroup(ctx context.Context, groupID, userID int64) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO group_members(group_id, user_id, created_at) VALUES(?,?,?)`, groupID, userID, utcNow())
 	return err
