@@ -406,7 +406,7 @@ func ProjectForm(user *NavUser, selectors *SelectorData, project *domain.Project
 		_, _ = fmt.Fprintf(w, `<label>Project ID %s<input name="number" value="%s" placeholder="auto-generated if blank"></label>`, tipHTML("Internal reference code (e.g. PR-000001). Leave blank to auto-generate."), esc(number))
 		_, _ = fmt.Fprintf(w, `<label>Order number %s<input name="order_number" value="%s"></label>`, tipHTML("Purchase order or contract reference number for invoice line items."), esc(orderNo))
 		_, _ = fmt.Fprintf(w, `<label>Estimate hours %s<input name="estimate_hours" value="%d"></label>`, tipHTML("Total hours budgeted. Tockr shows burn against this in the project dashboard."), estimateHours)
-		_, _ = fmt.Fprintf(w, `<label>Budget %s<input name="budget_cents" value="%d" placeholder="e.g. 1000000 = 10,000 in billing unit"></label>`, tipHTML("Monetary budget in minor currency units (cents/pennies). Triggers an alert when spend reaches the alert threshold."), budgetCents)
+		_, _ = fmt.Fprintf(w, `<label>Budget %s<input name="budget" value="%d" placeholder="e.g. 10000"></label>`, tipHTML("Monetary budget in your primary billing currency unit. Triggers an alert when spend reaches the alert threshold."), budgetCents)
 		_, _ = fmt.Fprintf(w, `<label>Budget alert (%%) %s<input name="budget_alert_percent" value="%d"></label>`, tipHTML("Send a budget warning when this percentage of the monetary budget is consumed (e.g. 80 = alert at 80%)."), budgetAlert)
 		_, _ = fmt.Fprintf(w, `<label class="wide">Comment<textarea name="comment">%s</textarea></label>`, esc(comment))
 		_, _ = fmt.Fprint(w, `<div class="project-form-flags">`)
@@ -489,7 +489,7 @@ func RateForm(user *NavUser, selectors *SelectorData) templ.Component {
 		renderSelect(w, "Activity", "activity_id", optionList(selectors, "activity"), 0, false, "Any activity", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "Task", "task_id", optionList(selectors, "task"), 0, false, "Any task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "User", "user_id", optionList(selectors, "user"), 0, false, "Any user", nil)
-		_, _ = fmt.Fprint(w, `<label>Billable rate per hour<input name="amount_cents" required placeholder="e.g. 10000 = 100 per hour"></label><label>Internal cost rate per hour <span class="field-hint">optional, for margin reporting</span><input name="internal_amount_cents" placeholder="e.g. 6000 = 60 per hour"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to <span class="field-hint">leave blank for open-ended</span><input type="date" name="effective_to"></label><label class="check"><input type="checkbox" name="fixed"> Fixed total <span class="field-hint">charges the rate as a flat fee, not per hour</span></label><div class="form-actions"><button class="primary">Save rate</button></div></form>`)
+		_, _ = fmt.Fprint(w, `<label>Billable rate per hour<input name="amount" required placeholder="e.g. 100"></label><label>Internal cost rate per hour <span class="field-hint">optional, for margin reporting</span><input name="internal_amount" placeholder="e.g. 60"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to <span class="field-hint">leave blank for open-ended</span><input type="date" name="effective_to"></label><label class="check"><input type="checkbox" name="fixed"> Fixed total <span class="field-hint">charges the rate as a flat fee, not per hour</span></label><div class="form-actions"><button class="primary">Save rate</button></div></form>`)
 		return nil
 	})
 }
@@ -498,7 +498,7 @@ func UserCostForm(user *NavUser, selectors *SelectorData) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="/rates/costs"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderSelect(w, "User", "user_id", optionList(selectors, "user"), 0, true, "Select a user", nil)
-		_, _ = fmt.Fprint(w, `<label>User cost per hour<input name="amount_cents" required placeholder="e.g. 7500 = 75 per hour"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to<input type="date" name="effective_to"></label><div class="form-actions"><button class="primary">Save user cost</button></div></form>`)
+		_, _ = fmt.Fprint(w, `<label>User cost per hour<input name="amount" required placeholder="e.g. 75"></label><label>Effective from<input type="date" name="effective_from"></label><label>Effective to<input type="date" name="effective_to"></label><div class="form-actions"><button class="primary">Save user cost</button></div></form>`)
 		return nil
 	})
 }
@@ -1115,13 +1115,16 @@ func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selecto
 			if template.Archived {
 				status = "Archived"
 			}
+			var editForm strings.Builder
+			renderProjectTemplateForm(&editForm, user, template, fmt.Sprintf("/project-templates/%d", template.ID))
+			actions := `<details class="inline-edit"><summary class="table-action">Edit</summary><div class="inline-edit-form inline-edit-generic">` + editForm.String() + `<div class="inline-edit-actions"><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></details>`
 			rows = append(rows, []string{
 				template.Name,
 				template.ProjectName,
 				status,
 				fmt.Sprint(len(template.Tasks)),
 				fmt.Sprint(len(template.Activities)),
-				fmt.Sprintf(`<a class="table-action" href="/project-templates/%d">Edit</a>`, template.ID),
+				actions,
 			})
 		}
 		dataTableRaw(w, []string{"Template", "Project name", "Status", "Tasks", "Activities", "Action"}, rows)
@@ -1167,7 +1170,7 @@ func renderProjectTemplateForm(w io.Writer, user *NavUser, template domain.Proje
 	if template.Billable || template.ID == 0 {
 		billableChecked = " checked"
 	}
-	_, _ = fmt.Fprintf(w, `<form method="post" action="%s" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Template name<input name="name" value="%s" required></label><label>Project name<input name="project_name" value="%s" required></label><label>Project ID <span class="field-hint">leave blank to auto-generate</span><input name="project_number" value="%s"></label><label>Order number<input name="order_number" value="%s"></label><label>Estimate hours<input name="estimate_hours" value="%d"></label><label>Budget <span class="field-hint">in minor currency units (cents/pennies)</span><input name="budget_cents" value="%d" placeholder="e.g. 1000000 = 10,000"></label><label>Budget alert (%%) <span class="field-hint">warn when this %% is consumed</span><input name="budget_alert_percent" value="%d"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="wide">Default tasks <span class="field-hint">one task name per line</span><textarea name="tasks" placeholder="One task per line">%s</textarea></label><label class="wide">Default activities <span class="field-hint">one work type name per line</span><textarea name="activities" placeholder="One activity per line">%s</textarea></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label><label class="check"><input type="checkbox" name="private"%s> Private</label><label class="check"><input type="checkbox" name="billable"%s> Billable</label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save template</button></div></form>`,
+	_, _ = fmt.Fprintf(w, `<form method="post" action="%s" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Template name<input name="name" value="%s" required></label><label>Project name<input name="project_name" value="%s" required></label><label>Project ID <span class="field-hint">leave blank to auto-generate</span><input name="project_number" value="%s"></label><label>Order number<input name="order_number" value="%s"></label><label>Estimate hours<input name="estimate_hours" value="%d"></label><label>Budget <span class="field-hint">in primary currency units</span><input name="budget" value="%d" placeholder="e.g. 10000"></label><label>Budget alert (%%) <span class="field-hint">warn when this %% is consumed</span><input name="budget_alert_percent" value="%d"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="wide">Default tasks <span class="field-hint">one task name per line</span><textarea name="tasks" placeholder="One task per line">%s</textarea></label><label class="wide">Default activities <span class="field-hint">one work type name per line</span><textarea name="activities" placeholder="One activity per line">%s</textarea></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label><label class="check"><input type="checkbox" name="private"%s> Private</label><label class="check"><input type="checkbox" name="billable"%s> Billable</label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save template</button></div></form>`,
 		esc(action), esc(user.CSRF), esc(template.Name), esc(template.ProjectName), esc(template.ProjectNumber), esc(template.OrderNo), template.EstimateSeconds/3600, template.BudgetCents, defaultInt(template.BudgetAlertPercent, 80), esc(template.Description), esc(templateTaskLines(template.Tasks)), esc(templateActivityLines(template.Activities)), visibleChecked, privateChecked, billableChecked, archiveChecked)
 }
 
@@ -1752,12 +1755,12 @@ func min64(a, b int64) int64 {
 	return b
 }
 
-func money(cents int64) string {
-	return fmt.Sprintf("$%.2f", float64(cents)/100)
+func money(amount int64) string {
+	return fmt.Sprintf("$%.2f", float64(amount))
 }
 
-func Money(cents int64) string {
-	return money(cents)
+func Money(amount int64) string {
+	return money(amount)
 }
 
 func dateInput(value *time.Time) string {
@@ -2103,12 +2106,13 @@ func Tasks(user *NavUser, tasks []domain.Task, selectors *SelectorData, canManag
 					yesNo(task.Visible), yesNo(task.Billable),
 					task.EstimateSeconds/3600)
 				if canManage {
-					_, _ = fmt.Fprintf(w, `<td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/tasks/%d"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="project_id" value="%d"><label>Name<input name="name" value="%s" required></label><label>Number<input name="number" value="%s"></label><label>Estimate hours<input name="estimate_hours" type="number" value="%d"></label><label class="check"><input type="checkbox" name="visible" value="1"%s> Visible</label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label><button class="primary small">Save</button></form></details><form method="post" action="/tasks/%d/archive" onsubmit="return confirm('Archive this task?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Archive</button></form></td>`,
+					_, _ = fmt.Fprintf(w, `<td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/tasks/%d"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="project_id" value="%d"><div class="inline-edit-col"><label>Number<input name="number" value="%s"></label><label>Estimate hours<input name="estimate_hours" type="number" value="%d"></label><label class="check"><input type="checkbox" name="visible" value="1"%s> Visible</label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label></div><div class="inline-edit-col"><label>Name<input name="name" value="%s" required></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></form></details><form method="post" action="/tasks/%d/archive" onsubmit="return confirm('Archive this task?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Archive</button></form></td>`,
 						task.ID, esc(user.CSRF),
 						task.ProjectID,
-						esc(task.Name), esc(task.Number),
+						esc(task.Number),
 						task.EstimateSeconds/3600,
 						checkedIf(task.Visible), checkedIf(task.Billable),
+						esc(task.Name),
 						task.ID, esc(user.CSRF))
 				}
 				_, _ = fmt.Fprint(w, `</tr>`)
@@ -2231,8 +2235,8 @@ func Workstreams(user *NavUser, items []domain.Workstream) templ.Component {
 		}
 		_, _ = fmt.Fprint(w, `<section class="table-card"><div class="table-scroll"><table><thead><tr><th>Name</th><th>ID</th><th>Description</th><th>Visible</th><th>Actions</th></tr></thead><tbody>`)
 		for _, ws := range items {
-			_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td class="muted-cell">%s</td><td>%s</td><td>%s</td><td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/workstreams/%d"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>ID<input name="code" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label><button class="primary small">Save</button></form></details><form method="post" action="/workstreams/%d/delete" onsubmit="return confirm('Delete workstream?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Delete</button></form></td></tr>`,
-				esc(ws.Name), esc(ws.Code), esc(ws.Description), yesNo(ws.Visible), ws.ID, esc(user.CSRF), esc(ws.Name), esc(ws.Code), esc(ws.Description), checkedIf(ws.Visible), ws.ID, esc(user.CSRF))
+			_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td class="muted-cell">%s</td><td>%s</td><td>%s</td><td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/workstreams/%d"><input type="hidden" name="csrf" value="%s"><div class="inline-edit-col"><label>ID<input name="code" value="%s"></label><label>Name<input name="name" value="%s" required></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label></div><div class="inline-edit-col"><label>Description<textarea name="description">%s</textarea></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></form></details><form method="post" action="/workstreams/%d/delete" onsubmit="return confirm('Delete workstream?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Delete</button></form></td></tr>`,
+				esc(ws.Name), esc(ws.Code), esc(ws.Description), yesNo(ws.Visible), ws.ID, esc(user.CSRF), esc(ws.Code), esc(ws.Name), checkedIf(ws.Visible), esc(ws.Description), ws.ID, esc(user.CSRF))
 		}
 		_, _ = fmt.Fprint(w, `</tbody></table></div></section>`)
 		return nil
@@ -2254,7 +2258,7 @@ func ProjectWorkstreams(user *NavUser, project *domain.Project, assigned []domai
 		}
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Assign workstream</h2></div></div><form class="form-grid" method="post" action="/projects/%d/workstreams"><input type="hidden" name="csrf" value="%s">`, project.ID, esc(user.CSRF))
 		renderSelect(w, "Workstream", "workstream_id", opts, 0, true, "Select workstream", nil)
-		_, _ = fmt.Fprint(w, `<label>Budget <span class="field-hint">in minor currency units (cents/pennies)</span><input name="budget_cents" value="0" placeholder="e.g. 500000 = 5,000"></label><div class="form-actions"><button class="primary">Assign</button></div></form></section>`)
+		_, _ = fmt.Fprint(w, `<label>Budget <span class="field-hint">in primary currency units</span><input name="budget" value="0" placeholder="e.g. 5000"></label><div class="form-actions"><button class="primary">Assign</button></div></form></section>`)
 		if len(assigned) == 0 {
 			_, _ = fmt.Fprint(w, `<p class="empty-state">No workstreams assigned yet.</p>`)
 			return nil

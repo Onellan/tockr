@@ -569,17 +569,12 @@ p {
   cursor: pointer;
   margin: 0;
   padding: var(--space-4);
-  padding-bottom: 0;
-  border-bottom: 0;
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
 }
 
 .collapsible-create-summary::-webkit-details-marker {
   display: none;
-}
-
-.collapsible-create-card[open] > .collapsible-create-summary {
-  border-bottom: 1px solid var(--line);
-  padding-bottom: var(--space-4);
 }
 
 .collapsible-create-card > form {
@@ -1002,7 +997,9 @@ td {
 }
 
 td:not(.actions-cell) {
-  white-space: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 th {
@@ -1061,12 +1058,52 @@ tr:last-child td {
   right: 0;
   top: calc(100% + 8px);
   z-index: 35;
-  width: min(560px, calc(100vw - 32px));
+  width: min(980px, calc(100vw - 32px));
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
   padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
+  max-height: calc(100vh - 120px);
+  overflow: auto;
+}
+
+.inline-edit-form label {
+  white-space: nowrap;
+}
+
+.inline-edit-form .form-grid {
+  width: 100%;
+}
+
+.inline-edit-form .field-hint {
+  white-space: nowrap;
+}
+
+.inline-edit-generic {
+  grid-template-columns: 1fr;
+}
+
+.inline-edit-generic .form-actions {
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.inline-edit-col {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+}
+
+.inline-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: auto;
 }
 
 .inline-edit-form textarea {
@@ -1211,9 +1248,10 @@ tr:last-child td {
 
 .project-pie-layout {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
+  grid-template-columns: 1fr;
   gap: var(--space-3);
-  align-items: center;
+  justify-items: center;
+  align-items: start;
 }
 
 .project-pie {
@@ -1241,6 +1279,7 @@ tr:last-child td {
   padding: 0;
   display: grid;
   gap: 6px;
+  width: 100%;
 }
 
 .project-pie-legend li {
@@ -1260,7 +1299,9 @@ tr:last-child td {
 
 .project-pie-legend .legend-label {
   color: var(--text);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .project-pie-legend .legend-value,
@@ -1829,6 +1870,10 @@ label > .field-hint {
   .compact-form input,
   .compact-form label {
     min-width: min(100%, 220px);
+  }
+
+  .inline-edit-form {
+    grid-template-columns: 1fr;
   }
 
   .project-form-flags {

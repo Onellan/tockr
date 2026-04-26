@@ -26,6 +26,54 @@ type Store struct {
 
 const demoDataNamePrefix = "[Demo] "
 
+type defaultWorkstreamDefinition struct {
+	Name        string
+	Description string
+}
+
+var defaultWorkstreams = []defaultWorkstreamDefinition{
+	{
+		Name:        "Project Initiation and Governance",
+		Description: "Establishes the project mandate, business case, governance structure, approval process, decision-making authority, project charter, decision log, and overall project management approach.",
+	},
+	{
+		Name:        "Stakeholder and Communications Management",
+		Description: "Identifies key stakeholders and defines how engagement, communication, reporting, meetings, approvals, and issue escalation will be managed throughout the project.",
+	},
+	{
+		Name:        "Scope and Requirements Management",
+		Description: "Defines the project scope, exclusions, assumptions, constraints, requirements register, work breakdown structure, deliverables matrix, and acceptance criteria.",
+	},
+	{
+		Name:        "Baseline Assessment and Technical Due Diligence",
+		Description: "Collects and validates baseline data, reviews existing infrastructure, assesses asset condition and performance, identifies service gaps, and prepares the baseline or situational assessment report.",
+	},
+	{
+		Name:        "Engineering Planning and Design Management",
+		Description: "Manages the technical planning and design process, including options analysis, design basis, hydraulic or process modelling, drawings, specifications, bills of quantities, and technical review.",
+	},
+	{
+		Name:        "Cost, Financial and Funding Management",
+		Description: "Develops and manages CAPEX, OPEX, lifecycle costing, cashflow forecasts, affordability considerations, funding alignment, cost estimates, and budget control.",
+	},
+	{
+		Name:        "Environmental, Social and Regulatory Management",
+		Description: "Manages environmental screening, EIA/WULA requirements, permits, servitudes, wayleaves, land access, public participation, social impacts, and regulatory compliance.",
+	},
+	{
+		Name:        "Procurement and Contract Management",
+		Description: "Defines the procurement strategy, prepares tender documentation, supports bid evaluation, manages contract award, contract administration, variations, claims, and supplier or contractor performance.",
+	},
+	{
+		Name:        "Implementation, Monitoring and Control",
+		Description: "Tracks project execution against scope, schedule, budget, quality, risk, and compliance baselines through progress reporting, inspections, risk updates, issue management, change control, and payment certification.",
+	},
+	{
+		Name:        "Commissioning, Handover and Close-Out",
+		Description: "Confirms the works are complete, functional, compliant, and ready for operation through commissioning, testing, operator training, O&M manuals, as-built drawings, asset register updates, final account, close-out reporting, and lessons learned.",
+	},
+}
+
 type Session struct {
 	ID          string
 	UserID      int64
@@ -105,7 +153,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureColumns(ctx); err != nil {
 		return err
 	}
-	return s.ensureHierarchy(ctx)
+	if err := s.ensureHierarchy(ctx); err != nil {
+		return err
+	}
+	return s.ensureDefaultWorkstreams(ctx)
 }
 
 func (s *Store) ensureColumns(ctx context.Context) error {
@@ -790,7 +841,10 @@ func (s *Store) UpsertWorkspace(ctx context.Context, w *domain.Workspace) error 
 			return err
 		}
 		w.ID, err = res.LastInsertId()
-		return err
+		if err != nil {
+			return err
+		}
+		return s.ensureDefaultWorkstreamsForWorkspace(ctx, w.ID)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE workspaces SET name=?, slug=?, description=?, default_currency=?, timezone=?, archived=? WHERE id=? AND organization_id=?`,
 		w.Name, w.Slug, strings.TrimSpace(w.Description), w.DefaultCurrency, w.Timezone, boolInt(w.Archived), w.ID, w.OrganizationID)
@@ -1114,6 +1168,11 @@ func (s *Store) CreateGroup(ctx context.Context, workspaceID int64, name, descri
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func (s *Store) UpdateGroup(ctx context.Context, group *domain.Group) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE groups SET name=?, description=? WHERE id=? AND workspace_id=?`, strings.TrimSpace(group.Name), strings.TrimSpace(group.Description), group.ID, group.WorkspaceID)
+	return err
 }
 
 func (s *Store) AddUserToGroup(ctx context.Context, groupID, userID int64) error {
@@ -3648,6 +3707,57 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 	}
 	for _, query := range indexes {
 		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureDefaultWorkstreams(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM workspaces ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	workspaceIDs := make([]int64, 0, 8)
+	for rows.Next() {
+		var workspaceID int64
+		if err := rows.Scan(&workspaceID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		workspaceIDs = append(workspaceIDs, workspaceID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, workspaceID := range workspaceIDs {
+		if err := s.ensureDefaultWorkstreamsForWorkspace(ctx, workspaceID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureDefaultWorkstreamsForWorkspace(ctx context.Context, workspaceID int64) error {
+	for _, item := range defaultWorkstreams {
+		var existingID int64
+		err := s.db.QueryRowContext(ctx, `SELECT id FROM workstreams WHERE workspace_id=? AND name=? LIMIT 1`, workspaceID, item.Name).Scan(&existingID)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err := s.UpsertWorkstream(ctx, &domain.Workstream{
+			WorkspaceID: workspaceID,
+			Name:        item.Name,
+			Description: item.Description,
+			Visible:     true,
+		}); err != nil {
 			return err
 		}
 	}

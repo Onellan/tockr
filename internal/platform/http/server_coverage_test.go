@@ -1520,7 +1520,7 @@ func TestCreateRate(t *testing.T) {
 
 	rec := postFormWithCookie(app, "/rates", cookie, url.Values{
 		"csrf":           {csrf},
-		"amount_cents":   {"15000"},
+		"amount":         {"150"},
 		"effective_from": {"2026-01-01"},
 	})
 	if rec.Code != http.StatusSeeOther {
