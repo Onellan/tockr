@@ -81,6 +81,7 @@
       function refreshOptions() {
         var parentValue = parent.value;
         var selectedOption = select.options[select.selectedIndex];
+        var hasSelectableOption = false;
         Array.from(select.options).forEach(function (option) {
           if (!option.value) {
             option.hidden = false;
@@ -97,9 +98,22 @@
       var visible = !parentValue || !optionValue || matchesParent;
           option.hidden = !visible;
           option.disabled = !visible;
+          if (visible) {
+            hasSelectableOption = true;
+          }
         });
         if (selectedOption && selectedOption.disabled) {
           select.value = "";
+        }
+        if (!hasSelectableOption) {
+          // Prevent stale hidden values from being submitted for parent selections
+          // that have no available child options.
+          select.value = "";
+          select.disabled = true;
+          select.setAttribute("aria-disabled", "true");
+        } else {
+          select.disabled = false;
+          select.removeAttribute("aria-disabled");
         }
       }
 

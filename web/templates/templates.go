@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"math"
 	"net/url"
 	"path"
 	"sort"
@@ -330,7 +329,7 @@ func EntityListRaw(title string, user *NavUser, headers []string, rows [][]strin
 
 func createCardCollapsedByDefault(title string) bool {
 	switch strings.ToLower(strings.TrimSpace(title)) {
-	case "clients", "projects", "work types", "tasks", "groups":
+	case "clients", "projects", "work types", "tasks", "groups", "users":
 		return true
 	default:
 		return false
@@ -508,15 +507,17 @@ func Rates(user *NavUser, rates []domain.Rate, costs []domain.UserCostRate, sele
 		pageHeader(w, "Rates", "Financial controls", "Date-effective billable rates and user cost rates for auditable reporting.")
 		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How rate matching works:</strong> Tockr picks the most specific matching rate for each time entry. Leave a selector blank to make a rate apply more broadly — a rate with all fields blank applies to everyone. More specific rates always win over broader ones.</div>`)
 		_, _ = fmt.Fprint(w, `<section class="two-col">`)
-		_, _ = fmt.Fprint(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Billable rate</h2><p>Scope by customer, project, activity, task, or user.</p></div></div>`)
+		renderCreateCardStart(w, "Billable rate", "Scope by customer, project, activity, task, or user.", true)
 		if err := RateForm(user, selectors).Render(ctx, w); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprint(w, `</div><div class="panel form-panel"><div class="panel-head"><div><h2>User cost</h2><p>Use effective dates before profitability reporting.</p></div></div>`)
+		renderCreateCardEnd(w, true)
+		renderCreateCardStart(w, "User cost", "Use effective dates before profitability reporting.", true)
 		if err := UserCostForm(user, selectors).Render(ctx, w); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprint(w, `</div></section>`)
+		renderCreateCardEnd(w, true)
+		_, _ = fmt.Fprint(w, `</section>`)
 		rateRows := [][]string{}
 		for _, rate := range rates {
 			rateRows = append(rateRows, []string{labelPtr(selectors.CustomerLabels, rate.CustomerID), labelPtr(selectors.ProjectLabels, rate.ProjectID), labelPtr(selectors.ActivityLabels, rate.ActivityID), labelPtr(selectors.TaskLabels, rate.TaskID), labelPtr(selectors.UserLabels, rate.UserID), money(rate.AmountCents), ptrText(rate.InternalAmountCents), dateInput(&rate.EffectiveFrom), dateInput(rate.EffectiveTo)})
@@ -544,18 +545,18 @@ func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorDa
 		renderTimesheetTimeFields(w, prefill, false)
 		_, _ = fmt.Fprintf(w, `<label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
 			esc(prefill.Tags), esc(prefill.Description))
-		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Recent and repeat work</h2><p>Reuse common consulting tasks without rebuilding the full selection.</p></div></div><div class="summary-list">`)
+		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Recent and repeat work</h2><p>Reuse common consulting tasks without rebuilding the full selection.</p></div></div><div class="summary-list work-reuse-list">`)
 		if len(recent) == 0 && len(favorites) == 0 {
 			_, _ = fmt.Fprint(w, `<div><span>No recent work yet</span><strong>Recent entries and favorites will appear here after you start logging time.</strong></div>`)
 		}
 		for _, item := range recent {
-			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong><a class="table-action" href="%s">Use again</a></div>`,
+			_, _ = fmt.Fprintf(w, `<article class="work-reuse-item"><span>%s</span><strong>%s</strong><a class="table-action" href="%s">Use again</a></article>`,
 				esc(recentWorkLabel(item, selectors)),
 				esc(duration(item.DurationSeconds)+" · "+item.StartedAt.Format("Mon 02 Jan 15:04")),
 				esc(timesheetPrefillHref(item)))
 		}
 		for _, favorite := range favorites {
-			_, _ = fmt.Fprintf(w, `<div><span>Favorite</span><strong>%s</strong><a class="table-action" href="%s">Use favorite</a></div>`,
+			_, _ = fmt.Fprintf(w, `<article class="work-reuse-item"><span>Favorite</span><strong>%s</strong><a class="table-action" href="%s">Use favorite</a></article>`,
 				esc(favorite.Name),
 				esc(favoritePrefillHref(favorite)))
 		}
@@ -751,112 +752,138 @@ func renderProjectDashboardBody(w io.Writer, d domain.ProjectDashboard, selector
 	if d.Alert {
 		_, _ = fmt.Fprint(w, `<div class="alert">This project is near or over its estimate or budget threshold. Review burn before approving more work or sending the next invoice.</div>`)
 	}
+	renderProjectDashboardPieCharts(w, d)
+	_, _ = fmt.Fprint(w, `<section class="section-spacer"><details class="panel collapsible-create-card" open><summary class="panel-head collapsible-create-summary"><div><h2>Active task mix</h2><p>Where the project effort is landing now.</p></div><span class="collapse-indicator collapse-indicator-section" aria-hidden="true"></span></summary><div class="collapsible-panel-content">`)
+	taskRows := [][]string{}
+	for _, task := range d.TaskSummaries {
+		taskRows = append(taskRows, []string{esc(task.Name), esc(duration(task.TrackedSeconds)), esc(duration(task.UnbilledSeconds)), humanBillable(task.Billable)})
+	}
+	dataTableRaw(w, []string{"Task", "Tracked", "Unbilled", "Billable"}, taskRows)
+	_, _ = fmt.Fprint(w, `</div></details><details class="panel collapsible-create-card section-spacer" open><summary class="panel-head collapsible-create-summary"><div><h2>Key contributors by category</h2><p>Who is carrying the billable load on this project.</p></div><span class="collapse-indicator collapse-indicator-section" aria-hidden="true"></span></summary><div class="collapsible-panel-content">`)
+	contributorRows := [][]string{}
+	for _, contributor := range d.Contributors {
+		contributorRows = append(contributorRows, []string{contributor.DisplayName, duration(contributor.TrackedSeconds), duration(contributor.BillableSeconds)})
+	}
+	dataTable(w, []string{"Engineer", "Tracked", "Billable"}, contributorRows)
+	_, _ = fmt.Fprint(w, `</div></details></section>`)
+}
 
-	_, _ = fmt.Fprint(w, `<section class="panel section-spacer"><div class="panel-head"><div><h2>Captured time distribution</h2><p>Fast pie summaries of where filtered project effort is concentrated.</p></div></div><div class="project-breakdown-grid">`)
-	renderProjectBreakdownCard(w, "By workstream", "Delivery streams receiving effort", d.WorkstreamBreakdown, d.TrackedSeconds)
-	renderProjectBreakdownCard(w, "By work type", "Kinds of work being executed", d.WorkTypeBreakdown, d.TrackedSeconds)
-	renderProjectBreakdownCard(w, "By task", "Deliverables absorbing team time", d.TaskBreakdown, d.TrackedSeconds)
+type dashboardPieSlice struct {
+	Label string
+	Value int64
+	Color string
+}
+
+func renderProjectDashboardPieCharts(w io.Writer, d domain.ProjectDashboard) {
+	_, _ = fmt.Fprint(w, `<section class="panel section-spacer"><div class="panel-head"><div><h2>Captured time distribution</h2><p>Fast pie summaries of where project effort is concentrated.</p></div></div><div class="project-dashboard-pies">`)
+	renderProjectDashboardPieCard(
+		w,
+		"Time per workstream",
+		"How total project time is distributed across assigned workstreams.",
+		dashboardSlicesFromWorkstreams(d.WorkstreamSummaries),
+		duration(d.TrackedSeconds),
+	)
+	renderProjectDashboardPieCard(
+		w,
+		"Time per user",
+		"Share of tracked time by contributor on this project.",
+		dashboardSlicesFromContributors(d.Contributors),
+		duration(d.TrackedSeconds),
+	)
+	renderProjectDashboardPieCard(
+		w,
+		"Time per work type",
+		"Distribution of tracked project time across work types.",
+		dashboardSlicesFromActivities(d.ActivitySummaries),
+		duration(d.TrackedSeconds),
+	)
 	_, _ = fmt.Fprint(w, `</div></section>`)
-
-	_, _ = fmt.Fprint(w, `<section class="panel section-spacer"><div class="panel-head"><div><h2>Key contributors by category</h2><p>Person-level contribution rows for workstream, work type, and task dimensions.</p></div></div><div class="tabs project-contrib-tabs"><a href="#project-contrib-workstream">Workstream</a><a href="#project-contrib-worktype">Work Type</a><a href="#project-contrib-task">Task</a></div>`)
-	renderProjectContributionTable(w, "project-contrib-workstream", "Contributions by workstream", "Workstream", d.WorkstreamContributors, d.TrackedSeconds)
-	renderProjectContributionTable(w, "project-contrib-worktype", "Contributions by work type", "Work Type", d.WorkTypeContributors, d.TrackedSeconds)
-	renderProjectContributionTable(w, "project-contrib-task", "Contributions by task", "Task", d.TaskContributors, d.TrackedSeconds)
-	_, _ = fmt.Fprint(w, `</section>`)
 }
 
-type projectPieSlice struct {
-	Name           string
-	TrackedSeconds int64
-	Percent        float64
-	Color          string
+func dashboardSlicesFromWorkstreams(items []domain.ProjectWorkstreamSummary) []dashboardPieSlice {
+	if len(items) == 0 {
+		return []dashboardPieSlice{{Label: "No tracked time", Value: 0, Color: "#c8d7e6"}}
+	}
+	out := make([]dashboardPieSlice, 0, len(items))
+	for i, item := range items {
+		out = append(out, dashboardPieSlice{Label: item.Name, Value: item.TrackedSeconds, Color: dashboardPieColor(i)})
+	}
+	return out
 }
 
-func renderProjectBreakdownCard(w io.Writer, title, description string, slices []domain.ProjectBreakdownSlice, totalSeconds int64) {
-	series := projectPieSeries(slices, totalSeconds, 6)
-	_, _ = fmt.Fprintf(w, `<article class="project-breakdown-card"><header><h3>%s</h3><p>%s</p></header>`, esc(title), esc(description))
-	if totalSeconds <= 0 || len(series) == 0 {
-		_, _ = fmt.Fprint(w, `<div class="empty-state compact"><strong>No captured time</strong><span>Adjust filters or log time to populate this breakdown.</span></div></article>`)
-		return
+func dashboardSlicesFromContributors(items []domain.ProjectContributorSummary) []dashboardPieSlice {
+	if len(items) == 0 {
+		return []dashboardPieSlice{{Label: "No tracked time", Value: 0, Color: "#c8d7e6"}}
 	}
-	_, _ = fmt.Fprint(w, `<div class="project-pie-layout"><svg class="project-pie" viewBox="0 0 160 160" role="img" aria-label="Captured time breakdown pie chart">`)
-	startAngle := -math.Pi / 2
-	for _, slice := range series {
-		angle := 2 * math.Pi * (float64(slice.TrackedSeconds) / float64(totalSeconds))
-		if angle <= 0 {
-			continue
-		}
-		if angle >= (2*math.Pi)-0.0001 {
-			_, _ = fmt.Fprintf(w, `<circle cx="80" cy="80" r="62" fill="%s"></circle>`, esc(slice.Color))
-			continue
-		}
-		endAngle := startAngle + angle
-		largeArc := 0
-		if angle > math.Pi {
-			largeArc = 1
-		}
-		x1 := 80 + 62*math.Cos(startAngle)
-		y1 := 80 + 62*math.Sin(startAngle)
-		x2 := 80 + 62*math.Cos(endAngle)
-		y2 := 80 + 62*math.Sin(endAngle)
-		_, _ = fmt.Fprintf(w, `<path d="M 80 80 L %.3f %.3f A 62 62 0 %d 1 %.3f %.3f Z" fill="%s" stroke="#ffffff" stroke-width="1.2"></path>`, x1, y1, largeArc, x2, y2, esc(slice.Color))
-		startAngle = endAngle
+	out := make([]dashboardPieSlice, 0, len(items))
+	for i, item := range items {
+		out = append(out, dashboardPieSlice{Label: item.DisplayName, Value: item.TrackedSeconds, Color: dashboardPieColor(i)})
 	}
-	_, _ = fmt.Fprintf(w, `<text x="80" y="77" text-anchor="middle" class="project-pie-total-label">Tracked</text><text x="80" y="97" text-anchor="middle" class="project-pie-total-value">%s</text></svg><ul class="project-pie-legend">`, esc(duration(totalSeconds)))
-	for _, slice := range series {
-		_, _ = fmt.Fprintf(w, `<li><span class="swatch" style="background:%s"></span><span class="legend-label">%s</span><span class="legend-value">%s</span><span class="legend-share">%s</span></li>`, esc(slice.Color), esc(slice.Name), esc(duration(slice.TrackedSeconds)), esc(fmt.Sprintf("%.1f%%", slice.Percent)))
+	return out
+}
+
+func dashboardSlicesFromActivities(items []domain.ProjectActivitySummary) []dashboardPieSlice {
+	if len(items) == 0 {
+		return []dashboardPieSlice{{Label: "No tracked time", Value: 0, Color: "#c8d7e6"}}
 	}
+	out := make([]dashboardPieSlice, 0, len(items))
+	for i, item := range items {
+		out = append(out, dashboardPieSlice{Label: item.Name, Value: item.TrackedSeconds, Color: dashboardPieColor(i)})
+	}
+	return out
+}
+
+func dashboardPieColor(index int) string {
+	palette := []string{"#2f80ed", "#14b8a6", "#d97706", "#16a34a", "#ef4444", "#2563eb", "#0f766e", "#9333ea"}
+	if len(palette) == 0 {
+		return "#2f80ed"
+	}
+	return palette[index%len(palette)]
+}
+
+func renderProjectDashboardPieCard(w io.Writer, title, description string, slices []dashboardPieSlice, totalText string) {
+	total := int64(0)
+	for _, slice := range slices {
+		if slice.Value > 0 {
+			total += slice.Value
+		}
+	}
+
+	const radius = 42.0
+	const circumference = 2 * 3.141592653589793 * radius
+
+	_, _ = fmt.Fprintf(w, `<article class="panel project-dashboard-pie"><div class="panel-head"><div><h2>%s</h2><p>%s</p></div></div><div class="project-dashboard-pie-body">`, esc(title), esc(description))
+	_, _ = fmt.Fprint(w, `<div class="project-dashboard-pie-visual" role="img" aria-label="Project dashboard pie chart">`)
+	_, _ = fmt.Fprint(w, `<svg viewBox="0 0 120 120" aria-hidden="true">`)
+	_, _ = fmt.Fprintf(w, `<circle cx="60" cy="60" r="%.2f" fill="none" stroke="var(--line)" stroke-width="16"></circle>`, radius)
+
+	if total > 0 {
+		offset := 0.0
+		for _, slice := range slices {
+			if slice.Value <= 0 {
+				continue
+			}
+			portion := float64(slice.Value) / float64(total)
+			dash := portion * circumference
+			gap := circumference - dash
+			_, _ = fmt.Fprintf(w, `<circle cx="60" cy="60" r="%.2f" fill="none" stroke="%s" stroke-width="16" stroke-linecap="butt" stroke-dasharray="%.4f %.4f" stroke-dashoffset="%.4f" transform="rotate(-90 60 60)"></circle>`, radius, slice.Color, dash, gap, -offset)
+			offset += dash
+		}
+	}
+
+	_, _ = fmt.Fprint(w, `</svg>`)
+	_, _ = fmt.Fprintf(w, `<div class="project-dashboard-pie-center"><strong>%s</strong><small>Total</small></div>`, esc(totalText))
+	_, _ = fmt.Fprint(w, `</div><ul class="project-dashboard-pie-legend">`)
+
+	for _, slice := range slices {
+		percent := "0%"
+		if total > 0 && slice.Value > 0 {
+			percent = fmt.Sprintf("%.0f%%", (float64(slice.Value)/float64(total))*100)
+		}
+		_, _ = fmt.Fprintf(w, `<li><span class="project-dashboard-pie-dot" style="background:%s"></span><span>%s</span><strong>%s</strong><small>%s</small></li>`, slice.Color, esc(slice.Label), esc(duration(slice.Value)), esc(percent))
+	}
+
 	_, _ = fmt.Fprint(w, `</ul></div></article>`)
-}
-
-func projectPieSeries(slices []domain.ProjectBreakdownSlice, totalSeconds int64, maxVisible int) []projectPieSlice {
-	if totalSeconds <= 0 || len(slices) == 0 {
-		return nil
-	}
-	trimmed := make([]domain.ProjectBreakdownSlice, 0, len(slices))
-	for _, item := range slices {
-		if item.TrackedSeconds > 0 {
-			trimmed = append(trimmed, item)
-		}
-	}
-	if len(trimmed) == 0 {
-		return nil
-	}
-	if maxVisible < 2 {
-		maxVisible = 2
-	}
-	if len(trimmed) > maxVisible {
-		other := int64(0)
-		for _, item := range trimmed[maxVisible-1:] {
-			other += item.TrackedSeconds
-		}
-		trimmed = append(trimmed[:maxVisible-1], domain.ProjectBreakdownSlice{Name: "Other", TrackedSeconds: other})
-	}
-	colors := []string{"#1f77b4", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51", "#8ab17d", "#3d405b"}
-	series := make([]projectPieSlice, 0, len(trimmed))
-	for i, item := range trimmed {
-		series = append(series, projectPieSlice{
-			Name:           item.Name,
-			TrackedSeconds: item.TrackedSeconds,
-			Percent:        (float64(item.TrackedSeconds) * 100) / float64(totalSeconds),
-			Color:          colors[i%len(colors)],
-		})
-	}
-	return series
-}
-
-func renderProjectContributionTable(w io.Writer, id, title, categoryLabel string, rows []domain.ProjectContributionSummary, totalSeconds int64) {
-	_, _ = fmt.Fprintf(w, `<section class="project-contrib-section" id="%s"><div class="panel-head"><div><h3>%s</h3><p>Sorted by captured time in the active project filter scope.</p></div></div>`, esc(id), esc(title))
-	tableRows := make([][]string, 0, len(rows))
-	for _, item := range rows {
-		share := "0.0%"
-		if totalSeconds > 0 {
-			share = fmt.Sprintf("%.1f%%", (float64(item.TrackedSeconds)*100)/float64(totalSeconds))
-		}
-		tableRows = append(tableRows, []string{item.DisplayName, item.ItemName, duration(item.TrackedSeconds), share})
-	}
-	dataTable(w, []string{"Engineer", categoryLabel, "Tracked", "Project share"}, tableRows)
-	_, _ = fmt.Fprint(w, `</section>`)
 }
 
 func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, selectors *SelectorData, editable map[int64]bool) templ.Component {
@@ -991,13 +1018,13 @@ func AdminHome(user *NavUser) templ.Component {
 
 func AdminDemoData(user *NavUser, workspaceName string, notice Notice) templ.Component {
 	return Layout("Demo data", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Demo data", "Administration", "Add or remove a safe demo dataset in your default workspace for product walkthroughs.")
+		pageHeader(w, "Demo data", "Administration", "Show or hide the reusable demo dataset in your default workspace for evaluations and walkthroughs.")
 		renderNotice(w, notice)
 		targetWorkspace := workspaceName
 		if strings.TrimSpace(targetWorkspace) == "" {
 			targetWorkspace = "Not found"
 		}
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Default workspace target</h2><p>This tool only affects records prefixed with [Demo] in the first workspace for your organization.</p></div></div><p class="field-hint">Current target: <strong>%s</strong></p><div class="actions-row"><form method="post" action="/admin/demo-data/add"><input type="hidden" name="csrf" value="%s"><button class="primary">Add demo data</button></form><form method="post" action="/admin/demo-data/remove" onsubmit="return confirm('Remove all [Demo] records from the default workspace?')"><input type="hidden" name="csrf" value="%s"><button class="danger">Remove demo data</button></form></div><p class="field-hint">Re-adding demo data first clears existing [Demo] records, so this action is repeatable.</p></section>`, esc(targetWorkspace), esc(user.CSRF), esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Default workspace target</h2><p>These controls only affect the default workspace for your organization.</p></div></div><p class="field-hint">Current target: <strong>%s</strong></p><div class="actions-row"><form method="post" action="/admin/demo-data/add"><input type="hidden" name="csrf" value="%s"><button class="primary">Show demo data</button></form><form method="post" action="/admin/demo-data/remove" onsubmit="return confirm('Hide demo data from the default workspace?')"><input type="hidden" name="csrf" value="%s"><button class="danger">Hide demo data</button></form></div><p class="field-hint">Showing demo data is repeatable and will refresh the seeded evaluation dataset for that workspace.</p></section>`, esc(targetWorkspace), esc(user.CSRF), esc(user.CSRF))
 		return nil
 	}))
 }
@@ -1031,6 +1058,7 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 		_, _ = fmt.Fprintf(w, `<form method="post" action="/projects/%d/groups/remove" onsubmit="return confirm('Remove selected project groups?')"><input type="hidden" name="csrf" value="%s">`, project.ID, esc(user.CSRF))
 		dataTableRaw(w, []string{"Group"}, groupRows)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="danger">Remove selected groups</button></div></form>`)
+		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project</a></div>`, project.ID)
 		return nil
 	}))
 }
@@ -1038,9 +1066,11 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 func WorkspaceAdmin(user *NavUser, workspaces []domain.WorkspaceSummary) templ.Component {
 	return Layout("Workspaces", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Workspaces", "Organization admin", "Review workspace health, member counts, and workspace-level setup without leaving the organization view.")
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create workspace</h2><p>Only organization admins can add workspaces.</p></div></div><form method="post" action="/admin/workspaces" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label>Slug <span class="field-hint">URL-safe ID, auto-generated if blank</span><input name="slug" placeholder="e.g. my-team"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="ZAR" placeholder="ZAR" maxlength="3"></label>`, esc(user.CSRF))
+		renderCreateCardStart(w, "Create workspace", "Only organization admins can add workspaces.", true)
+		_, _ = fmt.Fprintf(w, `<form method="post" action="/admin/workspaces" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" required></label><label>Slug <span class="field-hint">URL-safe ID, auto-generated if blank</span><input name="slug" placeholder="e.g. my-team"></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="ZAR" placeholder="ZAR" maxlength="3"></label>`, esc(user.CSRF))
 		renderTimezoneSelect(w, "Timezone", "timezone", "UTC", true)
-		_, _ = fmt.Fprint(w, `<label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Create workspace</button></div></form></section>`)
+		_, _ = fmt.Fprint(w, `<label class="wide">Description<textarea name="description"></textarea></label><div class="form-actions"><button class="primary">Create workspace</button></div></form>`)
+		renderCreateCardEnd(w, true)
 		rows := [][]string{}
 		for _, workspace := range workspaces {
 			status := "Active"
@@ -1551,7 +1581,7 @@ func adminDescription(path string) string {
 	case "/admin/email":
 		return "Review SMTP configuration, send test email, and set account email-change policy."
 	case "/admin/demo-data":
-		return "Add or remove a reusable [Demo] dataset in the default workspace for product demonstrations."
+		return "Show or hide the reusable demo dataset in the default workspace for product walkthroughs."
 	case "/admin/schedule":
 		return "Configure expected working days and hours for utilization and missing-time calculations."
 	case "/rates":
@@ -2269,6 +2299,7 @@ func ProjectWorkstreams(user *NavUser, project *domain.Project, assigned []domai
 				esc(pw.WorkstreamName), money(pw.BudgetCents), yesNo(pw.Active), project.ID, pw.WorkstreamID, esc(user.CSRF))
 		}
 		_, _ = fmt.Fprint(w, `</tbody></table></div></section>`)
+		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project</a></div>`, project.ID)
 		return nil
 	}))
 }

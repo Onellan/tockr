@@ -16,11 +16,13 @@ ARG TARGETVARIANT
 RUN set -eux; \
     mkdir -p /out/data; \
     if [ "$TARGETARCH" = "arm" ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
-    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/tockr ./cmd/app
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/tockr ./cmd/app; \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/tockr-demo-seed ./cmd/demo-seed
 
 FROM alpine:3.22
 WORKDIR /app
 COPY --from=build /out/tockr /app/tockr
+COPY --from=build /out/tockr-demo-seed /app/tockr-demo-seed
 COPY web/static /app/web/static
 COPY entrypoint.sh /app/entrypoint.sh
 RUN apk add --no-cache su-exec && chmod +x /app/entrypoint.sh

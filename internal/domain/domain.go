@@ -486,6 +486,18 @@ type ProjectContributorSummary struct {
 	BillableSeconds int64
 }
 
+type ProjectWorkstreamSummary struct {
+	WorkstreamID   int64
+	Name           string
+	TrackedSeconds int64
+}
+
+type ProjectActivitySummary struct {
+	ActivityID     int64
+	Name           string
+	TrackedSeconds int64
+}
+
 type ProjectDashboard struct {
 	Project                Project
 	Filter                 ProjectDashboardFilter
@@ -502,6 +514,8 @@ type ProjectDashboard struct {
 	Alert                  bool
 	TaskSummaries          []ProjectTaskSummary
 	Contributors           []ProjectContributorSummary
+	WorkstreamSummaries    []ProjectWorkstreamSummary
+	ActivitySummaries      []ProjectActivitySummary
 	WorkstreamBreakdown    []ProjectBreakdownSlice
 	WorkTypeBreakdown      []ProjectBreakdownSlice
 	TaskBreakdown          []ProjectBreakdownSlice

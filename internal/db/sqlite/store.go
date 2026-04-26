@@ -24,8 +24,6 @@ type Store struct {
 	db *sql.DB
 }
 
-const demoDataNamePrefix = "[Demo] "
-
 type defaultWorkstreamDefinition struct {
 	Name        string
 	Description string
@@ -922,210 +920,6 @@ func (s *Store) defaultWorkspaceForUser(ctx context.Context, userID int64) int64
 		}
 	}
 	return 1
-}
-
-func (s *Store) DefaultWorkspaceForOrganization(ctx context.Context, organizationID int64) (int64, error) {
-	var workspaceID int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE organization_id=? ORDER BY id LIMIT 1`, organizationID).Scan(&workspaceID)
-	if err != nil {
-		return 0, err
-	}
-	return workspaceID, nil
-}
-
-func (s *Store) SeedDemoData(ctx context.Context, organizationID int64) (int64, error) {
-	workspaceID, err := s.DefaultWorkspaceForOrganization(ctx, organizationID)
-	if err != nil {
-		return 0, err
-	}
-	if err := s.clearDemoDataInWorkspace(ctx, workspaceID); err != nil {
-		return 0, err
-	}
-	if err := s.seedDemoDataInWorkspace(ctx, workspaceID); err != nil {
-		return 0, err
-	}
-	return workspaceID, nil
-}
-
-func (s *Store) ClearDemoData(ctx context.Context, organizationID int64) (int64, error) {
-	workspaceID, err := s.DefaultWorkspaceForOrganization(ctx, organizationID)
-	if err != nil {
-		return 0, err
-	}
-	if err := s.clearDemoDataInWorkspace(ctx, workspaceID); err != nil {
-		return 0, err
-	}
-	return workspaceID, nil
-}
-
-func (s *Store) clearDemoDataInWorkspace(ctx context.Context, workspaceID int64) error {
-	pattern := demoDataNamePrefix + "%"
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer rollback(tx)
-
-	queries := []string{
-		`DELETE FROM project_templates WHERE workspace_id=? AND name LIKE ?`,
-		`DELETE FROM workstreams WHERE workspace_id=? AND name LIKE ?`,
-		`DELETE FROM activities WHERE workspace_id=? AND name LIKE ?`,
-		`DELETE FROM tasks WHERE workspace_id=? AND name LIKE ?`,
-		`DELETE FROM projects WHERE workspace_id=? AND name LIKE ?`,
-		`DELETE FROM customers WHERE workspace_id=? AND name LIKE ?`,
-		`DELETE FROM tags WHERE workspace_id=? AND name LIKE ?`,
-	}
-	for _, query := range queries {
-		if _, err := tx.ExecContext(ctx, query, workspaceID, pattern); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) seedDemoDataInWorkspace(ctx context.Context, workspaceID int64) error {
-	customer := &domain.Customer{
-		WorkspaceID: workspaceID,
-		Name:        demoDataNamePrefix + "Apex Engineering",
-		Number:      "DEMO-CUST-001",
-		Currency:    "USD",
-		Timezone:    "UTC",
-		Visible:     true,
-		Billable:    true,
-	}
-	if err := s.UpsertCustomer(ctx, customer); err != nil {
-		return err
-	}
-
-	projectOne := &domain.Project{
-		WorkspaceID: workspaceID,
-		CustomerID:  customer.ID,
-		Name:        demoDataNamePrefix + "Plant Expansion",
-		Number:      "DEMO-PR-001",
-		Visible:     true,
-		Billable:    true,
-	}
-	if err := s.UpsertProject(ctx, projectOne); err != nil {
-		return err
-	}
-	projectTwo := &domain.Project{
-		WorkspaceID: workspaceID,
-		CustomerID:  customer.ID,
-		Name:        demoDataNamePrefix + "Commissioning Support",
-		Number:      "DEMO-PR-002",
-		Visible:     true,
-		Billable:    true,
-	}
-	if err := s.UpsertProject(ctx, projectTwo); err != nil {
-		return err
-	}
-
-	workstreamDesign := &domain.Workstream{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Design", Code: "DEMO-WS-001", Visible: true}
-	if err := s.UpsertWorkstream(ctx, workstreamDesign); err != nil {
-		return err
-	}
-	workstreamField := &domain.Workstream{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Field Delivery", Code: "DEMO-WS-002", Visible: true}
-	if err := s.UpsertWorkstream(ctx, workstreamField); err != nil {
-		return err
-	}
-
-	if err := s.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: projectOne.ID, WorkstreamID: workstreamDesign.ID, Active: true}); err != nil {
-		return err
-	}
-	if err := s.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: projectOne.ID, WorkstreamID: workstreamField.ID, Active: true}); err != nil {
-		return err
-	}
-	if err := s.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: projectTwo.ID, WorkstreamID: workstreamField.ID, Active: true}); err != nil {
-		return err
-	}
-
-	activityDesign := &domain.Activity{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Engineering", Number: "DEMO-WT-001", Billable: true, Visible: true}
-	if err := s.UpsertActivity(ctx, activityDesign); err != nil {
-		return err
-	}
-	activityReview := &domain.Activity{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Quality Review", Number: "DEMO-WT-002", Billable: true, Visible: true}
-	if err := s.UpsertActivity(ctx, activityReview); err != nil {
-		return err
-	}
-	activitySite := &domain.Activity{WorkspaceID: workspaceID, Name: demoDataNamePrefix + "Site Support", Number: "DEMO-WT-003", Billable: true, Visible: true}
-	if err := s.UpsertActivity(ctx, activitySite); err != nil {
-		return err
-	}
-
-	taskModel := &domain.Task{WorkspaceID: workspaceID, ProjectID: projectOne.ID, Name: demoDataNamePrefix + "Model update", Number: "DEMO-TSK-001", Billable: true, Visible: true}
-	if err := s.UpsertTask(ctx, taskModel); err != nil {
-		return err
-	}
-	taskDrawings := &domain.Task{WorkspaceID: workspaceID, ProjectID: projectOne.ID, Name: demoDataNamePrefix + "Drawing package", Number: "DEMO-TSK-002", Billable: true, Visible: true}
-	if err := s.UpsertTask(ctx, taskDrawings); err != nil {
-		return err
-	}
-	taskCommissioning := &domain.Task{WorkspaceID: workspaceID, ProjectID: projectTwo.ID, Name: demoDataNamePrefix + "Commissioning checklist", Number: "DEMO-TSK-003", Billable: true, Visible: true}
-	if err := s.UpsertTask(ctx, taskCommissioning); err != nil {
-		return err
-	}
-
-	users, err := s.ListWorkspaceUsers(ctx, workspaceID)
-	if err != nil {
-		return err
-	}
-	seedUsers := make([]int64, 0, 3)
-	for _, user := range users {
-		if !user.Enabled {
-			continue
-		}
-		seedUsers = append(seedUsers, user.ID)
-		if len(seedUsers) == 3 {
-			break
-		}
-	}
-	if len(seedUsers) == 0 && len(users) > 0 {
-		seedUsers = append(seedUsers, users[0].ID)
-	}
-	if len(seedUsers) == 0 {
-		return nil
-	}
-
-	ptr := func(value int64) *int64 { return &value }
-	type demoEntry struct {
-		projectID    int64
-		activityID   int64
-		taskID       *int64
-		workstreamID *int64
-		hours        int
-		daysAgo      int
-		description  string
-	}
-	entries := []demoEntry{
-		{projectID: projectOne.ID, activityID: activityDesign.ID, taskID: ptr(taskModel.ID), workstreamID: ptr(workstreamDesign.ID), hours: 4, daysAgo: 1, description: "Detailed design updates"},
-		{projectID: projectOne.ID, activityID: activityReview.ID, taskID: ptr(taskDrawings.ID), workstreamID: ptr(workstreamDesign.ID), hours: 3, daysAgo: 2, description: "Internal drawing review"},
-		{projectID: projectTwo.ID, activityID: activitySite.ID, taskID: ptr(taskCommissioning.ID), workstreamID: ptr(workstreamField.ID), hours: 5, daysAgo: 3, description: "Site commissioning support"},
-		{projectID: projectTwo.ID, activityID: activityReview.ID, taskID: ptr(taskCommissioning.ID), workstreamID: ptr(workstreamField.ID), hours: 2, daysAgo: 5, description: "Issue close-out review"},
-	}
-	for index, entry := range entries {
-		userID := seedUsers[index%len(seedUsers)]
-		startedAt := time.Now().UTC().AddDate(0, 0, -entry.daysAgo).Truncate(time.Hour).Add(9 * time.Hour)
-		endedAt := startedAt.Add(time.Duration(entry.hours) * time.Hour)
-		timesheet := &domain.Timesheet{
-			WorkspaceID:  workspaceID,
-			UserID:       userID,
-			CustomerID:   customer.ID,
-			ProjectID:    entry.projectID,
-			WorkstreamID: entry.workstreamID,
-			ActivityID:   entry.activityID,
-			TaskID:       entry.taskID,
-			StartedAt:    startedAt,
-			EndedAt:      &endedAt,
-			Timezone:     "UTC",
-			Billable:     true,
-			Description:  demoDataNamePrefix + entry.description,
-		}
-		if err := s.CreateTimesheet(ctx, timesheet, nil); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func (s *Store) ListGroups(ctx context.Context, workspaceID int64) ([]domain.Group, error) {
@@ -2808,6 +2602,11 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 			return dashboard, err
 		}
 		dashboard.WorkstreamBreakdown = append(dashboard.WorkstreamBreakdown, item)
+		dashboard.WorkstreamSummaries = append(dashboard.WorkstreamSummaries, domain.ProjectWorkstreamSummary{
+			WorkstreamID:   item.ItemID,
+			Name:           item.Name,
+			TrackedSeconds: item.TrackedSeconds,
+		})
 	}
 	if err := workstreamRows.Err(); err != nil {
 		return dashboard, err
@@ -2843,6 +2642,11 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 			return dashboard, err
 		}
 		dashboard.WorkTypeBreakdown = append(dashboard.WorkTypeBreakdown, item)
+		dashboard.ActivitySummaries = append(dashboard.ActivitySummaries, domain.ProjectActivitySummary{
+			ActivityID:     item.ItemID,
+			Name:           item.Name,
+			TrackedSeconds: item.TrackedSeconds,
+		})
 	}
 	if err := workTypeRows.Err(); err != nil {
 		return dashboard, err

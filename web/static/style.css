@@ -570,14 +570,26 @@ p {
   margin: 0;
   padding: var(--space-4);
   padding-bottom: var(--space-4);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 0;
+}
+
+.collapsible-create-summary > div {
+  display: grid;
+  gap: var(--space-1);
 }
 
 .collapsible-create-summary::-webkit-details-marker {
   display: none;
 }
 
+.collapsible-create-card[open] > .collapsible-create-summary {
+  border-bottom: 1px solid var(--line);
+}
 .collapsible-create-card > form {
+  padding: var(--space-4);
+}
+
+.collapsible-panel-content {
   padding: var(--space-4);
 }
 
@@ -613,6 +625,14 @@ p {
   content: "▴";
 }
 
+.collapse-indicator-section::before {
+  content: "Show section";
+}
+
+.collapsible-create-card[open] .collapse-indicator-section::before {
+  content: "Hide section";
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -636,6 +656,94 @@ p {
   font-size: 24px;
   line-height: 1;
   letter-spacing: 0;
+}
+
+.project-dashboard-pies {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-4);
+}
+
+.project-dashboard-pie {
+  margin-bottom: 0;
+}
+
+.project-dashboard-pie-body {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  justify-items: center;
+  gap: var(--space-4);
+}
+
+.project-dashboard-pie-visual {
+  position: relative;
+  width: 100%;
+  max-width: 220px;
+  aspect-ratio: 1;
+  margin: 0 auto;
+}
+
+.project-dashboard-pie-visual svg {
+  width: 100%;
+  height: 100%;
+}
+
+.project-dashboard-pie-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+}
+
+.project-dashboard-pie-center strong {
+  font-size: 14px;
+  color: var(--text);
+}
+
+.project-dashboard-pie-center small {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.project-dashboard-pie-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+  width: 100%;
+  max-width: 520px;
+}
+
+.project-dashboard-pie-legend li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto auto;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.project-dashboard-pie-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.project-dashboard-pie-legend span {
+  color: var(--text-soft);
+}
+
+.project-dashboard-pie-legend strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.project-dashboard-pie-legend small {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .two-col {
@@ -698,6 +806,40 @@ p {
 
 .summary-list span {
   color: var(--muted);
+}
+
+.work-reuse-list {
+  gap: 0;
+}
+
+.work-reuse-list .work-reuse-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  align-items: start;
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.work-reuse-list .work-reuse-item > span,
+.work-reuse-list .work-reuse-item > strong,
+.work-reuse-list .work-reuse-item > .table-action {
+  grid-column: 1;
+}
+
+.work-reuse-list .work-reuse-item > span,
+.work-reuse-list .work-reuse-item > strong {
+  line-height: 1.35;
+}
+
+.work-reuse-list .work-reuse-item:last-child {
+  border-bottom: 0;
+}
+
+.work-reuse-list .table-action {
+  width: fit-content;
 }
 
 .form-grid {
@@ -816,6 +958,11 @@ p {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
+}
+
+.entry-mode-panel,
+.entry-duration-grid > label {
+  min-width: 0;
 }
 
 .wide,
@@ -1894,6 +2041,10 @@ label > .field-hint {
   .content {
     width: calc(100% - 20px);
     padding-bottom: var(--space-8);
+  }
+
+  .project-dashboard-pie-body {
+    grid-template-columns: 1fr;
   }
 
   .side-nav a {

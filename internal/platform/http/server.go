@@ -1288,11 +1288,12 @@ func (s *Server) saveTimesheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := formInt(r, "project_id")
-	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id")); err != nil {
+	workstreamID, err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id"))
+	if err != nil {
 		s.renderTimesheetCreateError(w, r, err.Error())
 		return
 	}
-	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, WorkstreamID: formOptionalInt(r, "workstream_id"), ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: parsed.Start, EndedAt: &parsed.End, Timezone: s.cfg.DefaultTimezone, BreakSeconds: parsed.BreakSeconds, Billable: true, Description: r.FormValue("description")}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, WorkstreamID: workstreamID, ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: parsed.Start, EndedAt: &parsed.End, Timezone: s.cfg.DefaultTimezone, BreakSeconds: parsed.BreakSeconds, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.CreateTimesheet(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.serverError(w, r, err)
 		return
@@ -1354,14 +1355,15 @@ func (s *Server) updateTimesheet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := formInt(r, "project_id")
-	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id")); err != nil {
+	workstreamID, err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id"))
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		s.render(w, r, templates.EditTimesheet(s.nav(r), selectors, prefill, err.Error(), entry.Exported))
 		return
 	}
 	entry.CustomerID = formInt(r, "customer_id")
 	entry.ProjectID = projectID
-	entry.WorkstreamID = formOptionalInt(r, "workstream_id")
+	entry.WorkstreamID = workstreamID
 	entry.ActivityID = formInt(r, "activity_id")
 	entry.TaskID = formOptionalInt(r, "task_id")
 	entry.StartedAt = parsed.Start
@@ -1392,11 +1394,12 @@ func (s *Server) startTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := formInt(r, "project_id")
-	if err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id")); err != nil {
+	workstreamID, err := s.validateWorkSelection(r, projectID, formInt(r, "customer_id"), formInt(r, "activity_id"), formOptionalInt(r, "workstream_id"), formOptionalInt(r, "task_id"))
+	if err != nil {
 		s.badRequest(w, r, err)
 		return
 	}
-	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, WorkstreamID: formOptionalInt(r, "workstream_id"), ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
+	t := &domain.Timesheet{WorkspaceID: s.access(r).WorkspaceID, UserID: s.state(r).User.ID, CustomerID: formInt(r, "customer_id"), ProjectID: projectID, WorkstreamID: workstreamID, ActivityID: formInt(r, "activity_id"), TaskID: formOptionalInt(r, "task_id"), StartedAt: start, Timezone: s.cfg.DefaultTimezone, Billable: true, Description: r.FormValue("description")}
 	if err := s.store.StartTimer(r.Context(), t, splitCSV(r.FormValue("tags"))); err != nil {
 		s.badRequest(w, r, err)
 		return
@@ -2333,34 +2336,34 @@ func (s *Server) customerInScope(r *http.Request, customerID int64) bool {
 	return err == nil && customer != nil && customer.WorkspaceID == s.access(r).WorkspaceID
 }
 
-func (s *Server) validateWorkSelection(r *http.Request, projectID, customerID, activityID int64, workstreamID, taskID *int64) error {
+func (s *Server) validateWorkSelection(r *http.Request, projectID, customerID, activityID int64, workstreamID, taskID *int64) (*int64, error) {
 	if projectID == 0 || customerID == 0 || activityID == 0 {
-		return errors.New("customer, project, and activity are required")
+		return nil, errors.New("customer, project, and activity are required")
 	}
 	project, err := s.store.Project(r.Context(), projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if project == nil || project.WorkspaceID != s.access(r).WorkspaceID || project.CustomerID != customerID || !s.canTrackProject(r, projectID) {
-		return errors.New("invalid project selection")
+		return nil, errors.New("invalid project selection")
 	}
 	activity, err := s.store.Activity(r.Context(), activityID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if activity == nil || activity.WorkspaceID != s.access(r).WorkspaceID {
-		return errors.New("invalid activity selection")
+		return nil, errors.New("invalid activity selection")
 	}
 	if activity.ProjectID != nil && *activity.ProjectID != projectID {
-		return errors.New("activity does not belong to the selected project")
+		return nil, errors.New("activity does not belong to the selected project")
 	}
 	projectWorkstreams, err := s.store.ListProjectWorkstreams(r.Context(), projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(projectWorkstreams) > 0 {
 		if workstreamID == nil || *workstreamID == 0 {
-			return errors.New("workstream is required for the selected project")
+			return nil, errors.New("workstream is required for the selected project")
 		}
 		allowed := false
 		for _, item := range projectWorkstreams {
@@ -2370,21 +2373,23 @@ func (s *Server) validateWorkSelection(r *http.Request, projectID, customerID, a
 			}
 		}
 		if !allowed {
-			return errors.New("workstream does not belong to the selected project")
+			return nil, errors.New("workstream does not belong to the selected project")
 		}
-	} else if workstreamID != nil && *workstreamID > 0 {
-		return errors.New("selected project has no workstreams configured")
+	} else {
+		// Projects without configured workstreams should still accept time entries.
+		// Ignore any stale workstream IDs posted from old links/prefills.
+		workstreamID = nil
 	}
 	if taskID != nil {
 		task, err := s.store.Task(r.Context(), *taskID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if task == nil || task.WorkspaceID != s.access(r).WorkspaceID || task.ProjectID != projectID {
-			return errors.New("task does not belong to the selected project")
+			return nil, errors.New("task does not belong to the selected project")
 		}
 	}
-	return nil
+	return workstreamID, nil
 }
 
 func (s *Server) validateOptionalRateScope(r *http.Request) error {
@@ -2845,25 +2850,42 @@ func (s *Server) adminDemoData(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminDemoDataAdd(w http.ResponseWriter, r *http.Request) {
-	workspaceID, err := s.store.SeedDemoData(r.Context(), s.access(r).OrganizationID)
+	workspaceID, err := s.store.DefaultWorkspaceForOrganization(r.Context(), s.access(r).OrganizationID)
 	if err != nil {
-		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to add demo data: "+err.Error())
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to show demo data: "+err.Error())
+		return
+	}
+	workspace, err := s.store.Workspace(r.Context(), workspaceID)
+	if err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to show demo data: "+err.Error())
+		return
+	}
+	if workspace == nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Default workspace not found")
+		return
+	}
+	if err := s.store.ClearDemoDataForWorkspace(r.Context(), workspaceID); err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to show demo data: "+err.Error())
+		return
+	}
+	if _, err := s.store.SeedDemoDataForWorkspace(r.Context(), workspaceID, s.state(r).User.Email, workspace.Timezone, workspace.DefaultCurrency); err != nil {
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to show demo data: "+err.Error())
 		return
 	}
 	uid := s.state(r).User.ID
-	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "add")
-	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data added to the default workspace")
+	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "show")
+	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data shown in the default workspace")
 }
 
 func (s *Server) adminDemoDataRemove(w http.ResponseWriter, r *http.Request) {
 	workspaceID, err := s.store.ClearDemoData(r.Context(), s.access(r).OrganizationID)
 	if err != nil {
-		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to remove demo data: "+err.Error())
+		s.redirectWithFlash(w, r, "/admin/demo-data", "error", "Unable to hide demo data: "+err.Error())
 		return
 	}
 	uid := s.state(r).User.ID
-	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "remove")
-	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data removed from the default workspace")
+	s.store.Audit(r.Context(), &uid, "seed", "demo_data", &workspaceID, "hide")
+	s.redirectWithFlash(w, r, "/admin/demo-data", "success", "Demo data hidden from the default workspace")
 }
 
 // ─── Saved report edit/delete/share ───────────────────────────────────────────

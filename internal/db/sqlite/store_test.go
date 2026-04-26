@@ -467,6 +467,74 @@ func TestHistoricalRatesAndUserCostResolution(t *testing.T) {
 	}
 }
 
+func TestSeedDemoDataCreatesReusableEvaluationDataset(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "demo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SeedAdmin(ctx, "admin@example.com", "secret12345", "UTC", "USD"); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := store.SeedDemoData(ctx, "admin@example.com", "Africa/Johannesburg", "ZAR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.UsersCreated < 4 {
+		t.Fatalf("expected at least four demo users, got %d", summary.UsersCreated)
+	}
+	if summary.ProjectsCreated < 3 || summary.TasksCreated < 9 || summary.TimesheetsCreated == 0 {
+		t.Fatalf("unexpected demo summary: %#v", summary)
+	}
+
+	var userCount, distinctTimesheetUsers, favoriteCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(DISTINCT user_id) FROM timesheets`).Scan(&distinctTimesheetUsers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM favorites`).Scan(&favoriteCount); err != nil {
+		t.Fatal(err)
+	}
+	if userCount < 5 {
+		t.Fatalf("expected admin plus demo users, got %d users", userCount)
+	}
+	if distinctTimesheetUsers < 4 {
+		t.Fatalf("expected timesheets for at least four people, got %d", distinctTimesheetUsers)
+	}
+	if favoriteCount < 3 {
+		t.Fatalf("expected seeded favorites, got %d", favoriteCount)
+	}
+
+	second, err := store.SeedDemoData(ctx, "admin@example.com", "Africa/Johannesburg", "ZAR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.TimesheetsCreated != 0 {
+		t.Fatalf("expected second seed pass to skip duplicate timesheets, got %#v", second)
+	}
+
+	if _, err := store.ClearDemoData(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	var demoUsers, demoCustomers, demoTags int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE lower(email) LIKE '%.demo@tockr.local'`).Scan(&demoUsers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE lower(name) IN (lower('Northwind Mining'), lower('GreenLine Foods'), lower('MetroGrid Estates'))`).Scan(&demoCustomers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE lower(name)=lower('demo-seed')`).Scan(&demoTags); err != nil {
+		t.Fatal(err)
+	}
+	if demoUsers != 0 || demoCustomers != 0 || demoTags != 0 {
+		t.Fatalf("expected demo data to be removed, got users=%d customers=%d tags=%d", demoUsers, demoCustomers, demoTags)
+	}
+}
+
 func TestUpdateTimesheetRecalculatesAndReplacesTags(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))

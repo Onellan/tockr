@@ -40,7 +40,7 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/project-dashboards", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/schedule", "/admin/demo-data", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
+	routes := []string{"/", "/account", "/calendar", "/timesheets", "/customers", "/projects", "/project-dashboards", "/tasks", "/activities", "/workstreams", "/tags", "/groups", "/reports", "/reports/utilization", "/invoices", "/rates", "/project-templates", "/admin", "/admin/users", "/admin/email", "/admin/demo-data", "/admin/schedule", "/admin/exchange-rates", "/admin/recalculate", "/webhooks", "/api/tasks"}
 	for _, route := range routes {
 		rec := getWithCookie(app, route, cookie)
 		if rec.Code != http.StatusOK {
@@ -83,6 +83,64 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 		if strings.Contains(adminBody, unexpected) {
 			t.Fatalf("admin page should not contain %q", unexpected)
 		}
+	}
+}
+
+func TestAdminDemoDataCanShowAndHideSeededWorkspaceData(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	adminCookie := loginCookie(t, app, "admin@example.com", "admin12345")
+
+	body := getWithCookie(app, "/admin/demo-data", adminCookie).Body.String()
+	for _, expected := range []string{"Default workspace target", "Show demo data", "Hide demo data"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("demo data admin page missing %q", expected)
+		}
+	}
+
+	csrf := csrfFromBody(t, body)
+	rec := postFormWithCookie(app, "/admin/demo-data/add", adminCookie, url.Values{
+		"csrf": {csrf},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("demo data add returned %d", rec.Code)
+	}
+
+	var demoUsers, demoCustomers, demoTags int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE lower(email) LIKE '%.demo@tockr.local'`).Scan(&demoUsers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE lower(name) IN (lower('Northwind Mining'), lower('GreenLine Foods'), lower('MetroGrid Estates'))`).Scan(&demoCustomers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE lower(name)=lower('demo-seed')`).Scan(&demoTags); err != nil {
+		t.Fatal(err)
+	}
+	if demoUsers < 4 || demoCustomers < 3 || demoTags == 0 {
+		t.Fatalf("expected demo data to be seeded, got users=%d customers=%d tags=%d", demoUsers, demoCustomers, demoTags)
+	}
+
+	body = getWithCookie(app, "/admin/demo-data", adminCookie).Body.String()
+	csrf = csrfFromBody(t, body)
+	rec = postFormWithCookie(app, "/admin/demo-data/remove", adminCookie, url.Values{
+		"csrf": {csrf},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("demo data remove returned %d", rec.Code)
+	}
+
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE lower(email) LIKE '%.demo@tockr.local'`).Scan(&demoUsers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE lower(name) IN (lower('Northwind Mining'), lower('GreenLine Foods'), lower('MetroGrid Estates'))`).Scan(&demoCustomers); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM tags WHERE lower(name)=lower('demo-seed')`).Scan(&demoTags); err != nil {
+		t.Fatal(err)
+	}
+	if demoUsers != 0 || demoCustomers != 0 || demoTags != 0 {
+		t.Fatalf("expected demo data to be removed, got users=%d customers=%d tags=%d", demoUsers, demoCustomers, demoTags)
 	}
 }
 
