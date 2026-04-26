@@ -1115,13 +1115,16 @@ func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selecto
 			if template.Archived {
 				status = "Archived"
 			}
+			var editForm strings.Builder
+			renderProjectTemplateForm(&editForm, user, template, fmt.Sprintf("/project-templates/%d", template.ID))
+			actions := `<details class="inline-edit"><summary class="table-action">Edit</summary><div class="inline-edit-form inline-edit-generic">` + editForm.String() + `<div class="inline-edit-actions"><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></details>`
 			rows = append(rows, []string{
 				template.Name,
 				template.ProjectName,
 				status,
 				fmt.Sprint(len(template.Tasks)),
 				fmt.Sprint(len(template.Activities)),
-				fmt.Sprintf(`<a class="table-action" href="/project-templates/%d">Edit</a>`, template.ID),
+				actions,
 			})
 		}
 		dataTableRaw(w, []string{"Template", "Project name", "Status", "Tasks", "Activities", "Action"}, rows)

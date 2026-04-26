@@ -2322,7 +2322,7 @@ func inlineEditAction(ctx context.Context, form templ.Component) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return `<details class="inline-edit"><summary class="table-action">Edit</summary>` + body + `</details>`, nil
+	return `<details class="inline-edit"><summary class="table-action">Edit</summary><div class="inline-edit-form inline-edit-generic">` + body + `<div class="inline-edit-actions"><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></details>`, nil
 }
 
 func (s *Server) customerInScope(r *http.Request, customerID int64) bool {

@@ -57,6 +57,55 @@ func TestCoreTimesheetFlow(t *testing.T) {
 	}
 }
 
+func TestDefaultWorkstreamsSeededForAllWorkspaces(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if err := store.SeedAdmin(ctx, "admin@example.com", "secret12345", "UTC", "USD"); err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceOne, err := store.ListWorkstreams(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaceOne) != len(defaultWorkstreams) {
+		t.Fatalf("workspace 1 workstream count = %d, want %d", len(workspaceOne), len(defaultWorkstreams))
+	}
+
+	workspace := &domain.Workspace{
+		OrganizationID:  1,
+		Name:            "Expansion Workspace",
+		Slug:            "expansion-workspace",
+		DefaultCurrency: "USD",
+		Timezone:        "UTC",
+	}
+	if err := store.UpsertWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	workspaceTwo, err := store.ListWorkstreams(ctx, workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaceTwo) != len(defaultWorkstreams) {
+		t.Fatalf("workspace %d workstream count = %d, want %d", workspace.ID, len(workspaceTwo), len(defaultWorkstreams))
+	}
+
+	got := map[string]string{}
+	for _, workstream := range workspaceTwo {
+		got[workstream.Name] = workstream.Description
+	}
+	for _, expected := range defaultWorkstreams {
+		if got[expected.Name] != expected.Description {
+			t.Fatalf("default workstream %q mismatch", expected.Name)
+		}
+	}
+}
+
 func TestHierarchyBackfillAndGroupProjectAccess(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
