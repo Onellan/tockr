@@ -3741,7 +3741,7 @@ func (s *Server) writeInvoiceFile(inv *domain.Invoice) error {
 		detail = &domain.InvoiceDetail{Invoice: *inv}
 	}
 	dir := filepath.Join(s.cfg.DataDir, "invoices")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
 	var sb strings.Builder
@@ -3810,7 +3810,7 @@ h1{margin:0 0 4px}
 	if !isValidInvoiceFilename(inv.Filename) {
 		return fmt.Errorf("invalid invoice filename: %s", inv.Filename)
 	}
-	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(sb.String()), 0o644)
+	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(sb.String()), 0o600)
 }
 
 func randomToken(bytes int) string {

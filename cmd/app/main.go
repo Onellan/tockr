@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"tockr/internal/db/sqlite"
 	"tockr/internal/platform/config"
@@ -37,7 +38,11 @@ func main() {
 	go worker.Run(ctx)
 
 	app := httpserver.New(cfg, store, log)
-	server := &http.Server{Addr: cfg.Addr, Handler: app.Handler()}
+	server := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           app.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 
 	go func() {
 		log.Info("server listening", "addr", cfg.Addr)

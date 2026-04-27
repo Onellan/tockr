@@ -126,6 +126,7 @@ func scopedRoles(roles []string) (string, string) {
 }
 
 func copyTable(ctx context.Context, src *sql.DB, tx *sql.Tx, table, insert string, columns []string) error {
+	//nolint:gosec // table names are from configuration, not user input
 	rows, err := src.QueryContext(ctx, "SELECT "+join(columns)+" FROM "+table)
 	if err != nil {
 		return err
