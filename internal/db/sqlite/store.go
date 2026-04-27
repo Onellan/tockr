@@ -1341,6 +1341,115 @@ func (s *Store) UpsertProject(ctx context.Context, p *domain.Project) error {
 	return err
 }
 
+func (s *Store) CreateProjectFromDraft(ctx context.Context, workspaceID int64, draft domain.ProjectCreateDraft) (*domain.Project, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+
+	now := utcNow()
+	project := draft.Project
+	project.ID = 0
+	project.WorkspaceID = workspaceID
+	if project.BudgetAlertPercent == 0 {
+		project.BudgetAlertPercent = 80
+	}
+	if strings.TrimSpace(project.Number) == "" {
+		project.Number, err = generateEntityIDTx(ctx, tx, "projects", "PR", workspaceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO projects(workspace_id, customer_id, name, number, order_number, visible, private, billable, estimate_seconds, budget_cents, budget_alert_percent, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		project.WorkspaceID, project.CustomerID, project.Name, project.Number, project.OrderNo, boolInt(project.Visible), boolInt(project.Private), boolInt(project.Billable), project.EstimateSeconds, project.BudgetCents, project.BudgetAlertPercent, project.Comment, project.LegacyJSON, now)
+	if err != nil {
+		return nil, err
+	}
+	project.ID, err = res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, item := range draft.Workstreams {
+		workstreamID := item.ExistingWorkstreamID
+		if workstreamID == 0 {
+			code := strings.TrimSpace(item.Code)
+			if code == "" {
+				code, err = generateEntityIDTx(ctx, tx, "workstreams", "WS", workspaceID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			res, err := tx.ExecContext(ctx, `INSERT INTO workstreams(workspace_id, name, code, description, visible, created_at) VALUES(?,?,?,?,?,?)`,
+				workspaceID, item.Name, code, item.Description, 1, now)
+			if err != nil {
+				return nil, err
+			}
+			workstreamID, err = res.LastInsertId()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_workstreams(project_id, workstream_id, budget_cents, active, created_at) VALUES(?,?,?,?,?)`,
+			project.ID, workstreamID, item.BudgetCents, 1, now); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, item := range draft.Activities {
+		name := strings.TrimSpace(item.Name)
+		number := strings.TrimSpace(item.Number)
+		comment := item.Comment
+		visible := item.Visible
+		billable := item.Billable
+		if item.ExistingActivityID > 0 {
+			var source domain.Activity
+			var sourceProject sql.NullInt64
+			var created string
+			err := tx.QueryRowContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities WHERE id=? AND workspace_id=?`, item.ExistingActivityID, workspaceID).
+				Scan(&source.ID, &source.WorkspaceID, &sourceProject, &source.Name, &source.Number, &source.Visible, &source.Billable, &source.Comment, &source.LegacyJSON, &created)
+			if err != nil {
+				return nil, err
+			}
+			if sourceProject.Valid {
+				return nil, errors.New("existing project-specific deliverables cannot be reused in project setup")
+			}
+			name = source.Name
+			number = ""
+			comment = source.Comment
+			visible = source.Visible
+			billable = source.Billable
+		}
+		if number == "" {
+			number, err = generateEntityIDTx(ctx, tx, "activities", "WT", workspaceID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO activities(workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			workspaceID, project.ID, name, number, boolInt(visible), boolInt(billable), comment, "", now); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, member := range draft.Members {
+		role := member.Role
+		if role == "" {
+			role = domain.ProjectRoleMember
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_members(project_id, user_id, role, created_at) VALUES(?,?,?,?) ON CONFLICT(project_id, user_id) DO UPDATE SET role=excluded.role`,
+			project.ID, member.UserID, string(role), now); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &project, nil
+}
+
 func (s *Store) ListProjects(ctx context.Context, access domain.AccessContext, customerID int64, term string, page, size int) ([]domain.Project, domain.Page, error) {
 	page, size = domain.NormalizePage(page, size)
 	where, args := scopedSearchWhere("workspace_id", access.WorkspaceID, "name", term)
@@ -2688,8 +2797,8 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 	workTypeRows, err := s.db.QueryContext(ctx, `SELECT
 		COALESCE(a.id, 0),
 		CASE
-			WHEN t.activity_id IS NULL THEN 'Unassigned work type'
-			WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+			WHEN t.activity_id IS NULL THEN 'Unassigned deliverable'
+			WHEN a.id IS NULL THEN 'Unknown deliverable #' || CAST(t.activity_id AS TEXT)
 			ELSE a.name
 		END,
 		COALESCE(SUM(t.duration_seconds),0),
@@ -2700,8 +2809,8 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		GROUP BY
 			COALESCE(a.id, 0),
 			CASE
-				WHEN t.activity_id IS NULL THEN 'Unassigned work type'
-				WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+				WHEN t.activity_id IS NULL THEN 'Unassigned deliverable'
+				WHEN a.id IS NULL THEN 'Unknown deliverable #' || CAST(t.activity_id AS TEXT)
 				ELSE a.name
 			END
 		ORDER BY COALESCE(SUM(t.duration_seconds),0) DESC, 2`, baseArgs...)
@@ -2807,8 +2916,8 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		u.display_name,
 		COALESCE(a.id, 0),
 		CASE
-			WHEN t.activity_id IS NULL THEN 'Unassigned work type'
-			WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+			WHEN t.activity_id IS NULL THEN 'Unassigned deliverable'
+			WHEN a.id IS NULL THEN 'Unknown deliverable #' || CAST(t.activity_id AS TEXT)
 			ELSE a.name
 		END,
 		COALESCE(SUM(t.duration_seconds),0)
@@ -2821,8 +2930,8 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 			u.display_name,
 			COALESCE(a.id, 0),
 			CASE
-				WHEN t.activity_id IS NULL THEN 'Unassigned work type'
-				WHEN a.id IS NULL THEN 'Unknown work type #' || CAST(t.activity_id AS TEXT)
+				WHEN t.activity_id IS NULL THEN 'Unassigned deliverable'
+				WHEN a.id IS NULL THEN 'Unknown deliverable #' || CAST(t.activity_id AS TEXT)
 				ELSE a.name
 			END
 		HAVING COALESCE(SUM(t.duration_seconds),0) > 0
@@ -3325,6 +3434,14 @@ func (s *Store) generateEntityID(ctx context.Context, table, prefix string, work
 	var n int64
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE workspace_id=?`, workspaceID).Scan(&n)
 	return fmt.Sprintf("%s-%06d", prefix, n+1)
+}
+
+func generateEntityIDTx(ctx context.Context, tx *sql.Tx, table, prefix string, workspaceID int64) (string, error) {
+	var n int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE workspace_id=?`, workspaceID).Scan(&n); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%06d", prefix, n+1), nil
 }
 
 // workSchedule reads working schedule settings from the settings table.

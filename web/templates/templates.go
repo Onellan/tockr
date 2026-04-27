@@ -112,7 +112,7 @@ var primaryNav = []navItem{
 	{"Projects", "/projects", "Projects / Delivery", ""},
 	{"Project Dashboards", "/project-dashboards", "Projects / Delivery", auth.PermManageProjects},
 	{"Workstreams", "/workstreams", "Projects / Delivery", auth.PermManageMaster},
-	{"Work Types", "/activities", "Projects / Delivery", ""},
+	{"Deliverables", "/activities", "Projects / Delivery", ""},
 	{"Tasks", "/tasks", "Projects / Delivery", ""},
 	{"Groups", "/groups", "Projects / Delivery", auth.PermManageGroups},
 	{"Templates", "/project-templates", "Projects / Delivery", auth.PermManageProjects},
@@ -249,7 +249,7 @@ func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Ti
 		metric(w, "Week to date", duration(summary.WeekTracked), "Current consulting week")
 		metric(w, "Missing this week", duration(summary.MissingSeconds), "Hours still to capture")
 		metric(w, "Active timers", fmt.Sprint(summary.Stats["active_timers"]), "Currently running across workspace")
-		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Quick log and timer <span class="tooltip-icon" data-tooltip="Use this for the work package you are on right now. Choose the client, project, work type, and optional task before starting or logging time.">i</span></h2><p>Log a date and duration quickly, or start a live timer with the same work classification.</p></div></div>`)
+		_, _ = fmt.Fprint(w, `</section><section class="two-col"><div class="panel"><div class="panel-head"><div><h2>Quick log and timer <span class="tooltip-icon" data-tooltip="Use this for the work package you are on right now. Choose the client, project, deliverable, and optional task before starting or logging time.">i</span></h2><p>Log a date and duration quickly, or start a live timer with the same work classification.</p></div></div>`)
 		if active != nil {
 			_, _ = fmt.Fprintf(w, `<div class="timer-running"><span class="status-dot"></span><div><strong>Running since %s</strong><p>Your current timer is active. Stop it when the work package is complete.</p></div></div><form method="post" action="/timesheets/stop" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Stop timer</button><a class="ghost-button" href="/timesheets">Open weekly review</a></form>`, esc(active.StartedAt.Format("15:04")), esc(user.CSRF))
 		}
@@ -260,7 +260,7 @@ func Dashboard(user *NavUser, summary domain.DashboardSummary, active *domain.Ti
 		}
 		for index, item := range summary.RecentWork {
 			if index == 0 {
-				_, _ = fmt.Fprint(w, `<div><span>Continue recent work</span><strong>Reuse your last client / project / work type combination in one click.</strong></div>`)
+				_, _ = fmt.Fprint(w, `<div><span>Continue recent work</span><strong>Reuse your last client / project / deliverable combination in one click.</strong></div>`)
 			}
 			desc := item.Description
 			if desc == "" {
@@ -324,12 +324,20 @@ func EntityListRaw(title string, user *NavUser, headers []string, rows [][]strin
 	return Layout(title, user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, title, "Directory", "Create and maintain the records used by time entries and reporting.")
 		if form != nil {
-			createTitle := "Create " + singularTitle(title)
-			renderCreateCardStart(w, createTitle, "Keep required fields tight and searchable.", createCardCollapsedByDefault(title))
-			if err := form.Render(ctx, w); err != nil {
-				return err
+			if strings.EqualFold(strings.TrimSpace(title), "projects") {
+				_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Create project</h2><p>Start the guided project setup workflow.</p></div></div>`)
+				if err := form.Render(ctx, w); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprint(w, `</section>`)
+			} else {
+				createTitle := "Create " + singularTitle(title)
+				renderCreateCardStart(w, createTitle, "Keep required fields tight and searchable.", createCardCollapsedByDefault(title))
+				if err := form.Render(ctx, w); err != nil {
+					return err
+				}
+				renderCreateCardEnd(w, createCardCollapsedByDefault(title))
 			}
-			renderCreateCardEnd(w, createCardCollapsedByDefault(title))
 		}
 		dataTableRaw(w, headers, rows)
 		return nil
@@ -338,7 +346,7 @@ func EntityListRaw(title string, user *NavUser, headers []string, rows [][]strin
 
 func createCardCollapsedByDefault(title string) bool {
 	switch strings.ToLower(strings.TrimSpace(title)) {
-	case "clients", "projects", "work types", "tasks", "groups", "users":
+	case "clients", "deliverables", "tasks", "groups", "users":
 		return true
 	default:
 		return false
@@ -461,12 +469,12 @@ func ActivityForm(user *NavUser, selectors *SelectorData, activity *domain.Activ
 		}
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s">`, esc(action), esc(user.CSRF))
 		renderSelect(w, "Project"+tipHTML("Scope this activity to one project, or leave blank to make it available across all projects."), "project_id", optionList(selectors, "project"), selectedProject, false, "Global activity", nil)
-		_, _ = fmt.Fprintf(w, `<label>Work type %s<input name="name" value="%s" required></label>`, tipHTML("Work type shown in timesheets (e.g. design review, site visit, coordination, QA/rework)."), esc(name))
-		_, _ = fmt.Fprintf(w, `<label>Work Type ID %s<input name="number" value="%s" placeholder="auto-generated if blank"></label>`, tipHTML("Optional reference code. Auto-generated as WT-XXXXXX if left blank."), esc(number))
+		_, _ = fmt.Fprintf(w, `<label>Deliverable %s<input name="name" value="%s" required></label>`, tipHTML("Deliverable shown in timesheets (e.g. design review, site visit, coordination, QA/rework)."), esc(name))
+		_, _ = fmt.Fprintf(w, `<label>Deliverable ID %s<input name="number" value="%s" placeholder="auto-generated if blank"></label>`, tipHTML("Optional reference code. Auto-generated as DL-XXXXXX if left blank."), esc(number))
 		_, _ = fmt.Fprintf(w, `<label class="wide">Comment<textarea name="comment">%s</textarea></label>`, esc(comment))
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="visible"%s> Visible %s</label>`, visibleChecked, tipHTML("Visible activities appear in timesheet selectors. Uncheck to retire an activity without deleting it."))
 		_, _ = fmt.Fprintf(w, `<label class="check"><input type="checkbox" name="billable"%s> Billable %s</label>`, billableChecked, tipHTML("Billable activities are included in invoice and rate calculations."))
-		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save work type</button></div></form>`)
+		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save deliverable</button></div></form>`)
 		return nil
 	})
 }
@@ -562,7 +570,7 @@ func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorDa
 		if strings.TrimSpace(prefill.Message) != "" {
 			_, _ = fmt.Fprintf(w, `<div class="alert">%s</div>`, esc(prefill.Message))
 		}
-		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Log engineering time</h2><p>Choose the client, project, work type, and optional task before saving the entry.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Log engineering time</h2><p>Choose the client, project, deliverable, and optional task before saving the entry.</p></div></div><form method="post" action="/timesheets" class="form-grid selector-form"><input type="hidden" name="csrf" value="%s">`, esc(user.CSRF))
 		renderWorkSelectorsWithSelected(w, selectors, true, prefill)
 		renderTimesheetTimeFields(w, prefill, false)
 		_, _ = fmt.Fprintf(w, `<label>Tags <span class="field-hint">Optional reporting labels only.</span><input name="tags" placeholder="qa,site-visit" value="%s"></label><label class="wide">Description<textarea name="description">%s</textarea></label><div class="form-actions"><button class="primary">Add entry</button></div></form></div>`,
@@ -610,7 +618,7 @@ func Timesheets(user *NavUser, entries []domain.Timesheet, selectors *SelectorDa
 				timesheetActions(entry, editable),
 			})
 		}
-		dataTableRaw(w, []string{"Client", "Project", "Work Type", "Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description", "Actions"}, rows)
+		dataTableRaw(w, []string{"Client", "Project", "Deliverable", "Task", "Start", "End", "Duration", "Rate", "Billable", "Exported", "Description", "Actions"}, rows)
 		_, _ = fmt.Fprint(w, `<div class="export-row"><a class="ghost-button" href="/timesheets/export">Export CSV</a></div>`)
 		return nil
 	}))
@@ -682,10 +690,10 @@ func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, s
 		group := defaultVal(filter.Group, "user")
 		pageHeader(w, "Reports", "Billing and review", "Answer the questions engineering leads and billing admins ask most: who did the work, what was billable, and where projects are burning time.")
 		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Filters</h2><p>Build repeatable views for PM review, monthly billing, and discipline performance checks.</p></div></div><form method="get" action="/reports" class="toolbar-form selector-form"><label>Group by<select name="group">%s%s%s%s%s%s</select></label><label>Date from<input type="date" name="begin" value="%s"></label><label>Date to<input type="date" name="end" value="%s"></label>`,
-			reportOption(group, "user", "Engineer"), reportOption(group, "customer", "Client"), reportOption(group, "project", "Project"), reportOption(group, "activity", "Work Type"), reportOption(group, "task", "Task"), reportOption(group, "group", "Group"), dateInput(filter.Begin), dateInput(filter.End))
+			reportOption(group, "user", "Engineer"), reportOption(group, "customer", "Client"), reportOption(group, "project", "Project"), reportOption(group, "activity", "Deliverable"), reportOption(group, "task", "Task"), reportOption(group, "group", "Group"), dateInput(filter.Begin), dateInput(filter.End))
 		renderSelect(w, "Client", "customer_id", optionList(selectors, "customer"), filter.CustomerID, false, "All clients", nil)
 		renderSelect(w, "Project", "project_id", optionList(selectors, "project"), filter.ProjectID, false, "All projects", map[string]string{"data-filter-parent": "customer_id", "data-filter-attr": "customer-id"})
-		renderSelect(w, "Work Type", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All work types", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+		renderSelect(w, "Deliverable", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All deliverables", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "Task", "task_id", optionList(selectors, "task"), filter.TaskID, false, "All tasks", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 		renderSelect(w, "Engineer", "user_id", optionList(selectors, "user"), filter.UserID, false, "All engineers", nil)
 		renderSelect(w, "Group", "group_id", optionList(selectors, "group"), filter.GroupID, false, "All groups", nil)
@@ -697,7 +705,7 @@ func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, s
 		reportTab(w, group, "user", "Engineer")
 		reportTab(w, group, "customer", "Client")
 		reportTab(w, group, "project", "Project")
-		reportTab(w, group, "activity", "Work Type")
+		reportTab(w, group, "activity", "Deliverable")
 		reportTab(w, group, "task", "Task")
 		reportTab(w, group, "group", "Group")
 		_, _ = fmt.Fprint(w, `</div>`)
@@ -764,7 +772,7 @@ func renderProjectDashboardBody(w io.Writer, d domain.ProjectDashboard, selector
 	_, _ = fmt.Fprintf(w, `<input type="hidden" name="project_id" value="%d">`, d.Project.ID)
 	_, _ = fmt.Fprintf(w, `<label>Date from<input type="date" name="begin" value="%s"></label><label>Date to<input type="date" name="end" value="%s"></label>`, dateInput(filter.Begin), dateInput(filter.End))
 	renderSelect(w, "Workstream", "workstream_id", optionList(selectors, "workstream"), filter.WorkstreamID, false, "All workstreams", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-ids"})
-	renderSelect(w, "Work Type", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All work types", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+	renderSelect(w, "Deliverable", "activity_id", optionList(selectors, "activity"), filter.ActivityID, false, "All deliverables", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 	renderSelect(w, "Task", "task_id", optionList(selectors, "task"), filter.TaskID, false, "All tasks", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 	renderSelect(w, "Engineer", "user_id", optionList(selectors, "user"), filter.UserID, false, "All engineers", nil)
 	renderSelect(w, "Group", "group_id", optionList(selectors, "group"), filter.GroupID, false, "All groups", nil)
@@ -823,8 +831,8 @@ func renderProjectDashboardPieCharts(w io.Writer, d domain.ProjectDashboard) {
 	)
 	renderProjectDashboardPieCard(
 		w,
-		"Time per work type",
-		"Distribution of tracked project time across work types.",
+		"Time per deliverable",
+		"Distribution of tracked project time across deliverables.",
 		dashboardSlicesFromActivities(d.ActivitySummaries),
 		duration(d.TrackedSeconds),
 	)
@@ -1198,7 +1206,7 @@ func GroupMembers(user *NavUser, group domain.Group, members []domain.User, user
 func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selectors *SelectorData) templ.Component {
 	return Layout("Project templates", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Project templates", "Project setup", "Create repeatable engineering project blueprints with standard phases, tasks, and default controls.")
-		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How templates work:</strong> Capture your standard project setup once, including typical work types and task bundles, then reuse it whenever a similar engineering job starts.</div>`)
+		_, _ = fmt.Fprint(w, `<div class="info-callout"><strong>How templates work:</strong> Capture your standard project setup once, including typical deliverables and task bundles, then reuse it whenever a similar engineering job starts.</div>`)
 		renderCreateCardStart(w, "Create template", "Define defaults including tasks and activities (one per line).", true)
 		renderProjectTemplateForm(w, user, domain.ProjectTemplate{Visible: true, Billable: true, BudgetAlertPercent: 80}, "/project-templates")
 		renderCreateCardEnd(w, true)
@@ -1263,7 +1271,7 @@ func renderProjectTemplateForm(w io.Writer, user *NavUser, template domain.Proje
 	if template.Billable || template.ID == 0 {
 		billableChecked = " checked"
 	}
-	_, _ = fmt.Fprintf(w, `<form method="post" action="%s" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Template name<input name="name" value="%s" required></label><label>Project name<input name="project_name" value="%s" required></label><label>Project ID <span class="field-hint">leave blank to auto-generate</span><input name="project_number" value="%s"></label><label>Order number<input name="order_number" value="%s"></label><label>Estimate hours<input name="estimate_hours" value="%d"></label><label>Budget <span class="field-hint">in primary currency units</span><input name="budget" value="%d" placeholder="e.g. 10000"></label><label>Budget alert (%%) <span class="field-hint">warn when this %% is consumed</span><input name="budget_alert_percent" value="%d"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="wide">Default tasks <span class="field-hint">one task name per line</span><textarea name="tasks" placeholder="One task per line">%s</textarea></label><label class="wide">Default activities <span class="field-hint">one work type name per line</span><textarea name="activities" placeholder="One activity per line">%s</textarea></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label><label class="check"><input type="checkbox" name="private"%s> Private</label><label class="check"><input type="checkbox" name="billable"%s> Billable</label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save template</button></div></form>`,
+	_, _ = fmt.Fprintf(w, `<form method="post" action="%s" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Template name<input name="name" value="%s" required></label><label>Project name<input name="project_name" value="%s" required></label><label>Project ID <span class="field-hint">leave blank to auto-generate</span><input name="project_number" value="%s"></label><label>Order number<input name="order_number" value="%s"></label><label>Estimate hours<input name="estimate_hours" value="%d"></label><label>Budget <span class="field-hint">in primary currency units</span><input name="budget" value="%d" placeholder="e.g. 10000"></label><label>Budget alert (%%) <span class="field-hint">warn when this %% is consumed</span><input name="budget_alert_percent" value="%d"></label><label class="wide">Description<textarea name="description">%s</textarea></label><label class="wide">Default tasks <span class="field-hint">one task name per line</span><textarea name="tasks" placeholder="One task per line">%s</textarea></label><label class="wide">Default deliverables <span class="field-hint">one deliverable name per line</span><textarea name="activities" placeholder="One deliverable per line">%s</textarea></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label><label class="check"><input type="checkbox" name="private"%s> Private</label><label class="check"><input type="checkbox" name="billable"%s> Billable</label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save template</button></div></form>`,
 		esc(action), esc(user.CSRF), esc(template.Name), esc(template.ProjectName), esc(template.ProjectNumber), esc(template.OrderNo), template.EstimateSeconds/3600, template.BudgetCents, defaultInt(template.BudgetAlertPercent, 80), esc(template.Description), esc(templateTaskLines(template.Tasks)), esc(templateActivityLines(template.Activities)), visibleChecked, privateChecked, billableChecked, archiveChecked)
 }
 
@@ -1354,8 +1362,9 @@ func UserForm(user *NavUser, target *domain.User) templ.Component {
 					`<ul class="role-features">`+
 					`<li class="role-inherit">Everything a Team lead can do</li>`+
 					`<li><a href="/customers">Customers</a></li>`+
-					`<li><a href="/projects">Projects &amp; team members</a></li>`+
-					`<li><a href="/activities">Activities</a> &amp; <a href="/tasks">tasks</a></li>`+
+					`<li><a href="/projects">Projects</a> — created via <a href="/projects/create">guided 4-step wizard</a></li>`+
+					`<li><a href="/workstreams">Workstreams</a> &amp; per-project workstream assignments</li>`+
+					`<li><a href="/activities">Deliverables</a> &amp; <a href="/tasks">tasks</a></li>`+
 					`<li><a href="/rates">Billing rates</a> · <a href="/admin/exchange-rates">exchange rates</a> · <a href="/admin/recalculate">recalculation</a></li>`+
 					`<li><a href="/invoices">Invoices &amp; exports</a></li>`+
 					`<li><a href="/groups">Groups</a> &amp; <a href="/webhooks">webhooks</a></li>`+
@@ -1393,7 +1402,7 @@ func renderWorkSelectorsWithSelected(w io.Writer, selectors *SelectorData, requi
 	renderSelect(w, "Client"+tipHTML("The client that will ultimately be billed for the work."), "customer_id", optionList(selectors, "customer"), selected.CustomerID, requireCore, "Select a client", nil)
 	renderSelect(w, "Project"+tipHTML("The project or job number this time should land against."), "project_id", optionList(selectors, "project"), selected.ProjectID, requireCore, "Select a project", map[string]string{"data-filter-parent": "customer_id", "data-filter-attr": "customer-id"})
 	renderSelect(w, "Workstream"+tipHTML("Workstream identifies the delivery stream or discipline this effort belongs to within the selected project."), "workstream_id", optionList(selectors, "workstream"), selected.WorkstreamID, requireCore, "Select a workstream", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-ids"})
-	renderSelect(w, "Work Type"+tipHTML("Work type explains the kind of effort performed, such as design review, QA/rework, site visit, or coordination."), "activity_id", optionList(selectors, "activity"), selected.ActivityID, requireCore, "Select a work type", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
+	renderSelect(w, "Deliverable"+tipHTML("Deliverable explains the kind of effort performed, such as design review, QA/rework, site visit, or coordination."), "activity_id", optionList(selectors, "activity"), selected.ActivityID, requireCore, "Select a deliverable", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 	renderSelect(w, "Task"+tipHTML("Task is the deliverable or work package being billed, such as pump sizing, P&ID review, or tender support."), "task_id", optionList(selectors, "task"), selected.TaskID, false, "No task", map[string]string{"data-filter-parent": "project_id", "data-filter-attr": "project-id"})
 }
 
@@ -2008,8 +2017,8 @@ func templateActivityLines(activities []domain.ProjectTemplateActivity) string {
 
 func singularTitle(title string) string {
 	switch title {
-	case "Activities":
-		return "Activity"
+	case "Deliverables":
+		return "Deliverable"
 	case "Clients":
 		return "Client"
 	case "Customers":
@@ -2067,7 +2076,7 @@ func reportHeading(group string) string {
 	case "project":
 		return "Project"
 	case "activity":
-		return "Work Type"
+		return "Deliverable"
 	case "task":
 		return "Task"
 	case "group":

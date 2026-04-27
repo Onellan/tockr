@@ -982,7 +982,7 @@ func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing
 	for _, expected := range []string{
 		"Billing class",
 		"Billable only",
-		"Work Type",
+		"Deliverable",
 	} {
 		if !strings.Contains(reports, expected) {
 			t.Fatalf("reports missing %q", expected)

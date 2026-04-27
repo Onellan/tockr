@@ -121,6 +121,8 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/customers", s.requirePermission(auth.PermManageMaster, s.saveCustomer))
 		r.Post("/customers/{id}", s.requirePermission(auth.PermManageMaster, s.saveCustomer))
 		r.Get("/projects", s.projects)
+		r.Get("/projects/create", s.requirePermission(auth.PermManageMaster, s.projectCreateWizardPage))
+		r.Post("/projects/create", s.requirePermission(auth.PermManageMaster, s.projectCreateWizardSubmit))
 		r.Get("/projects/{id}/edit", s.requirePermission(auth.PermManageMaster, s.editProject))
 		r.Post("/projects", s.requirePermission(auth.PermManageMaster, s.saveProject))
 		r.Post("/projects/{id}", s.requirePermission(auth.PermManageMaster, s.saveProject))
@@ -846,7 +848,7 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	}
 	var form templ.Component
 	if s.hasPermission(r, auth.PermManageMaster) {
-		form = templates.ProjectForm(s.nav(r), selectors, nil)
+		form = templates.ProjectCreateEntryCard(s.nav(r))
 	}
 	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"Project", "Client", "Code", "Status", "Estimate", "Budget", "Actions"}, rows, form))
 }
@@ -1170,7 +1172,7 @@ func (s *Server) activities(w http.ResponseWriter, r *http.Request) {
 	if s.hasPermission(r, auth.PermManageMaster) {
 		form = templates.ActivityForm(s.nav(r), selectors, nil)
 	}
-	s.render(w, r, templates.EntityListRaw("Work Types", s.nav(r), []string{"Work type", "Project", "Code", "Visible", "Billable", "Actions"}, rows, form))
+	s.render(w, r, templates.EntityListRaw("Deliverables", s.nav(r), []string{"Deliverable", "Project", "Code", "Visible", "Billable", "Actions"}, rows, form))
 }
 
 func (s *Server) saveActivity(w http.ResponseWriter, r *http.Request) {

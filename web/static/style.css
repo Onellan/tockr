@@ -1091,6 +1091,22 @@ button:hover,
   border-color: var(--line);
 }
 
+.button-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
 .full {
   width: 100%;
 }
@@ -1916,6 +1932,104 @@ label > .field-hint {
     cursor: pointer;
   }
 
+.wizard-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.wizard-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.wizard-step-index {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.wizard-step strong,
+.wizard-step span {
+  display: block;
+}
+
+.wizard-step span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.wizard-step.active {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.wizard-step.active .wizard-step-index,
+.wizard-step.complete .wizard-step-index {
+  background: var(--text);
+  color: var(--surface);
+}
+
+.wizard-summary .summary-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.wizard-summary .summary-list strong,
+.wizard-summary .summary-list span {
+  display: block;
+}
+
+.project-wizard-entry {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.draft-chip-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.draft-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.draft-chip div {
+  min-width: 0;
+}
+
+.draft-chip strong,
+.draft-chip span {
+  display: block;
+}
+
+.draft-chip span {
+  color: var(--muted);
+}
+
 .auth-main {
   min-height: 100vh;
   display: grid;
@@ -2046,9 +2160,16 @@ label > .field-hint {
   .metric-grid,
   .two-col,
   .form-grid,
+  .wizard-steps,
+  .wizard-summary .summary-list,
   .entry-duration-grid,
   .login-shell {
     grid-template-columns: 1fr;
+  }
+
+  .draft-chip {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .panel-head,

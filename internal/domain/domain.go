@@ -209,6 +209,35 @@ type Project struct {
 	CreatedAt          time.Time
 }
 
+type ProjectCreateDraft struct {
+	Project     Project
+	Workstreams []ProjectCreateWorkstreamDraft
+	Activities  []ProjectCreateActivityDraft
+	Members     []ProjectCreateMemberDraft
+}
+
+type ProjectCreateWorkstreamDraft struct {
+	ExistingWorkstreamID int64
+	Name                 string
+	Code                 string
+	Description          string
+	BudgetCents          int64
+}
+
+type ProjectCreateActivityDraft struct {
+	ExistingActivityID int64
+	Name               string
+	Number             string
+	Comment            string
+	Visible            bool
+	Billable           bool
+}
+
+type ProjectCreateMemberDraft struct {
+	UserID int64
+	Role   ProjectRole
+}
+
 type Activity struct {
 	ID          int64
 	WorkspaceID int64
