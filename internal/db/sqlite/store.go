@@ -320,7 +320,7 @@ func (s *Store) FindUserByID(ctx context.Context, id int64) (*domain.User, error
 }
 
 func (s *Store) scanUser(ctx context.Context, where string, args ...any) (*domain.User, error) {
-	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, email_otp_enabled, created_at, last_login_at FROM users ` + where //nolint:gosec
+	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, email_otp_enabled, created_at, last_login_at FROM users ` + where // #nosec G202
 	row := s.db.QueryRowContext(ctx, q, args...)
 	var u domain.User
 	var created string
@@ -928,7 +928,7 @@ func (s *Store) ListOrganizationWorkspaces(ctx context.Context, organizationID i
 		(SELECT COUNT(*) FROM workspace_members wm WHERE wm.workspace_id=w.id),
 		(SELECT COUNT(*) FROM projects p WHERE p.workspace_id=w.id),
 		(CASE WHEN COALESCE(w.smtp_host,'')!='' AND COALESCE(w.smtp_from_email,'')!='' THEN 1 ELSE 0 END)
-		FROM workspaces w `+where+` ORDER BY w.name`, args...) //nolint:gosec
+		FROM workspaces w `+where+` ORDER BY w.name`, args...) // #nosec G202
 	if err != nil {
 		return nil, err
 	}
@@ -1339,7 +1339,7 @@ func (s *Store) ListCustomers(ctx context.Context, access domain.AccessContext, 
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at FROM customers `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) //nolint:gosec
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, name, number, company, contact, email, currency, timezone, visible, billable, comment, legacy_json, created_at FROM customers `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) // #nosec G202
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -1528,7 +1528,7 @@ func (s *Store) ListProjects(ctx context.Context, access domain.AccessContext, c
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, customer_id, name, number, order_number, visible, private, billable, estimate_seconds, budget_cents, budget_alert_percent, comment, legacy_json, created_at FROM projects `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) //nolint:gosec
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, customer_id, name, number, order_number, visible, private, billable, estimate_seconds, budget_cents, budget_alert_percent, comment, legacy_json, created_at FROM projects `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) // #nosec G202
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -1602,7 +1602,7 @@ func (s *Store) ListActivities(ctx context.Context, access domain.AccessContext,
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) //nolint:gosec
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, comment, legacy_json, created_at FROM activities `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) // #nosec G202
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
@@ -1685,7 +1685,7 @@ func (s *Store) ListTasks(ctx context.Context, access domain.AccessContext, proj
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, estimate_seconds, COALESCE(archived,0), created_at FROM tasks `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) //nolint:gosec
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, project_id, name, number, visible, billable, estimate_seconds, COALESCE(archived,0), created_at FROM tasks `+where+` ORDER BY name LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...) // #nosec G202
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
