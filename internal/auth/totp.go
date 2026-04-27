@@ -32,7 +32,12 @@ func VerifyTOTP(secret, code string, now time.Time) bool {
 	}
 	counter := now.UTC().Unix() / 30
 	for drift := int64(-1); drift <= 1; drift++ {
-		if totpCode(key, uint64(counter+drift)) == code {
+		// Safely convert counter+drift to uint64, checking for negative overflow
+		value := counter + drift
+		if value < 0 {
+			continue
+		}
+		if totpCode(key, uint64(value)) == code {
 			return true
 		}
 	}
@@ -48,7 +53,12 @@ func CurrentTOTPCode(secret string, now time.Time) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return totpCode(key, uint64(now.UTC().Unix()/30)), true
+	// Safely convert Unix timestamp counter to uint64
+	counter := now.UTC().Unix() / 30
+	if counter < 0 {
+		return "", false
+	}
+	return totpCode(key, uint64(counter)), true
 }
 
 func TOTPURI(issuer, account, secret string) string {

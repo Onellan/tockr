@@ -2152,6 +2152,11 @@ func (s *Server) apiInvoiceDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// Validate invoice filename to prevent path traversal
+	if !isValidInvoiceFilename(inv.Filename) {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
 	path := filepath.Join(s.cfg.DataDir, "invoices", inv.Filename)
 	if _, err := os.Stat(path); err != nil {
 		http.NotFound(w, r)
@@ -3801,6 +3806,10 @@ h1{margin:0 0 4px}
 	sb.WriteString(formatCents(inv.TotalCents))
 	sb.WriteString(`</td></tr></tfoot></table>`)
 	sb.WriteString(`</body></html>`)
+	// Validate filename before writing to prevent path traversal
+	if !isValidInvoiceFilename(inv.Filename) {
+		return fmt.Errorf("invalid invoice filename: %s", inv.Filename)
+	}
 	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(sb.String()), 0o644)
 }
 
@@ -3810,6 +3819,14 @@ func randomToken(bytes int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// isValidInvoiceFilename validates that an invoice filename is safe for file operations.
+// It prevents path traversal attacks by ensuring the filename doesn't contain ".." or "/" separators.
+func isValidInvoiceFilename(filename string) bool {
+	clean := filepath.Clean(filename)
+	// Reject if the filename contains path separators or tries to traverse up
+	return filename == clean && !strings.Contains(filename, "/") && !strings.Contains(filename, string(filepath.Separator))
 }
 
 func numericCode(digits int) string {

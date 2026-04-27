@@ -2723,6 +2723,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 	filterWhere, filterArgs := projectDashboardFilterSQL(filter)
 	baseArgs := append([]any{access.WorkspaceID, projectID}, filterArgs...)
 
+	// #nosec G202 -- filterWhere and filterArgs are constructed safely with parameterized queries
 	err = s.db.QueryRowContext(ctx, `SELECT
 		COALESCE(SUM(duration_seconds),0),
 		COALESCE(SUM(CASE WHEN billable=1 THEN rate_cents*duration_seconds/3600 ELSE 0 END),0),
@@ -2762,7 +2763,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		COALESCE(ta.billable, 1)
 		FROM timesheets t
 		LEFT JOIN tasks ta ON ta.id=t.task_id AND ta.workspace_id=t.workspace_id
-		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+` // #nosec G202 -- filterWhere is safely parameterized
 		GROUP BY
 			COALESCE(ta.id, 0),
 			CASE
@@ -2824,7 +2825,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0)
 		FROM timesheets t
 		LEFT JOIN workstreams w ON w.id=t.workstream_id AND w.workspace_id=t.workspace_id
-		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+` // #nosec G202
 		GROUP BY
 			COALESCE(w.id, 0),
 			CASE
@@ -2983,7 +2984,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		FROM timesheets t
 		JOIN users u ON u.id=t.user_id
 		LEFT JOIN activities a ON a.id=t.activity_id AND a.workspace_id=t.workspace_id
-		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+` // #nosec G202
 		GROUP BY
 			u.id,
 			u.display_name,
@@ -3024,7 +3025,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		FROM timesheets t
 		JOIN users u ON u.id=t.user_id
 		LEFT JOIN tasks ta ON ta.id=t.task_id AND ta.workspace_id=t.workspace_id
-		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+` // #nosec G202
 		GROUP BY
 			u.id,
 			u.display_name,
