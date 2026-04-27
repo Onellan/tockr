@@ -61,6 +61,14 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@latest
           "$(go env GOPATH)/bin/gosec" ./...
 
+       - name: Run go vet
+         run: go vet ./...
+
+       - name: Check go.mod is tidy
+         run: |
+           go mod tidy
+           git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum not tidy" && exit 1)
+
       - name: Run Govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -169,7 +177,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6
           push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
