@@ -73,6 +73,9 @@ const defaultProjectWorkstreamName = "Project management"
 
 func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	s := &Server{cfg: cfg, store: store, log: log, rateLimitBuckets: map[string]rateLimitBucket{}}
+	if err := s.bootstrapWorkspaceSMTPFromGlobal(context.Background()); err != nil {
+		s.log.Warn("workspace smtp bootstrap failed", "err", err)
+	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -200,6 +203,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/admin/workspaces", s.requirePermission(auth.PermManageOrg, s.saveWorkspace))
 		r.Get("/admin/workspaces/{id}", s.requirePermission(auth.PermManageOrg, s.workspaceAdminDetail))
 		r.Post("/admin/workspaces/{id}", s.requirePermission(auth.PermManageOrg, s.saveWorkspace))
+		r.Post("/admin/workspaces/{id}/smtp/test", s.requirePermission(auth.PermManageOrg, s.workspaceSMTPTest))
 		r.Post("/admin/workspaces/{id}/members", s.requirePermission(auth.PermManageOrg, s.workspaceMemberSave))
 		r.Post("/admin/workspaces/{id}/members/remove", s.requirePermission(auth.PermManageOrg, s.workspaceMemberRemove))
 		r.Get("/admin/users", s.requirePermission(auth.PermManageUsers, s.users))
@@ -338,7 +342,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Email OTP challenge: redirect to /login/otp if email 2FA is enabled and TOTP is not
-	sender := emailer.NewSender(s.cfg)
+	sender, err := s.senderForUser(r.Context(), user.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	if user.EmailOTPEnabled && !user.TOTPEnabled && sender.Configured() {
 		code := numericCode(6)
 		token, err := s.store.CreateLoginOTP(r.Context(), user.ID, code, 10*time.Minute)
@@ -392,11 +400,6 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	generic := "If that email exists, a reset link has been sent."
-	sender := emailer.NewSender(s.cfg)
-	if err := sender.Validate(); err != nil {
-		s.redirectWithFlash(w, r, "/forgot-password", "error", "Password reset email is not configured. Contact an administrator.")
-		return
-	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	user, err := s.store.FindUserByEmail(r.Context(), email)
 	if err != nil {
@@ -404,6 +407,15 @@ func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user != nil && user.Enabled {
+		sender, err := s.senderForUser(r.Context(), user.ID)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		if err := sender.Validate(); err != nil {
+			s.redirectWithFlash(w, r, "/forgot-password", "error", "Password reset email is not configured. Contact an administrator.")
+			return
+		}
 		token := randomToken(32)
 		if err := s.store.CreatePasswordResetToken(r.Context(), user.ID, token, 30*time.Minute); err != nil {
 			s.serverError(w, r, err)
@@ -491,7 +503,12 @@ func (s *Server) adminTwoFactor(w http.ResponseWriter, r *http.Request) {
 			qrDataURI = "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
 		}
 	}
-	emailConfigured := emailer.NewSender(s.cfg).Configured()
+	sender, err := s.senderForWorkspace(r.Context(), state.Access.WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	emailConfigured := sender.Configured()
 	s.render(w, r, templates.AdminTwoFactor(s.nav(r), *state.User, s.cfg.TOTPMode, emailConfigured, secret, uri, qrDataURI, nil, s.popFlash(w, r)))
 }
 
@@ -527,7 +544,11 @@ func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
 		s.redirectWithFlash(w, r, "/account", "error", "That email is already in use")
 		return
 	}
-	sender := emailer.NewSender(s.cfg)
+	sender, err := s.senderForWorkspace(r.Context(), state.Access.WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	if err := sender.Validate(); err != nil {
 		s.redirectWithFlash(w, r, "/account", "error", "Email sending is not configured")
 		return
@@ -573,11 +594,13 @@ func (s *Server) verifyEmailChange(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := s.store.EmailSettings(r.Context())
 	if settings.NotifyOldEmailOnChange && oldEmail != "" {
-		_ = emailer.NewSender(s.cfg).Send(emailer.Message{
-			To:      oldEmail,
-			Subject: "Your Tockr email address was changed",
-			Text:    fmt.Sprintf("Your Tockr account email address was changed to %s.\n\nIf this was not you, contact an administrator immediately.", newEmail),
-		})
+		if sender, err := s.senderForWorkspace(r.Context(), state.Access.WorkspaceID); err == nil {
+			_ = sender.Send(emailer.Message{
+				To:      oldEmail,
+				Subject: "Your Tockr email address was changed",
+				Text:    fmt.Sprintf("Your Tockr account email address was changed to %s.\n\nIf this was not you, contact an administrator immediately.", newEmail),
+			})
+		}
 	}
 	s.store.Audit(r.Context(), &state.User.ID, "verify", "account_email", &state.User.ID, oldEmail+" -> "+newEmail)
 	s.redirectWithFlash(w, r, "/account", "success", "Email address updated")
@@ -625,7 +648,8 @@ func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), &userID, "enable", "totp", &userID, "")
 	nav := s.nav(r)
 	if user != nil {
-		s.render(w, r, templates.AdminTwoFactor(nav, *user, s.cfg.TOTPMode, emailer.NewSender(s.cfg).Configured(), "", "", "", codes, templates.Notice{Kind: "success", Message: "Two-factor authentication enabled"}))
+		sender, _ := s.senderForWorkspace(r.Context(), s.access(r).WorkspaceID)
+		s.render(w, r, templates.AdminTwoFactor(nav, *user, s.cfg.TOTPMode, sender.Configured(), "", "", "", codes, templates.Notice{Kind: "success", Message: "Two-factor authentication enabled"}))
 		return
 	}
 	s.redirectWithFlash(w, r, "/admin/two-factor", "success", "Two-factor authentication enabled")
@@ -690,7 +714,12 @@ func (s *Server) loginOTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enableEmailOTP(w http.ResponseWriter, r *http.Request) {
-	if !emailer.NewSender(s.cfg).Configured() {
+	sender, err := s.senderForWorkspace(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if !sender.Configured() {
 		s.redirectWithFlash(w, r, "/admin/two-factor", "error", "Email is not configured on this deployment")
 		return
 	}
@@ -1840,6 +1869,11 @@ func (s *Server) workspaceAdminDetail(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	smtpSettings, err := s.store.WorkspaceSMTPSettings(r.Context(), workspace.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
 	members, err := s.store.ListWorkspaceMembers(r.Context(), workspace.ID)
 	if err != nil {
 		s.serverError(w, r, err)
@@ -1850,7 +1884,7 @@ func (s *Server) workspaceAdminDetail(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, templates.WorkspaceDetail(s.nav(r), *workspace, members, users))
+	s.render(w, r, templates.WorkspaceDetail(s.nav(r), *workspace, smtpSettings, members, users, s.popFlash(w, r)))
 }
 
 func (s *Server) saveWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -1870,11 +1904,56 @@ func (s *Server) saveWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			workspace.OrganizationID = existing.OrganizationID
+			workspace.SMTP = existing.SMTP
 		}
 	}
 	if err := s.store.UpsertWorkspace(r.Context(), workspace); err != nil {
 		s.badRequest(w, r, err)
 		return
+	}
+	if workspace.ID > 0 {
+		existingSMTP, err := s.store.WorkspaceSMTPSettings(r.Context(), workspace.ID)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		smtpPort := 587
+		if raw := strings.TrimSpace(r.FormValue("smtp_port")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed <= 0 {
+				s.badRequest(w, r, errors.New("SMTP port must be a positive number"))
+				return
+			}
+			smtpPort = parsed
+		}
+		smtpSettings := domain.WorkspaceSMTPSettings{
+			Host:      strings.TrimSpace(r.FormValue("smtp_host")),
+			Port:      smtpPort,
+			Username:  strings.TrimSpace(r.FormValue("smtp_username")),
+			Password:  r.FormValue("smtp_password"),
+			FromEmail: strings.TrimSpace(r.FormValue("smtp_from_email")),
+			FromName:  strings.TrimSpace(r.FormValue("smtp_from_name")),
+			TLS:       checkbox(r, "smtp_tls"),
+		}
+		if smtpSettings.Password == "" {
+			smtpSettings.PasswordEncrypted = existingSMTP.PasswordEncrypted
+		}
+		if smtpSettings.Host != "" || smtpSettings.Username != "" || smtpSettings.Password != "" || smtpSettings.FromEmail != "" || smtpSettings.FromName != "" {
+			if err := emailer.NewSender(emailer.SMTPConfig{Host: smtpSettings.Host, Port: smtpSettings.Port, Username: smtpSettings.Username, Password: smtpSettings.Password, FromEmail: smtpSettings.FromEmail, FromName: smtpSettings.FromName, TLS: smtpSettings.TLS}).Validate(); err != nil {
+				s.badRequest(w, r, err)
+				return
+			}
+		}
+		if smtpSettings.Host == "" && smtpSettings.FromEmail == "" {
+			smtpSettings.Username = ""
+			smtpSettings.Password = ""
+			smtpSettings.PasswordEncrypted = ""
+			smtpSettings.FromName = ""
+		}
+		if err := s.store.UpsertWorkspaceSMTPSettings(r.Context(), workspace.ID, smtpSettings); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
 	}
 	if workspace.ID > 0 && !workspace.Archived {
 		actor := s.state(r).User.ID
@@ -1883,6 +1962,33 @@ func (s *Server) saveWorkspace(w http.ResponseWriter, r *http.Request) {
 	actor := s.state(r).User.ID
 	s.store.Audit(r.Context(), &actor, "update", "workspace", &workspace.ID, workspace.Name)
 	http.Redirect(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), http.StatusSeeOther)
+}
+
+func (s *Server) workspaceSMTPTest(w http.ResponseWriter, r *http.Request) {
+	workspace, ok := s.organizationWorkspace(w, r)
+	if !ok {
+		return
+	}
+	_ = r.ParseForm()
+	to := strings.TrimSpace(r.FormValue("to"))
+	if _, err := mail.ParseAddress(to); err != nil {
+		s.redirectWithFlash(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), "error", "Enter a valid test recipient")
+		return
+	}
+	sender, err := s.senderForWorkspace(r.Context(), workspace.ID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := sender.Send(emailer.Message{
+		To:      to,
+		Subject: "Tockr SMTP test",
+		Text:    "This is a Tockr SMTP test email. If you received it, email sending is working.",
+	}); err != nil {
+		s.redirectWithFlash(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), "error", "SMTP test failed: "+err.Error())
+		return
+	}
+	s.redirectWithFlash(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), "success", "SMTP test email sent")
 }
 
 func (s *Server) workspaceMemberSave(w http.ResponseWriter, r *http.Request) {
@@ -2862,23 +2968,88 @@ func (s *Server) hasAnyAdminAccess(r *http.Request) bool {
 	return false
 }
 
-func (s *Server) smtpSettingsView() templates.SMTPSettingsView {
-	view := templates.SMTPSettingsView{
-		Host:               s.cfg.SMTPHost,
-		Port:               s.cfg.SMTPPort,
-		UsernameConfigured: s.cfg.SMTPUsername != "",
-		PasswordConfigured: s.cfg.SMTPPassword != "",
-		From:               s.cfg.SMTPFrom,
-		StartTLS:           s.cfg.SMTPStartTLS,
-		PublicURL:          s.cfg.PublicURL,
-		Configured:         emailer.NewSender(s.cfg).Configured(),
+func (s *Server) bootstrapWorkspaceSMTPFromGlobal(ctx context.Context) error {
+	legacy := s.legacyGlobalSMTPConfig()
+	if !emailer.NewSender(legacy).Configured() {
+		return nil
 	}
-	if err := emailer.NewSender(s.cfg).Validate(); err != nil {
-		view.Error = err.Error()
+	workspaceID, err := s.store.DefaultWorkspaceForOrganization(ctx, 1)
+	if err != nil || workspaceID == 0 {
+		return err
+	}
+	existing, err := s.store.WorkspaceSMTPSettings(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if existing.Host != "" && existing.FromEmail != "" {
+		return nil
+	}
+	seed := domain.WorkspaceSMTPSettings{
+		Host:      legacy.Host,
+		Port:      legacy.Port,
+		Username:  legacy.Username,
+		Password:  legacy.Password,
+		FromEmail: legacy.FromEmail,
+		FromName:  legacy.FromName,
+		TLS:       legacy.TLS,
+	}
+	return s.store.UpsertWorkspaceSMTPSettings(ctx, workspaceID, seed)
+}
+
+func (s *Server) legacyGlobalSMTPConfig() emailer.SMTPConfig {
+	fromEmail := ""
+	fromName := ""
+	if parsed, err := mail.ParseAddress(strings.TrimSpace(s.cfg.SMTPFrom)); err == nil {
+		fromEmail = parsed.Address
+		fromName = parsed.Name
 	} else {
-		view.Valid = true
+		fromEmail = strings.TrimSpace(s.cfg.SMTPFrom)
 	}
-	return view
+	return emailer.SMTPConfig{
+		Host:      strings.TrimSpace(s.cfg.SMTPHost),
+		Port:      s.cfg.SMTPPort,
+		Username:  strings.TrimSpace(s.cfg.SMTPUsername),
+		Password:  s.cfg.SMTPPassword,
+		FromEmail: strings.TrimSpace(fromEmail),
+		FromName:  strings.TrimSpace(fromName),
+		TLS:       s.cfg.SMTPStartTLS,
+	}
+}
+
+func (s *Server) smtpConfigForWorkspace(ctx context.Context, workspaceID int64) (emailer.SMTPConfig, error) {
+	settings, err := s.store.WorkspaceSMTPSettings(ctx, workspaceID)
+	if err != nil {
+		return emailer.SMTPConfig{}, err
+	}
+	cfg := emailer.SMTPConfig{
+		Host:      strings.TrimSpace(settings.Host),
+		Port:      settings.Port,
+		Username:  strings.TrimSpace(settings.Username),
+		Password:  settings.Password,
+		FromEmail: strings.TrimSpace(settings.FromEmail),
+		FromName:  strings.TrimSpace(settings.FromName),
+		TLS:       settings.TLS,
+	}
+	if emailer.NewSender(cfg).Configured() {
+		return cfg, nil
+	}
+	if s.cfg.SMTPGlobalFallback {
+		return s.legacyGlobalSMTPConfig(), nil
+	}
+	return cfg, nil
+}
+
+func (s *Server) senderForWorkspace(ctx context.Context, workspaceID int64) (emailer.Sender, error) {
+	cfg, err := s.smtpConfigForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return emailer.Sender{}, err
+	}
+	return emailer.NewSender(cfg), nil
+}
+
+func (s *Server) senderForUser(ctx context.Context, userID int64) (emailer.Sender, error) {
+	workspaceID := s.store.DefaultWorkspaceForUser(ctx, userID)
+	return s.senderForWorkspace(ctx, workspaceID)
 }
 
 func (s *Server) absoluteURL(r *http.Request, path string) string {
@@ -3127,7 +3298,7 @@ func (s *Server) saveWorkScheduleSettings(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) emailSettings(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, templates.EmailSettings(s.nav(r), s.smtpSettingsView(), s.store.EmailSettings(r.Context()), s.popFlash(w, r)))
+	s.render(w, r, templates.EmailSettings(s.nav(r), s.store.EmailSettings(r.Context()), s.popFlash(w, r)))
 }
 
 func (s *Server) saveEmailSettings(w http.ResponseWriter, r *http.Request) {
@@ -3149,7 +3320,12 @@ func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 		s.redirectWithFlash(w, r, "/admin/email", "error", "Enter a valid test recipient")
 		return
 	}
-	if err := emailer.NewSender(s.cfg).Send(emailer.Message{
+	sender, err := s.senderForWorkspace(r.Context(), s.access(r).WorkspaceID)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if err := sender.Send(emailer.Message{
 		To:      to,
 		Subject: "Tockr SMTP test",
 		Text:    "This is a Tockr SMTP test email. If you received it, email sending is working.",

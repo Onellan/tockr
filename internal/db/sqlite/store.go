@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -163,6 +166,13 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{"tasks", "archived", "INTEGER NOT NULL DEFAULT 0"},
 		{"saved_reports", "share_token", "TEXT"},
 		{"saved_reports", "share_expires_at", "TEXT"},
+		{"workspaces", "smtp_host", "TEXT NOT NULL DEFAULT ''"},
+		{"workspaces", "smtp_port", "INTEGER NOT NULL DEFAULT 587"},
+		{"workspaces", "smtp_username", "TEXT NOT NULL DEFAULT ''"},
+		{"workspaces", "smtp_password_enc", "TEXT NOT NULL DEFAULT ''"},
+		{"workspaces", "smtp_from_email", "TEXT NOT NULL DEFAULT ''"},
+		{"workspaces", "smtp_from_name", "TEXT NOT NULL DEFAULT ''"},
+		{"workspaces", "smtp_tls", "INTEGER NOT NULL DEFAULT 1"},
 	}
 	for _, a := range alterations {
 		if err := s.ensureColumn(ctx, a.table, a.column, a.def); err != nil {
@@ -693,6 +703,48 @@ func (s *Store) UpsertEmailSettings(ctx context.Context, settings domain.EmailSe
 	return err
 }
 
+func (s *Store) WorkspaceSMTPSettings(ctx context.Context, workspaceID int64) (domain.WorkspaceSMTPSettings, error) {
+	settings := domain.WorkspaceSMTPSettings{Port: 587, TLS: true}
+	var encryptedPassword string
+	var tlsEnabled int
+	err := s.db.QueryRowContext(ctx, `SELECT smtp_host, smtp_port, smtp_username, smtp_password_enc, smtp_from_email, smtp_from_name, smtp_tls FROM workspaces WHERE id=?`, workspaceID).
+		Scan(&settings.Host, &settings.Port, &settings.Username, &encryptedPassword, &settings.FromEmail, &settings.FromName, &tlsEnabled)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return settings, nil
+		}
+		return settings, err
+	}
+	settings.PasswordEncrypted = encryptedPassword
+	settings.TLS = tlsEnabled != 0
+	settings.PasswordSet = strings.TrimSpace(encryptedPassword) != ""
+	if settings.PasswordSet {
+		decrypted, err := s.decryptWorkspaceSecret(ctx, encryptedPassword)
+		if err != nil {
+			return settings, err
+		}
+		settings.Password = decrypted
+	}
+	return settings, nil
+}
+
+func (s *Store) UpsertWorkspaceSMTPSettings(ctx context.Context, workspaceID int64, settings domain.WorkspaceSMTPSettings) error {
+	stored := strings.TrimSpace(settings.PasswordEncrypted)
+	if strings.TrimSpace(settings.Password) != "" {
+		encrypted, err := s.encryptWorkspaceSecret(ctx, settings.Password)
+		if err != nil {
+			return err
+		}
+		stored = encrypted
+	}
+	if stored == "" {
+		_ = s.db.QueryRowContext(ctx, `SELECT smtp_password_enc FROM workspaces WHERE id=?`, workspaceID).Scan(&stored)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE workspaces SET smtp_host=?, smtp_port=?, smtp_username=?, smtp_password_enc=?, smtp_from_email=?, smtp_from_name=?, smtp_tls=? WHERE id=?`,
+		strings.TrimSpace(settings.Host), settings.Port, strings.TrimSpace(settings.Username), stored, strings.TrimSpace(settings.FromEmail), strings.TrimSpace(settings.FromName), boolInt(settings.TLS), workspaceID)
+	return err
+}
+
 func (s *Store) EnableTOTP(ctx context.Context, userID int64, secret string, recoveryCodes []string) error {
 	hashes := []string{}
 	for _, code := range recoveryCodes {
@@ -874,7 +926,8 @@ func (s *Store) ListOrganizationWorkspaces(ctx context.Context, organizationID i
 	where, args := scopedSearchWhere("organization_id", organizationID, "name", term)
 	rows, err := s.db.QueryContext(ctx, `SELECT w.id, w.organization_id, w.name, w.slug, w.description, w.default_currency, w.timezone, w.archived, w.created_at,
 		(SELECT COUNT(*) FROM workspace_members wm WHERE wm.workspace_id=w.id),
-		(SELECT COUNT(*) FROM projects p WHERE p.workspace_id=w.id)
+		(SELECT COUNT(*) FROM projects p WHERE p.workspace_id=w.id),
+		(CASE WHEN COALESCE(w.smtp_host,'')!='' AND COALESCE(w.smtp_from_email,'')!='' THEN 1 ELSE 0 END)
 		FROM workspaces w `+where+` ORDER BY w.name`, args...)
 	if err != nil {
 		return nil, err
@@ -884,9 +937,11 @@ func (s *Store) ListOrganizationWorkspaces(ctx context.Context, organizationID i
 	for rows.Next() {
 		var summary domain.WorkspaceSummary
 		var created string
-		if err := rows.Scan(&summary.ID, &summary.OrganizationID, &summary.Name, &summary.Slug, &summary.Description, &summary.DefaultCurrency, &summary.Timezone, &summary.Archived, &created, &summary.MemberCount, &summary.ProjectCount); err != nil {
+		var smtpConfigured int
+		if err := rows.Scan(&summary.ID, &summary.OrganizationID, &summary.Name, &summary.Slug, &summary.Description, &summary.DefaultCurrency, &summary.Timezone, &summary.Archived, &created, &summary.MemberCount, &summary.ProjectCount, &smtpConfigured); err != nil {
 			return nil, err
 		}
+		summary.SMTPConfigured = smtpConfigured == 1
 		summary.CreatedAt = parseTime(created)
 		workspaces = append(workspaces, summary)
 	}
@@ -993,6 +1048,10 @@ func (s *Store) defaultWorkspaceForUser(ctx context.Context, userID int64) int64
 		}
 	}
 	return 1
+}
+
+func (s *Store) DefaultWorkspaceForUser(ctx context.Context, userID int64) int64 {
+	return s.defaultWorkspaceForUser(ctx, userID)
 }
 
 func (s *Store) ListGroups(ctx context.Context, workspaceID int64) ([]domain.Group, error) {
@@ -3555,6 +3614,86 @@ func tokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *Store) encryptWorkspaceSecret(ctx context.Context, value string) (string, error) {
+	key, err := s.workspaceSecretKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nil, nonce, []byte(value), nil)
+	payload := append(nonce, sealed...)
+	return base64.RawStdEncoding.EncodeToString(payload), nil
+}
+
+func (s *Store) decryptWorkspaceSecret(ctx context.Context, value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	key, err := s.workspaceSecretKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(value)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("encrypted workspace secret is invalid")
+	}
+	nonce := raw[:gcm.NonceSize()]
+	cipherText := raw[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, cipherText, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func (s *Store) workspaceSecretKey(ctx context.Context) ([]byte, error) {
+	var encoded string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='workspace_secret_key'`).Scan(&encoded)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if strings.TrimSpace(encoded) == "" {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		encoded = base64.RawStdEncoding.EncodeToString(key)
+		if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('workspace_secret_key',?)`, encoded); err != nil {
+			return nil, err
+		}
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) != 32 {
+		return nil, errors.New("workspace secret key has invalid length")
+	}
+	return decoded, nil
+}
+
 func rollback(tx *sql.Tx) {
 	_ = tx.Rollback()
 }
@@ -4142,7 +4281,7 @@ CREATE TABLE IF NOT EXISTS roles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT
 INSERT OR IGNORE INTO roles(name) VALUES('user'),('teamlead'),('admin'),('superadmin');
 CREATE TABLE IF NOT EXISTS role_permissions(role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, permission TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(role_id, permission));
 CREATE TABLE IF NOT EXISTS organizations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS workspaces(id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', default_currency TEXT NOT NULL DEFAULT 'USD', timezone TEXT NOT NULL DEFAULT 'UTC', archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(organization_id, slug));
+CREATE TABLE IF NOT EXISTS workspaces(id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', default_currency TEXT NOT NULL DEFAULT 'USD', timezone TEXT NOT NULL DEFAULT 'UTC', smtp_host TEXT NOT NULL DEFAULT '', smtp_port INTEGER NOT NULL DEFAULT 587, smtp_username TEXT NOT NULL DEFAULT '', smtp_password_enc TEXT NOT NULL DEFAULT '', smtp_from_email TEXT NOT NULL DEFAULT '', smtp_from_name TEXT NOT NULL DEFAULT '', smtp_tls INTEGER NOT NULL DEFAULT 1, archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(organization_id, slug));
 CREATE TABLE IF NOT EXISTS users(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	organization_id INTEGER NOT NULL DEFAULT 1 REFERENCES organizations(id) ON DELETE RESTRICT,

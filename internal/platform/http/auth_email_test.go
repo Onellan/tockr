@@ -29,8 +29,8 @@ func TestEmailSettingsPageAndTestDelivery(t *testing.T) {
 	defer store.Close()
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 
-	body := getWithCookie(app, "/admin/email", cookie).Body.String()
-	for _, expected := range []string{"Email", "TOCKR_SMTP_HOST", smtp.host, "TOCKR_SMTP_FROM", "Ready", "TOCKR_PUBLIC_URL"} {
+	body := getWithCookie(app, "/admin/workspaces/1", cookie).Body.String()
+	for _, expected := range []string{"Workspace admin", "SMTP host", smtp.host, "smtp_from_email", "noreply@example.com"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("email settings page missing %q", expected)
 		}
@@ -43,7 +43,7 @@ func TestEmailSettingsPageAndTestDelivery(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("save email settings returned %d", rec.Code)
 	}
-	rec = postFormWithCookie(app, "/admin/email/test", cookie, url.Values{
+	rec = postFormWithCookie(app, "/admin/workspaces/1/smtp/test", cookie, url.Values{
 		"csrf": {csrf},
 		"to":   {"tester@example.com"},
 	})
@@ -217,12 +217,73 @@ func TestAuthEmailPagesRenderAndMisconfiguredSMTPIsClear(t *testing.T) {
 	}
 	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
 	body := getWithCookie(app, "/admin/email", cookie).Body.String()
-	if !strings.Contains(body, "Needs configuration") || !strings.Contains(body, "TOCKR_SMTP_HOST") {
-		t.Fatal("admin email settings should make env-backed SMTP status clear")
+	if !strings.Contains(body, "Workspace SMTP") || !strings.Contains(body, "/admin/workspaces") {
+		t.Fatal("admin email settings should point to workspace smtp configuration")
 	}
 	body = getWithCookie(app, "/account/email/verify", cookie).Body.String()
 	if !strings.Contains(body, "No pending email change") {
 		t.Fatal("verify page should render without a pending change")
+	}
+}
+
+func TestWorkspaceSMTPSettingsIsolationAndNoPasswordLeakage(t *testing.T) {
+	smtpOne := startTestSMTP(t)
+	smtpTwo := startTestSMTP(t)
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO workspaces(organization_id, name, slug, default_currency, timezone, created_at) VALUES(1,'Alt Workspace','alt-workspace','USD','UTC',?)`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	var ws2 int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT id FROM workspaces WHERE slug='alt-workspace'`).Scan(&ws2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(1,1,'admin',?), (?,?, 'admin', ?)`, time.Now().UTC().Format(time.RFC3339), ws2, 1, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.UpsertWorkspaceSMTPSettings(ctx, 1, domain.WorkspaceSMTPSettings{Host: smtpOne.host, Port: smtpOne.port, FromEmail: "noreply-ws1@example.com", TLS: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkspaceSMTPSettings(ctx, ws2, domain.WorkspaceSMTPSettings{Host: smtpTwo.host, Port: smtpTwo.port, FromEmail: "noreply-ws2@example.com", TLS: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/account", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+	if rec := postFormWithCookie(app, "/workspace", cookie, url.Values{"csrf": {csrf}, "workspace_id": {strconv.FormatInt(ws2, 10)}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("workspace switch returned %d", rec.Code)
+	}
+
+	accountBody := getWithCookie(app, "/account", cookie).Body.String()
+	csrf = csrfFromBody(t, accountBody)
+	if rec := postFormWithCookie(app, "/account/email", cookie, url.Values{"csrf": {csrf}, "new_email": {"ws2-email@example.com"}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("email change request returned %d", rec.Code)
+	}
+
+	msg := smtpTwo.next(t)
+	if !strings.Contains(msg, "Verify your Tockr email address") {
+		t.Fatalf("workspace 2 smtp did not receive email: %s", msg)
+	}
+	select {
+	case leaked := <-smtpOne.messages:
+		t.Fatalf("workspace 1 smtp should not receive workspace 2 email: %s", leaked)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := store.UpsertWorkspaceSMTPSettings(ctx, ws2, domain.WorkspaceSMTPSettings{Host: smtpTwo.host, Port: smtpTwo.port, FromEmail: "noreply-ws2@example.com", Password: "super-secret", TLS: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceBody := getWithCookie(app, "/admin/workspaces/"+strconv.FormatInt(ws2, 10), cookie).Body.String()
+	if strings.Contains(workspaceBody, "super-secret") {
+		t.Fatal("workspace smtp password leaked in UI")
+	}
+	if !strings.Contains(workspaceBody, "Leave blank to keep existing") {
+		t.Fatal("workspace smtp password masking hint missing")
 	}
 }
 

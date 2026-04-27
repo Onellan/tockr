@@ -1148,28 +1148,42 @@ func WorkspaceAdmin(user *NavUser, workspaces []domain.WorkspaceSummary) templ.C
 			if workspace.Archived {
 				status = "Archived"
 			}
-			rows = append(rows, []string{workspace.Name, workspace.Slug, status, fmt.Sprint(workspace.MemberCount), fmt.Sprint(workspace.ProjectCount), fmt.Sprintf(`<a class="table-action" href="/admin/workspaces/%d">Manage</a>`, workspace.ID)})
+			smtpBadge := `<span class="badge badge-warn">SMTP not configured</span>`
+			if workspace.SMTPConfigured {
+				smtpBadge = `<span class="badge badge-ok">SMTP configured</span>`
+			}
+			rows = append(rows, []string{workspace.Name, workspace.Slug, status, fmt.Sprint(workspace.MemberCount), fmt.Sprint(workspace.ProjectCount), smtpBadge, fmt.Sprintf(`<a class="table-action" href="/admin/workspaces/%d">Manage</a>`, workspace.ID)})
 		}
-		dataTableRaw(w, []string{"Name", "Slug", "Status", "Members", "Projects", "Action"}, rows)
+		dataTableRaw(w, []string{"Name", "Slug", "Status", "Members", "Projects", "SMTP", "Action"}, rows)
 		return nil
 	}))
 }
 
-func WorkspaceDetail(user *NavUser, workspace domain.Workspace, members []domain.WorkspaceMember, users []domain.User) templ.Component {
+func WorkspaceDetail(user *NavUser, workspace domain.Workspace, smtp domain.WorkspaceSMTPSettings, members []domain.WorkspaceMember, users []domain.User, notice Notice) templ.Component {
 	return Layout("Workspace admin", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, workspace.Name, "Workspace admin", "Manage workspace settings, member roles, and reporting access cleanly.")
+		renderNotice(w, notice)
 		checked := ""
 		if workspace.Archived {
 			checked = " checked"
 		}
+		smtpTLSChecked := ""
+		if smtp.TLS {
+			smtpTLSChecked = " checked"
+		}
+		hasSMTPPassword := ""
+		if smtp.PasswordSet {
+			hasSMTPPassword = " configured"
+		}
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Settings</h2><p>Changes apply only inside this organization.</p></div></div><form method="post" action="/admin/workspaces/%d" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Slug <span class="field-hint">URL-safe ID</span><input name="slug" value="%s" required></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="%s" placeholder="ZAR" maxlength="3"></label>`, workspace.ID, esc(user.CSRF), esc(workspace.Name), esc(workspace.Slug), esc(workspace.DefaultCurrency))
 		renderTimezoneSelect(w, "Timezone", "timezone", workspace.Timezone, true)
-		_, _ = fmt.Fprintf(w, `<label class="wide">Description<textarea name="description">%s</textarea></label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, esc(workspace.Description), checked)
+		_, _ = fmt.Fprintf(w, `<label class="wide">Description<textarea name="description">%s</textarea></label><label>SMTP host<input name="smtp_host" value="%s" placeholder="smtp.example.com"></label><label>SMTP port<input name="smtp_port" type="number" min="1" value="%d"></label><label>SMTP username<input name="smtp_username" value="%s" autocomplete="username"></label><label>SMTP password <span class="field-hint%s">Leave blank to keep existing</span><input name="smtp_password" type="password" autocomplete="new-password"></label><label>From email<input name="smtp_from_email" type="email" value="%s" placeholder="noreply@example.com"></label><label>From name<input name="smtp_from_name" value="%s" placeholder="Tockr"></label><label class="check"><input type="checkbox" name="smtp_tls"%s> Require STARTTLS</label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, esc(workspace.Description), esc(smtp.Host), smtp.Port, esc(smtp.Username), hasSMTPPassword, esc(smtp.FromEmail), esc(smtp.FromName), smtpTLSChecked, checked)
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Add or update member</h2><p>Member: track time · Analyst: track time + view reports · Admin: full workspace management</p></div></div><form method="post" action="/admin/workspaces/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>User<select name="user_id">`, workspace.ID, esc(user.CSRF))
 		for _, user := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, user.ID, esc(userLabel(user)))
 		}
 		_, _ = fmt.Fprint(w, `</select></label><label>Role<select name="role"><option value="member">Member</option><option value="analyst">Analyst</option><option value="admin">Admin</option></select></label><div class="form-actions"><button class="primary">Save member</button></div></form></div></section>`)
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel section-spacer"><div class="panel-head"><div><h2>SMTP test delivery</h2><p>Send a test email with this workspace configuration.</p></div></div><form method="post" action="/admin/workspaces/%d/smtp/test" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Recipient<input name="to" type="email" required></label><div class="form-actions"><button class="primary">Send test email</button></div></form></section>`, workspace.ID, esc(user.CSRF))
 		rows := [][]string{}
 		for _, member := range members {
 			status := "Active"
@@ -1655,7 +1669,7 @@ func adminDescription(path string) string {
 	case "/admin/workspaces":
 		return "Create workspaces, update workspace settings, and manage workspace membership."
 	case "/admin/email":
-		return "Review SMTP configuration, send test email, and set account email-change policy."
+		return "Set account email-change policy and navigate to workspace-level SMTP settings."
 	case "/admin/demo-data":
 		return "Show or hide the reusable demo dataset in the default workspace for product walkthroughs."
 	case "/admin/schedule":
@@ -2422,38 +2436,17 @@ func WorkScheduleSettings(user *NavUser, schedule domain.WorkSchedule) templ.Com
 	}))
 }
 
-func EmailSettings(user *NavUser, smtp SMTPSettingsView, settings domain.EmailSettings, notice Notice) templ.Component {
+func EmailSettings(user *NavUser, settings domain.EmailSettings, notice Notice) templ.Component {
 	return Layout("Email Settings", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
-		pageHeader(w, "Email", "Administration", "Review SMTP delivery configuration and account email policy.")
+		pageHeader(w, "Email", "Administration", "Review account email policy. Workspace SMTP is configured per workspace.")
 		renderNotice(w, notice)
-		status := `<span class="badge success">Ready</span>`
-		if !smtp.Valid {
-			status = `<span class="badge warning">Needs configuration</span>`
-		}
-		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>SMTP transport</h2><p>Provider credentials are environment-backed and are not editable in the browser.</p></div>%s</div><div class="summary-list">`, status)
-		rows := [][2]string{
-			{"TOCKR_SMTP_HOST", smtp.Host},
-			{"TOCKR_SMTP_PORT", fmt.Sprint(smtp.Port)},
-			{"TOCKR_SMTP_FROM", smtp.From},
-			{"TOCKR_SMTP_USERNAME", configuredText(smtp.UsernameConfigured)},
-			{"TOCKR_SMTP_PASSWORD", configuredText(smtp.PasswordConfigured)},
-			{"TOCKR_SMTP_STARTTLS", fmt.Sprint(smtp.StartTLS)},
-			{"TOCKR_PUBLIC_URL", defaultVal(smtp.PublicURL, "derived from request")},
-		}
-		for _, row := range rows {
-			_, _ = fmt.Fprintf(w, `<div><span>%s</span><strong>%s</strong></div>`, esc(row[0]), esc(row[1]))
-		}
-		if smtp.Error != "" {
-			_, _ = fmt.Fprintf(w, `<div><span>Configuration check</span><strong>%s</strong></div>`, esc(smtp.Error))
-		}
-		_, _ = fmt.Fprint(w, `</div></div>`)
+		_, _ = fmt.Fprint(w, `<section class="two-col">`)
 		checked := ""
 		if settings.NotifyOldEmailOnChange {
 			checked = " checked"
 		}
-		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Email policy</h2><p>These app settings are stored in Tockr.</p></div></div><form method="post" action="/admin/email" class="form-grid"><input type="hidden" name="csrf" value="%s"><label class="check"><input type="checkbox" name="notify_old_email"%s> Notify old address after an email change</label><div class="form-actions"><button class="primary">Save email settings</button></div></form></div>`, esc(user.CSRF), checked)
-		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Test delivery</h2><p>Sends through the configured SMTP server.</p></div></div><form method="post" action="/admin/email/test" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Recipient<input name="to" type="email" required></label><div class="form-actions"><button class="primary">Send test email</button></div></form></div>`, esc(user.CSRF))
-		_, _ = fmt.Fprint(w, `<div class="panel"><div class="panel-head"><div><h2>Local testing</h2><p>Use the compose mail catcher for development: SMTP on port 1025 and inbox at http://localhost:8025.</p></div></div></div></section>`)
+		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Email policy</h2><p>These app settings are stored in Tockr and apply across workspaces.</p></div></div><form method="post" action="/admin/email" class="form-grid"><input type="hidden" name="csrf" value="%s"><label class="check"><input type="checkbox" name="notify_old_email"%s> Notify old address after an email change</label><div class="form-actions"><button class="primary">Save email settings</button></div></form></div>`, esc(user.CSRF), checked)
+		_, _ = fmt.Fprintf(w, `<div class="panel"><div class="panel-head"><div><h2>Workspace SMTP</h2><p>SMTP is now configured per workspace. Open the workspace detail page to edit transport credentials and send test email.</p></div></div><div class="form-actions"><a class="ghost-button" href="/admin/workspaces">Open workspaces</a></div></div></section>`)
 		return nil
 	}))
 }

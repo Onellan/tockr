@@ -48,8 +48,21 @@ type Workspace struct {
 	Description     string
 	DefaultCurrency string
 	Timezone        string
+	SMTP            WorkspaceSMTPSettings
 	Archived        bool
 	CreatedAt       time.Time
+}
+
+type WorkspaceSMTPSettings struct {
+	Host              string
+	Port              int
+	Username          string
+	Password          string
+	PasswordEncrypted string
+	PasswordSet       bool
+	FromEmail         string
+	FromName          string
+	TLS               bool
 }
 
 type WorkspaceMember struct {
@@ -67,8 +80,9 @@ type WorkspaceMember struct {
 
 type WorkspaceSummary struct {
 	Workspace
-	MemberCount  int64
-	ProjectCount int64
+	MemberCount    int64
+	ProjectCount   int64
+	SMTPConfigured bool
 }
 
 type Group struct {

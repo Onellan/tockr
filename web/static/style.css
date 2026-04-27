@@ -1297,7 +1297,8 @@ tr:last-child td {
   font-weight: 750;
 }
 
-.badge.success {
+.badge.success,
+.badge-ok {
   color: var(--success);
   background: var(--success-soft);
 }
@@ -1307,7 +1308,8 @@ tr:last-child td {
   background: var(--surface-3);
 }
 
-.badge.warning {
+.badge.warning,
+.badge-warn {
   color: var(--warning);
   background: var(--warning-soft);
 }

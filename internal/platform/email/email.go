@@ -10,8 +10,6 @@ import (
 	"net/mail"
 	"net/smtp"
 	"strings"
-
-	"tockr/internal/platform/config"
 )
 
 type Message struct {
@@ -20,30 +18,55 @@ type Message struct {
 	Text    string
 }
 
-type Sender struct {
-	cfg config.Config
+type SMTPConfig struct {
+	Host      string
+	Port      int
+	Username  string
+	Password  string
+	FromEmail string
+	FromName  string
+	TLS       bool
 }
 
-func NewSender(cfg config.Config) Sender {
+func (c SMTPConfig) FromAddress() string {
+	email := strings.TrimSpace(c.FromEmail)
+	name := strings.TrimSpace(c.FromName)
+	if email == "" {
+		return ""
+	}
+	if name == "" {
+		return email
+	}
+	return (&mail.Address{Name: name, Address: email}).String()
+}
+
+type Sender struct {
+	cfg SMTPConfig
+}
+
+func NewSender(cfg SMTPConfig) Sender {
 	return Sender{cfg: cfg}
 }
 
 func (s Sender) Configured() bool {
-	return strings.TrimSpace(s.cfg.SMTPHost) != "" && strings.TrimSpace(s.cfg.SMTPFrom) != ""
+	return strings.TrimSpace(s.cfg.Host) != "" && strings.TrimSpace(s.cfg.FromEmail) != ""
 }
 
 func (s Sender) Validate() error {
-	if strings.TrimSpace(s.cfg.SMTPHost) == "" {
-		return errors.New("TOCKR_SMTP_HOST is required")
+	if strings.TrimSpace(s.cfg.Host) == "" {
+		return errors.New("SMTP host is required")
 	}
-	if s.cfg.SMTPPort <= 0 {
-		return errors.New("TOCKR_SMTP_PORT must be positive")
+	if strings.ContainsAny(s.cfg.Host, " \t\n\r") {
+		return errors.New("SMTP host must not contain whitespace")
 	}
-	if _, err := mail.ParseAddress(s.cfg.SMTPFrom); err != nil {
-		return errors.New("TOCKR_SMTP_FROM must be a valid email address")
+	if s.cfg.Port <= 0 {
+		return errors.New("SMTP port must be positive")
 	}
-	if (s.cfg.SMTPUsername == "") != (s.cfg.SMTPPassword == "") {
-		return errors.New("TOCKR_SMTP_USERNAME and TOCKR_SMTP_PASSWORD must be set together")
+	if _, err := mail.ParseAddress(s.cfg.FromAddress()); err != nil {
+		return errors.New("SMTP from address must be valid")
+	}
+	if (s.cfg.Username == "") != (s.cfg.Password == "") {
+		return errors.New("SMTP username and password must be set together")
 	}
 	return nil
 }
@@ -56,26 +79,26 @@ func (s Sender) Send(message Message) error {
 	if err != nil {
 		return fmt.Errorf("recipient email is invalid: %w", err)
 	}
-	from, err := mail.ParseAddress(s.cfg.SMTPFrom)
+	from, err := mail.ParseAddress(s.cfg.FromAddress())
 	if err != nil {
 		return err
 	}
-	addr := net.JoinHostPort(s.cfg.SMTPHost, fmt.Sprint(s.cfg.SMTPPort))
+	addr := net.JoinHostPort(s.cfg.Host, fmt.Sprint(s.cfg.Port))
 	c, err := smtp.Dial(addr)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	if s.cfg.SMTPStartTLS {
+	if s.cfg.TLS {
 		if ok, _ := c.Extension("STARTTLS"); !ok {
 			return errors.New("SMTP server does not support STARTTLS")
 		}
-		if err := c.StartTLS(&tls.Config{ServerName: s.cfg.SMTPHost, MinVersion: tls.VersionTLS12}); err != nil {
+		if err := c.StartTLS(&tls.Config{ServerName: s.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
 			return err
 		}
 	}
-	if s.cfg.SMTPUsername != "" {
-		auth := smtp.PlainAuth("", s.cfg.SMTPUsername, s.cfg.SMTPPassword, s.cfg.SMTPHost)
+	if s.cfg.Username != "" {
+		auth := smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
 		if err := c.Auth(auth); err != nil {
 			return err
 		}
