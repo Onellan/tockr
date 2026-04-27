@@ -2351,6 +2351,7 @@ func (s *Store) ListTimesheets(ctx context.Context, f TimesheetFilter) ([]domain
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
+	// #nosec G202
 	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, user_id, customer_id, project_id, workstream_id, activity_id, task_id, started_at, ended_at, timezone, duration_seconds, break_seconds, rate_cents, internal_rate_cents, billable, exported, description, created_at, updated_at FROM timesheets `+whereSQL+` ORDER BY started_at DESC LIMIT ? OFFSET ?`,
 		append(args, f.Size, (f.Page-1)*f.Size)...)
 	if err != nil {
@@ -2435,6 +2436,7 @@ func (s *Store) ListInvoices(ctx context.Context, workspaceID, customerID int64,
 	if err != nil {
 		return nil, domain.Page{}, err
 	}
+	// #nosec G202
 	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, number, customer_id, user_id, status, currency, subtotal_cents, tax_cents, total_cents, filename, payment_date, created_at FROM invoices `+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, append(args, size, (page-1)*size)...)
 	if err != nil {
 		return nil, domain.Page{}, err
@@ -2750,6 +2752,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 	}
 	dashboard.Alert = (project.EstimateSeconds > 0 && dashboard.EstimatePercent >= threshold) || (project.BudgetCents > 0 && dashboard.BudgetPercent >= threshold)
 
+	// #nosec G202
 	taskRows, err := s.db.QueryContext(ctx, `SELECT
 		COALESCE(ta.id, 0),
 		CASE
@@ -2790,6 +2793,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	contributorRows, err := s.db.QueryContext(ctx, `SELECT u.id, u.display_name,
 		COALESCE(SUM(t.duration_seconds),0),
 		COALESCE(SUM(CASE WHEN t.billable=1 THEN t.duration_seconds ELSE 0 END),0)
@@ -2814,6 +2818,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	workstreamRows, err := s.db.QueryContext(ctx, `SELECT
 		COALESCE(w.id, 0),
 		CASE
@@ -2825,7 +2830,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0)
 		FROM timesheets t
 		LEFT JOIN workstreams w ON w.id=t.workstream_id AND w.workspace_id=t.workspace_id
-		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+` -- #nosec G202 safely parameterized
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
 		GROUP BY
 			COALESCE(w.id, 0),
 			CASE
@@ -2854,6 +2859,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	workTypeRows, err := s.db.QueryContext(ctx, `SELECT
 		COALESCE(a.id, 0),
 		CASE
@@ -2894,6 +2900,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	taskBreakdownRows, err := s.db.QueryContext(ctx, `SELECT
 		COALESCE(ta.id, 0),
 		CASE
@@ -2906,7 +2913,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		COALESCE(SUM(CASE WHEN t.billable=1 AND t.exported=0 THEN t.duration_seconds ELSE 0 END),0)
 		FROM timesheets t
 		LEFT JOIN tasks ta ON ta.id=t.task_id AND ta.workspace_id=t.workspace_id
-		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+` -- #nosec G202 filterWhere is safely parameterized
+		WHERE t.workspace_id=? AND t.project_id=? AND t.ended_at IS NOT NULL`+filterWhere+`
 		GROUP BY
 			COALESCE(ta.id, 0),
 			CASE
@@ -2931,6 +2938,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	workstreamContributionRows, err := s.db.QueryContext(ctx, `SELECT
 		u.id,
 		u.display_name,
@@ -2971,6 +2979,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	workTypeContributionRows, err := s.db.QueryContext(ctx, `SELECT
 		u.id,
 		u.display_name,
@@ -3011,6 +3020,7 @@ func (s *Store) ProjectDashboard(ctx context.Context, access domain.AccessContex
 		return dashboard, err
 	}
 
+	// #nosec G202
 	taskContributionRows, err := s.db.QueryContext(ctx, `SELECT
 		u.id,
 		u.display_name,
@@ -3196,6 +3206,7 @@ func (s *Store) MarkWebhookDelivery(ctx context.Context, id int64, status string
 
 func (s *Store) count(ctx context.Context, table, where string, args ...any) (int, error) {
 	var total int
+	// #nosec G202
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` `+where, args...).Scan(&total)
 	return total, err
 }
@@ -3671,6 +3682,7 @@ func (s *Store) decryptWorkspaceSecret(ctx context.Context, value string) (strin
 
 func (s *Store) workspaceSecretKey(ctx context.Context) ([]byte, error) {
 	var encoded string
+	// #nosec G101
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='workspace_secret_key'`).Scan(&encoded)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err

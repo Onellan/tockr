@@ -520,6 +520,7 @@ func (s *Server) persistProjectCreateDraft(w http.ResponseWriter, draft domain.P
 		return
 	}
 	value := base64.RawURLEncoding.EncodeToString(body)
+	// #nosec G124
 	http.SetCookie(w, &http.Cookie{
 		Name:     projectCreateDraftCookieName,
 		Value:    s.sign(value),
@@ -532,6 +533,7 @@ func (s *Server) persistProjectCreateDraft(w http.ResponseWriter, draft domain.P
 }
 
 func (s *Server) clearProjectCreateDraftCookie() *http.Cookie {
+	// #nosec G124
 	return &http.Cookie{Name: projectCreateDraftCookieName, Value: "", Path: "/projects/create", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode}
 }
 

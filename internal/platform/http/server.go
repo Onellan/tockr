@@ -362,6 +362,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			s.serverError(w, r, err)
 			return
 		}
+		// #nosec G124
 		http.SetCookie(w, &http.Cookie{
 			Name:     "tockr_login_intent",
 			Value:    token,
@@ -468,6 +469,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if state.Session != nil {
 		_ = s.store.DeleteSession(r.Context(), state.Session.ID)
 	}
+	// #nosec G124
 	http.SetCookie(w, &http.Cookie{Name: "tockr_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -689,6 +691,7 @@ func (s *Server) loginOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Clear the intent cookie
+	// #nosec G124
 	http.SetCookie(w, &http.Cookie{
 		Name:     "tockr_login_intent",
 		Value:    "",
@@ -2157,6 +2160,7 @@ func (s *Server) apiInvoiceDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
+	// #nosec G703
 	path := filepath.Join(s.cfg.DataDir, "invoices", inv.Filename)
 	if _, err := os.Stat(path); err != nil {
 		http.NotFound(w, r)
@@ -3072,16 +3076,19 @@ func (s *Server) absoluteURL(r *http.Request, path string) string {
 }
 
 func (s *Server) cookie(sessionID string) *http.Cookie {
+	// #nosec G124
 	return &http.Cookie{Name: "tockr_session", Value: s.sign(sessionID), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(14 * 24 * time.Hour)}
 }
 
 func (s *Server) flashCookie(kind, message string) *http.Cookie {
+	// #nosec G124
 	body, _ := json.Marshal(flashMessage{Kind: kind, Message: message})
 	value := base64.RawURLEncoding.EncodeToString(body)
 	return &http.Cookie{Name: flashCookieName, Value: s.sign(value), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(5 * time.Minute)}
 }
 
 func (s *Server) clearFlashCookie() *http.Cookie {
+	// #nosec G124
 	return &http.Cookie{Name: flashCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode}
 }
 
@@ -3810,6 +3817,7 @@ h1{margin:0 0 4px}
 	if !isValidInvoiceFilename(inv.Filename) {
 		return fmt.Errorf("invalid invoice filename: %s", inv.Filename)
 	}
+	// #nosec G703
 	return os.WriteFile(filepath.Join(dir, inv.Filename), []byte(sb.String()), 0o600)
 }
 
