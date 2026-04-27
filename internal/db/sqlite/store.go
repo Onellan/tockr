@@ -3725,7 +3725,7 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 	adds := map[string]map[string]string{
 		"users": {
 			"organization_id":      "INTEGER NOT NULL DEFAULT 1",
-			"totp_secret":          "TEXT NOT NULL DEFAULT ''",
+			"totp_secret":          "TEXT NOT NULL DEFAULT ''", // #nosec G101 schema column name, not a credential
 			"totp_enabled":         "INTEGER NOT NULL DEFAULT 0",
 			"totp_recovery_hashes": "TEXT NOT NULL DEFAULT ''",
 			"email_otp_enabled":    "INTEGER NOT NULL DEFAULT 0",

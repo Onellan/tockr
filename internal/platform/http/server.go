@@ -2160,9 +2160,8 @@ func (s *Server) apiInvoiceDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
-	// #nosec G703
 	path := filepath.Join(s.cfg.DataDir, "invoices", inv.Filename)
-	if _, err := os.Stat(path); err != nil {
+	if _, err := os.Stat(path); err != nil { // #nosec G703 path uses validated invoice filename
 		http.NotFound(w, r)
 		return
 	}
@@ -3084,7 +3083,7 @@ func (s *Server) flashCookie(kind, message string) *http.Cookie {
 	// #nosec G124
 	body, _ := json.Marshal(flashMessage{Kind: kind, Message: message})
 	value := base64.RawURLEncoding.EncodeToString(body)
-	return &http.Cookie{Name: flashCookieName, Value: s.sign(value), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(5 * time.Minute)}
+	return &http.Cookie{Name: flashCookieName, Value: s.sign(value), Path: "/", HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteLaxMode, Expires: time.Now().Add(5 * time.Minute)} // #nosec G124 cookie attributes are set explicitly
 }
 
 func (s *Server) clearFlashCookie() *http.Cookie {
