@@ -1,6 +1,7 @@
 module tockr
 
 go 1.26
+
 toolchain go1.26.2
 
 require (
