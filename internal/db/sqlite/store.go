@@ -310,12 +310,12 @@ func (s *Store) FindUserByID(ctx context.Context, id int64) (*domain.User, error
 }
 
 func (s *Store) scanUser(ctx context.Context, where string, args ...any) (*domain.User, error) {
-	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, created_at, last_login_at FROM users ` + where
+	q := `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, email_otp_enabled, created_at, last_login_at FROM users ` + where
 	row := s.db.QueryRowContext(ctx, q, args...)
 	var u domain.User
 	var created string
 	var last sql.NullString
-	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
+	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &u.EmailOTPEnabled, &created, &last); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -352,7 +352,7 @@ func (s *Store) userRoles(ctx context.Context, userID int64) ([]domain.Role, err
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, created_at, last_login_at FROM users ORDER BY display_name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, organization_id, email, username, display_name, password_hash, timezone, enabled, totp_secret, totp_enabled, email_otp_enabled, created_at, last_login_at FROM users ORDER BY display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +361,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 		var u domain.User
 		var created string
 		var last sql.NullString
-		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &u.EmailOTPEnabled, &created, &last); err != nil {
 			return nil, err
 		}
 		u.CreatedAt = parseTime(created)
@@ -389,7 +389,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]domain.User, error) {
 }
 
 func (s *Store) ListWorkspaceUsers(ctx context.Context, workspaceID int64) ([]domain.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT u.id, u.organization_id, u.email, u.username, u.display_name, u.password_hash, u.timezone, u.enabled, u.totp_secret, u.totp_enabled, u.created_at, u.last_login_at
+	rows, err := s.db.QueryContext(ctx, `SELECT u.id, u.organization_id, u.email, u.username, u.display_name, u.password_hash, u.timezone, u.enabled, u.totp_secret, u.totp_enabled, u.email_otp_enabled, u.created_at, u.last_login_at
 		FROM users u
 		JOIN workspace_members wm ON wm.user_id=u.id
 		WHERE wm.workspace_id=?
@@ -402,7 +402,7 @@ func (s *Store) ListWorkspaceUsers(ctx context.Context, workspaceID int64) ([]do
 		var u domain.User
 		var created string
 		var last sql.NullString
-		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &u.EmailOTPEnabled, &created, &last); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -711,6 +711,79 @@ func (s *Store) DisableTOTP(ctx context.Context, userID int64) error {
 	return err
 }
 
+func (s *Store) EnableEmailOTP(ctx context.Context, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET email_otp_enabled=1 WHERE id=?`, userID)
+	return err
+}
+
+func (s *Store) DisableEmailOTP(ctx context.Context, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET email_otp_enabled=0 WHERE id=?`, userID)
+	return err
+}
+
+// CreateLoginOTP creates an email OTP for the login challenge flow and returns the intent token.
+func (s *Store) CreateLoginOTP(ctx context.Context, userID int64, code string, ttl time.Duration) (string, error) {
+	token := randomToken(32)
+	hash, err := auth.HashPassword(code)
+	if err != nil {
+		return "", err
+	}
+	now := utcNow()
+	expires := formatTime(time.Now().UTC().Add(ttl))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO login_otps(token, user_id, otp_hash, expires_at, created_at) VALUES(?,?,?,?,?)`,
+		token, userID, hash, expires, now)
+	return token, err
+}
+
+// UseLoginOTP verifies the OTP for a given intent token and returns the user ID on success.
+func (s *Store) UseLoginOTP(ctx context.Context, intentToken, code string, maxAttempts int) (int64, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rollback(tx)
+	now := formatTime(time.Now().UTC())
+	var id, userID int64
+	var hash string
+	var attempts int
+	err = tx.QueryRowContext(ctx, `SELECT id, user_id, otp_hash, attempts FROM login_otps WHERE token=? AND used_at IS NULL AND expires_at>? ORDER BY id DESC LIMIT 1`,
+		intentToken, now).Scan(&id, &userID, &hash, &attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	attempts++
+	if attempts > maxAttempts {
+		_, err = tx.ExecContext(ctx, `UPDATE login_otps SET used_at=?, attempts=? WHERE id=?`, now, attempts, id)
+		if err != nil {
+			return 0, false, err
+		}
+		_ = tx.Commit()
+		return 0, false, nil
+	}
+	if !auth.CheckPassword(hash, code) {
+		_, err = tx.ExecContext(ctx, `UPDATE login_otps SET attempts=? WHERE id=?`, attempts, id)
+		if err != nil {
+			return 0, false, err
+		}
+		_ = tx.Commit()
+		return 0, false, nil
+	}
+	// Mark as used and invalidate other pending tokens for this user
+	if _, err = tx.ExecContext(ctx, `UPDATE login_otps SET used_at=?, attempts=? WHERE id=?`, now, attempts, id); err != nil {
+		return 0, false, err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE login_otps SET used_at=? WHERE user_id=? AND id<>? AND used_at IS NULL`, now, userID, id); err != nil {
+		return 0, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return userID, true, nil
+}
+
 func (s *Store) UseRecoveryCode(ctx context.Context, userID int64, code string) (bool, error) {
 	var raw string
 	if err := s.db.QueryRowContext(ctx, `SELECT totp_recovery_hashes FROM users WHERE id=?`, userID).Scan(&raw); err != nil {
@@ -980,7 +1053,7 @@ func (s *Store) RemoveUserFromGroup(ctx context.Context, groupID, userID int64) 
 }
 
 func (s *Store) ListGroupMembers(ctx context.Context, groupID int64) ([]domain.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT u.id, u.organization_id, u.email, u.username, u.display_name, u.password_hash, u.timezone, u.enabled, u.totp_secret, u.totp_enabled, u.created_at, u.last_login_at
+	rows, err := s.db.QueryContext(ctx, `SELECT u.id, u.organization_id, u.email, u.username, u.display_name, u.password_hash, u.timezone, u.enabled, u.totp_secret, u.totp_enabled, u.email_otp_enabled, u.created_at, u.last_login_at
 		FROM users u
 		JOIN group_members gm ON gm.user_id=u.id
 		WHERE gm.group_id=?
@@ -994,7 +1067,7 @@ func (s *Store) ListGroupMembers(ctx context.Context, groupID int64) ([]domain.U
 		var u domain.User
 		var created string
 		var last sql.NullString
-		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &created, &last); err != nil {
+		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Timezone, &u.Enabled, &u.TOTPSecret, &u.TOTPEnabled, &u.EmailOTPEnabled, &created, &last); err != nil {
 			return nil, err
 		}
 		u.CreatedAt = parseTime(created)
@@ -3386,6 +3459,7 @@ func (s *Store) ensureHierarchy(ctx context.Context) error {
 			"totp_secret":          "TEXT NOT NULL DEFAULT ''",
 			"totp_enabled":         "INTEGER NOT NULL DEFAULT 0",
 			"totp_recovery_hashes": "TEXT NOT NULL DEFAULT ''",
+			"email_otp_enabled":    "INTEGER NOT NULL DEFAULT 0",
 		},
 		"sessions": {
 			"workspace_id": "INTEGER NOT NULL DEFAULT 1",
@@ -3972,6 +4046,7 @@ CREATE TABLE IF NOT EXISTS organization_members(organization_id INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS workspace_members(workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('admin','analyst','member')), created_at TEXT NOT NULL, PRIMARY KEY(workspace_id, user_id));
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, workspace_id INTEGER NOT NULL DEFAULT 1 REFERENCES workspaces(id) ON DELETE CASCADE, csrf_token TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS email_change_otps(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, new_email TEXT NOT NULL, otp_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS login_otps(id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, otp_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS password_reset_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS teams(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS team_members(team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, lead INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(team_id, user_id));

@@ -24,6 +24,7 @@ type Config struct {
 	AdminPassword     string
 	ShutdownTimeout   time.Duration
 	WebhookMaxRetries int
+	RateLimitEnabled  bool
 	SMTPHost          string
 	SMTPPort          int
 	SMTPUsername      string
@@ -43,11 +44,12 @@ func Load() Config {
 		DefaultTimezone:   getenv("TOCKR_DEFAULT_TIMEZONE", "UTC"),
 		DefaultCurrency:   getenv("TOCKR_DEFAULT_CURRENCY", "USD"),
 		FutureTimePolicy:  getenv("TOCKR_FUTURE_TIME_POLICY", "end_of_day"),
-		TOTPMode:          getenv("TOCKR_TOTP_MODE", "disabled"),
+		TOTPMode:          getenv("TOCKR_TOTP_MODE", "optional"),
 		AdminEmail:        getenv("TOCKR_ADMIN_EMAIL", "admin@example.com"),
 		AdminPassword:     getenv("TOCKR_ADMIN_PASSWORD", "admin12345"),
 		ShutdownTimeout:   10 * time.Second,
 		WebhookMaxRetries: getenvInt("TOCKR_WEBHOOK_MAX_RETRIES", 5),
+		RateLimitEnabled:  getenvBool("TOCKR_RATE_LIMIT_ENABLED", true),
 		SMTPHost:          getenv("TOCKR_SMTP_HOST", ""),
 		SMTPPort:          getenvInt("TOCKR_SMTP_PORT", 587),
 		SMTPUsername:      getenv("TOCKR_SMTP_USERNAME", ""),

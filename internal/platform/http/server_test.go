@@ -259,6 +259,7 @@ func TestProjectRowOverflowAndMembershipPage(t *testing.T) {
 	projects := getWithCookie(app, "/projects", cookie).Body.String()
 	for _, expected := range []string{
 		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/dashboard"`,
+		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/edit"`,
 		`data-dropdown="project-` + strconv.FormatInt(project.ID, 10) + `-actions"`,
 		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/members"`,
 		`href="/projects/` + strconv.FormatInt(project.ID, 10) + `/workstreams"`,
@@ -274,6 +275,30 @@ func TestProjectRowOverflowAndMembershipPage(t *testing.T) {
 	}
 	if !strings.Contains(members.Body.String(), "Project access") {
 		t.Fatal("members page did not render project access UI")
+	}
+
+	projectWorkstreams := getWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/workstreams", cookie)
+	if projectWorkstreams.Code != http.StatusOK {
+		t.Fatalf("project workstreams page returned %d", projectWorkstreams.Code)
+	}
+	if !strings.Contains(projectWorkstreams.Body.String(), `href="/projects/`+strconv.FormatInt(project.ID, 10)+`/dashboard"`) {
+		t.Fatal("project workstreams page should include back button to project dashboard when no workstreams are assigned")
+	}
+
+	edit := getWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/edit", cookie)
+	if edit.Code != http.StatusOK {
+		t.Fatalf("edit project page returned %d", edit.Code)
+	}
+	if !strings.Contains(edit.Body.String(), `href="/projects/`+strconv.FormatInt(project.ID, 10)+`/dashboard"`) {
+		t.Fatal("edit project page should include back button to project dashboard")
+	}
+
+	dashboard := getWithCookie(app, "/projects/"+strconv.FormatInt(project.ID, 10)+"/dashboard", cookie)
+	if dashboard.Code != http.StatusOK {
+		t.Fatalf("project dashboard page returned %d", dashboard.Code)
+	}
+	if !strings.Contains(dashboard.Body.String(), `href="/projects"`) {
+		t.Fatal("project dashboard should include back button to projects page")
 	}
 }
 
@@ -1416,6 +1441,7 @@ func testAppWithConfig(t *testing.T, overrides config.Config) (*Server, *sqlite.
 		t.Fatal(err)
 	}
 	cfg := config.Config{SessionSecret: "test-secret", DefaultTimezone: "UTC", DefaultCurrency: "USD", FutureTimePolicy: "allow", DataDir: t.TempDir(), WebhookMaxRetries: 1, TOTPMode: "disabled"}
+	cfg.RateLimitEnabled = overrides.RateLimitEnabled
 	if overrides.TOTPMode != "" {
 		cfg.TOTPMode = overrides.TOTPMode
 	}

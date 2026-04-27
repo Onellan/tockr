@@ -15,6 +15,7 @@ import (
 	"html"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -22,11 +23,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/a-h/templ"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/skip2/go-qrcode"
 
 	"tockr/internal/auth"
 	"tockr/internal/db/sqlite"
@@ -37,10 +40,18 @@ import (
 )
 
 type Server struct {
-	cfg    config.Config
-	store  *sqlite.Store
-	log    *slog.Logger
-	router chi.Router
+	cfg              config.Config
+	store            *sqlite.Store
+	log              *slog.Logger
+	router           chi.Router
+	rateLimitMu      sync.Mutex
+	rateLimitBuckets map[string]rateLimitBucket
+}
+
+type rateLimitBucket struct {
+	Count       int
+	WindowStart time.Time
+	LastSeen    time.Time
 }
 
 type requestState struct {
@@ -58,13 +69,16 @@ type contextKey string
 
 const stateKey contextKey = "state"
 const flashCookieName = "tockr_flash"
+const defaultProjectWorkstreamName = "Project management"
 
 func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: store, log: log}
+	s := &Server{cfg: cfg, store: store, log: log, rateLimitBuckets: map[string]rateLimitBucket{}}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	r.Use(s.securityHeadersMiddleware)
+	r.Use(s.rateLimitMiddleware)
 	r.Use(s.sessionMiddleware)
 	r.Use(s.csrfMiddleware)
 	r.Get("/favicon.ico", s.iconAsset("favicon.ico"))
@@ -83,12 +97,15 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	r.Get("/reset-password", s.resetPasswordPage)
 	r.Get("/reset-password/", redirectCanonical("/reset-password"))
 	r.Post("/reset-password", s.resetPassword)
+	r.Get("/login/otp", s.loginOTPPage)
+	r.Post("/login/otp", s.loginOTP)
 	r.Get("/reports/share/{token}", s.viewSharedReport)
 	r.Post("/logout", s.requireLogin(s.logout))
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireLoginMiddleware)
 		r.Get("/", s.dashboard)
 		r.Get("/admin", s.adminHome)
+		r.Get("/admin/two-factor", s.adminTwoFactor)
 		r.Get("/account", s.account)
 		r.Post("/account", s.updateAccount)
 		r.Post("/account/email", s.requestEmailChange)
@@ -97,11 +114,14 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/account/password", s.updatePassword)
 		r.Post("/account/totp/enable", s.enableTOTP)
 		r.Post("/account/totp/disable", s.disableTOTP)
+		r.Post("/account/email-otp/enable", s.enableEmailOTP)
+		r.Post("/account/email-otp/disable", s.disableEmailOTP)
 		r.Post("/workspace", s.switchWorkspace)
 		r.Get("/customers", s.customers)
 		r.Post("/customers", s.requirePermission(auth.PermManageMaster, s.saveCustomer))
 		r.Post("/customers/{id}", s.requirePermission(auth.PermManageMaster, s.saveCustomer))
 		r.Get("/projects", s.projects)
+		r.Get("/projects/{id}/edit", s.requirePermission(auth.PermManageMaster, s.editProject))
 		r.Post("/projects", s.requirePermission(auth.PermManageMaster, s.saveProject))
 		r.Post("/projects/{id}", s.requirePermission(auth.PermManageMaster, s.saveProject))
 		r.Get("/project-dashboards", s.requirePermission(auth.PermManageProjects, s.projectDashboards))
@@ -186,6 +206,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 	})
 	r.Route("/api", func(r chi.Router) {
 		r.Use(s.requireLoginMiddleware)
+		r.Use(s.requirePermissionMiddleware(auth.PermUseAPI))
 		r.Get("/status", s.apiStatus)
 		r.Get("/customers", s.apiCustomers)
 		r.Get("/projects", s.apiProjects)
@@ -281,8 +302,20 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(w, r, err)
 		return
 	}
-	user, err := s.store.FindUserByEmail(r.Context(), r.FormValue("email"))
-	if err != nil || user == nil || !auth.CheckPassword(user.PasswordHash, r.FormValue("password")) || !user.Enabled {
+	email := normalizeEmail(r.FormValue("email"))
+	password := r.FormValue("password")
+	user, err := s.store.FindUserByEmail(r.Context(), email)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if user == nil || !auth.CheckPassword(user.PasswordHash, password) || !user.Enabled {
+		var userID *int64
+		if user != nil {
+			id := user.ID
+			userID = &id
+		}
+		s.store.Audit(r.Context(), userID, "failed_login", "user", userID, "")
 		s.redirectWithFlash(w, r, "/login", "error", "Invalid credentials")
 		return
 	}
@@ -301,6 +334,36 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			s.redirectWithFlash(w, r, "/login", "error", "Two-factor code required")
 			return
 		}
+	}
+	// Email OTP challenge: redirect to /login/otp if email 2FA is enabled and TOTP is not
+	sender := emailer.NewSender(s.cfg)
+	if user.EmailOTPEnabled && !user.TOTPEnabled && sender.Configured() {
+		code := numericCode(6)
+		token, err := s.store.CreateLoginOTP(r.Context(), user.ID, code, 10*time.Minute)
+		if err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		if err := sender.Send(emailer.Message{
+			To:      user.Email,
+			Subject: "Your Tockr sign-in code",
+			Text:    fmt.Sprintf("Your Tockr sign-in code is %s.\n\nIt expires in 10 minutes and can be used once.", code),
+		}); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "tockr_login_intent",
+			Value:    token,
+			Path:     "/login/otp",
+			MaxAge:   600,
+			HttpOnly: true,
+			Secure:   s.cfg.CookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		})
+		s.store.Audit(r.Context(), &user.ID, "otp_sent", "login", &user.ID, "email")
+		http.Redirect(w, r, "/login/otp", http.StatusSeeOther)
+		return
 	}
 	session, err := s.store.CreateSession(r.Context(), user.ID, 0, 14*24*time.Hour)
 	if err != nil {
@@ -397,13 +460,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 	state := s.state(r)
-	secret := ""
-	uri := ""
-	if s.totpAvailable() && !state.User.TOTPEnabled {
-		secret = auth.NewTOTPSecret()
-		uri = auth.TOTPURI("Tockr", state.User.Email, secret)
-	}
-	s.render(w, r, templates.Account(s.nav(r), *state.User, s.cfg.TOTPMode, secret, uri, nil, s.popFlash(w, r)))
+	s.render(w, r, templates.Account(s.nav(r), *state.User, s.popFlash(w, r)))
 }
 
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
@@ -412,6 +469,28 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, r, templates.AdminHome(s.nav(r)))
+}
+
+func (s *Server) adminTwoFactor(w http.ResponseWriter, r *http.Request) {
+	if !s.hasAnyAdminAccess(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	state := s.state(r)
+	secret := ""
+	uri := ""
+	if s.totpAvailable() && !state.User.TOTPEnabled {
+		secret = auth.NewTOTPSecret()
+		uri = auth.TOTPURI("Tockr", state.User.Email, secret)
+	}
+	qrDataURI := ""
+	if uri != "" {
+		if png, err := qrcode.Encode(uri, qrcode.Medium, 200); err == nil {
+			qrDataURI = "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+		}
+	}
+	emailConfigured := emailer.NewSender(s.cfg).Configured()
+	s.render(w, r, templates.AdminTwoFactor(s.nav(r), *state.User, s.cfg.TOTPMode, emailConfigured, secret, uri, qrDataURI, nil, s.popFlash(w, r)))
 }
 
 func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
@@ -531,7 +610,7 @@ func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	secret := strings.TrimSpace(r.FormValue("secret"))
 	if !auth.VerifyTOTP(secret, r.FormValue("code"), time.Now().UTC()) {
-		s.redirectWithFlash(w, r, "/account", "error", "Invalid two-factor code")
+		s.redirectWithFlash(w, r, "/admin/two-factor", "error", "Invalid two-factor code")
 		return
 	}
 	codes := auth.NewRecoveryCodes(8)
@@ -544,15 +623,15 @@ func (s *Server) enableTOTP(w http.ResponseWriter, r *http.Request) {
 	s.store.Audit(r.Context(), &userID, "enable", "totp", &userID, "")
 	nav := s.nav(r)
 	if user != nil {
-		s.render(w, r, templates.Account(nav, *user, s.cfg.TOTPMode, "", "", codes, templates.Notice{Kind: "success", Message: "Two-factor authentication enabled"}))
+		s.render(w, r, templates.AdminTwoFactor(nav, *user, s.cfg.TOTPMode, emailer.NewSender(s.cfg).Configured(), "", "", "", codes, templates.Notice{Kind: "success", Message: "Two-factor authentication enabled"}))
 		return
 	}
-	s.redirectWithFlash(w, r, "/account", "success", "Two-factor authentication enabled")
+	s.redirectWithFlash(w, r, "/admin/two-factor", "success", "Two-factor authentication enabled")
 }
 
 func (s *Server) disableTOTP(w http.ResponseWriter, r *http.Request) {
 	if s.totpRequired() {
-		s.redirectWithFlash(w, r, "/account", "warning", "Two-factor is required for this deployment")
+		s.redirectWithFlash(w, r, "/admin/two-factor", "warning", "Two-factor is required for this deployment")
 		return
 	}
 	userID := s.state(r).User.ID
@@ -561,7 +640,79 @@ func (s *Server) disableTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Audit(r.Context(), &userID, "disable", "totp", &userID, "")
-	s.redirectWithFlash(w, r, "/account", "success", "Two-factor authentication disabled")
+	s.redirectWithFlash(w, r, "/admin/two-factor", "success", "Two-factor authentication disabled")
+}
+
+func (s *Server) loginOTPPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, r, templates.LoginOTPChallenge(s.popFlash(w, r)))
+}
+
+func (s *Server) loginOTP(w http.ResponseWriter, r *http.Request) {
+	intentCookie, err := r.Cookie("tockr_login_intent")
+	if err != nil || intentCookie.Value == "" {
+		s.redirectWithFlash(w, r, "/login", "error", "Session expired. Please log in again.")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.badRequest(w, r, err)
+		return
+	}
+	userID, ok, err := s.store.UseLoginOTP(r.Context(), intentCookie.Value, strings.TrimSpace(r.FormValue("code")), 5)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	// Clear the intent cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "tockr_login_intent",
+		Value:    "",
+		Path:     "/login/otp",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
+	if !ok {
+		s.redirectWithFlash(w, r, "/login/otp", "error", "Invalid or expired code")
+		return
+	}
+	session, err := s.store.CreateSession(r.Context(), userID, 0, 14*24*time.Hour)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	_ = s.store.TouchLogin(r.Context(), userID)
+	s.store.Audit(r.Context(), &userID, "login", "user", &userID, "email_otp")
+	http.SetCookie(w, s.cookie(session.ID))
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) enableEmailOTP(w http.ResponseWriter, r *http.Request) {
+	if !emailer.NewSender(s.cfg).Configured() {
+		s.redirectWithFlash(w, r, "/admin/two-factor", "error", "Email is not configured on this deployment")
+		return
+	}
+	userID := s.state(r).User.ID
+	if err := s.store.EnableEmailOTP(r.Context(), userID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), &userID, "enable", "email_otp", &userID, "")
+	s.redirectWithFlash(w, r, "/admin/two-factor", "success", "Email sign-in codes enabled")
+}
+
+func (s *Server) disableEmailOTP(w http.ResponseWriter, r *http.Request) {
+	if s.totpRequired() {
+		s.redirectWithFlash(w, r, "/admin/two-factor", "warning", "Two-factor is required for this deployment")
+		return
+	}
+	userID := s.state(r).User.ID
+	if err := s.store.DisableEmailOTP(r.Context(), userID); err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.store.Audit(r.Context(), &userID, "disable", "email_otp", &userID, "")
+	s.redirectWithFlash(w, r, "/admin/two-factor", "success", "Email sign-in codes disabled")
 }
 
 func (s *Server) switchWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -663,12 +814,7 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	for _, p := range items {
 		actions := `<a class="table-action" href="/projects/` + fmt.Sprint(p.ID) + `/dashboard">Dashboard</a>`
 		if s.hasPermission(r, auth.PermManageMaster) {
-			editAction, err := inlineEditAction(r.Context(), templates.ProjectForm(s.nav(r), selectors, &p))
-			if err != nil {
-				s.serverError(w, r, err)
-				return
-			}
-			actions += editAction
+			actions += ` <a class="table-action" href="/projects/` + fmt.Sprint(p.ID) + `/edit">Edit</a>`
 		}
 		if s.access(r).ManagesProject(p.ID) {
 			actions += templates.RowActionMenu(fmt.Sprintf("project-%d-actions", p.ID), "Project actions", s.nav(r).CSRF, []templates.MenuAction{
@@ -705,25 +851,72 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, templates.EntityListRaw("Projects", s.nav(r), []string{"Project", "Client", "Code", "Status", "Estimate", "Budget", "Actions"}, rows, form))
 }
 
+func (s *Server) editProject(w http.ResponseWriter, r *http.Request) {
+	project, err := s.store.Project(r.Context(), pathID(r))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if project == nil || project.WorkspaceID != s.access(r).WorkspaceID {
+		http.NotFound(w, r)
+		return
+	}
+	selectors, err := s.selectorData(r, false, false)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, templates.EditProject(s.nav(r), selectors, *project))
+}
+
 func (s *Server) saveProject(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
+	projectID := pathID(r)
 	customerID := formInt(r, "customer_id")
 	if !s.customerInScope(r, customerID) {
 		http.Error(w, "invalid customer", http.StatusForbidden)
 		return
 	}
-	p := &domain.Project{ID: pathID(r), WorkspaceID: s.access(r).WorkspaceID, CustomerID: customerID, Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formIntAny(r, "budget", "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
+	p := &domain.Project{ID: projectID, WorkspaceID: s.access(r).WorkspaceID, CustomerID: customerID, Name: r.FormValue("name"), Number: r.FormValue("number"), OrderNo: r.FormValue("order_number"), Visible: checkbox(r, "visible"), Private: checkbox(r, "private"), Billable: checkbox(r, "billable"), EstimateSeconds: formInt(r, "estimate_hours") * 3600, BudgetCents: formIntAny(r, "budget", "budget_cents"), BudgetAlertPercent: formInt(r, "budget_alert_percent"), Comment: r.FormValue("comment")}
 	if err := s.store.UpsertProject(r.Context(), p); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
+	if projectID == 0 {
+		if err := s.ensureDefaultProjectWorkstream(r.Context(), p); err != nil {
+			s.serverError(w, r, err)
+			return
+		}
+	}
 	uid := s.state(r).User.ID
 	action := "create"
-	if pathID(r) != 0 {
+	if projectID != 0 {
 		action = "update"
 	}
 	s.store.Audit(r.Context(), &uid, action, "project", &p.ID, p.Name)
 	http.Redirect(w, r, "/projects", http.StatusSeeOther)
+}
+
+func (s *Server) ensureDefaultProjectWorkstream(ctx context.Context, project *domain.Project) error {
+	workstreams, err := s.store.ListWorkstreams(ctx, project.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	defaultWorkstreamID := int64(0)
+	for _, ws := range workstreams {
+		if strings.EqualFold(strings.TrimSpace(ws.Name), defaultProjectWorkstreamName) {
+			defaultWorkstreamID = ws.ID
+			break
+		}
+	}
+	if defaultWorkstreamID == 0 {
+		ws := &domain.Workstream{WorkspaceID: project.WorkspaceID, Name: defaultProjectWorkstreamName, Visible: true}
+		if err := s.store.UpsertWorkstream(ctx, ws); err != nil {
+			return err
+		}
+		defaultWorkstreamID = ws.ID
+	}
+	return s.store.UpsertProjectWorkstream(ctx, &domain.ProjectWorkstream{ProjectID: project.ID, WorkstreamID: defaultWorkstreamID, BudgetCents: 0, Active: true})
 }
 
 func (s *Server) projectDashboards(w http.ResponseWriter, r *http.Request) {
@@ -1931,6 +2124,127 @@ func (s *Server) sessionMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers := w.Header()
+		headers.Set("X-Frame-Options", "DENY")
+		headers.Set("X-Content-Type-Options", "nosniff")
+		headers.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		headers.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		headers.Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+
+		if r.URL.Path == "/login" || r.URL.Path == "/forgot-password" || r.URL.Path == "/reset-password" || strings.HasPrefix(r.URL.Path, "/account") {
+			headers.Set("Cache-Control", "no-store")
+		}
+
+		scheme := r.Header.Get("X-Forwarded-Proto")
+		if scheme == "" {
+			if r.TLS != nil {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+		}
+		if scheme == "https" || s.cfg.CookieSecure {
+			headers.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.cfg.RateLimitEnabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+		limit, window := s.rateLimitPolicy(r)
+		if limit == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		now := time.Now().UTC()
+		key := r.Method + "|" + r.URL.Path + "|" + clientIP(r)
+
+		s.rateLimitMu.Lock()
+		bucket := s.rateLimitBuckets[key]
+		if bucket.WindowStart.IsZero() || now.Sub(bucket.WindowStart) >= window {
+			bucket = rateLimitBucket{Count: 1, WindowStart: now, LastSeen: now}
+			s.rateLimitBuckets[key] = bucket
+			s.cleanupRateLimitBuckets(now)
+			s.rateLimitMu.Unlock()
+			next.ServeHTTP(w, r)
+			return
+		}
+		bucket.Count++
+		bucket.LastSeen = now
+		s.rateLimitBuckets[key] = bucket
+		s.cleanupRateLimitBuckets(now)
+		s.rateLimitMu.Unlock()
+
+		if bucket.Count > limit {
+			retryAfter := int(window.Seconds())
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			if state := s.state(r); state != nil && state.User != nil {
+				uid := state.User.ID
+				s.store.Audit(r.Context(), &uid, "rate_limited", "http", nil, r.Method+" "+r.URL.Path)
+			}
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) cleanupRateLimitBuckets(now time.Time) {
+	if len(s.rateLimitBuckets) < 1024 {
+		return
+	}
+	for key, bucket := range s.rateLimitBuckets {
+		if now.Sub(bucket.LastSeen) > 30*time.Minute {
+			delete(s.rateLimitBuckets, key)
+		}
+	}
+}
+
+func (s *Server) rateLimitPolicy(r *http.Request) (int, time.Duration) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete {
+		return 0, 0
+	}
+	path := r.URL.Path
+	if path == "/login" {
+		return 8, time.Minute
+	}
+	if path == "/forgot-password" || path == "/reset-password" {
+		return 5, 10 * time.Minute
+	}
+	if path == "/account/password" || path == "/account/email" || path == "/account/email/verify" || path == "/account/totp/enable" || path == "/account/totp/disable" {
+		return 20, 10 * time.Minute
+	}
+	if path == "/timesheets/start" || path == "/timesheets/stop" || path == "/api/timer/start" || path == "/api/timer/stop" {
+		return 120, time.Minute
+	}
+	return 0, 0
+}
+
+func clientIP(r *http.Request) string {
+	ip := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+	if ip != "" {
+		return ip
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	if r.RemoteAddr != "" {
+		return r.RemoteAddr
+	}
+	return "unknown"
+}
+
 func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions || r.URL.Path == "/login" || r.URL.Path == "/forgot-password" || r.URL.Path == "/reset-password" {
@@ -1990,6 +2304,18 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 			return
 		}
 		next(w, r)
+	}
+}
+
+func (s *Server) requirePermissionMiddleware(permission string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.hasPermission(r, permission) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
@@ -2638,7 +2964,10 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, component templ.
 }
 
 func (s *Server) badRequest(w http.ResponseWriter, _ *http.Request, err error) {
-	http.Error(w, err.Error(), http.StatusBadRequest)
+	if err != nil {
+		s.log.Warn("bad request", "error_type", fmt.Sprintf("%T", err))
+	}
+	http.Error(w, "invalid request", http.StatusBadRequest)
 }
 
 func (s *Server) serverError(w http.ResponseWriter, _ *http.Request, err error) {

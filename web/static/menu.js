@@ -248,6 +248,13 @@
   }
 
   document.addEventListener("click", function (event) {
+    var closeDetailsButton = event.target.closest("[data-close-details]");
+    if (closeDetailsButton) {
+      var details = closeDetailsButton.closest("details");
+      if (details) details.removeAttribute("open");
+      return;
+    }
+
     var trigger = event.target.closest("[data-dropdown-trigger]");
     if (trigger) {
       var root = trigger.closest("[data-dropdown]");
@@ -259,6 +266,14 @@
     }
 
     if (!event.target.closest("[data-dropdown]")) closeAll(null);
+  });
+
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    var message = form.getAttribute("data-confirm");
+    if (!message) return;
+    if (!window.confirm(message)) event.preventDefault();
   });
 
   document.addEventListener("keydown", function (event) {

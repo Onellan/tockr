@@ -420,6 +420,7 @@ select {
 .row-actions {
   display: inline-flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: var(--space-2);
 }
 
@@ -490,8 +491,13 @@ select {
   width: min(1440px, calc(100% - 48px));
 }
 
+.page-projects .table-card {
+  min-height: 34vh;
+}
+
 .page-projects .table-card .table-scroll {
-  min-height: 25vh;
+  min-height: 34vh;
+  padding-bottom: calc(var(--space-5) + 8px);
 }
 
 .page-head {
@@ -1027,7 +1033,8 @@ textarea {
 }
 
 button,
-.table-action {
+.table-action,
+.ghost-button {
   min-height: 36px;
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
@@ -1036,6 +1043,9 @@ button,
   color: var(--text);
   font-weight: 700;
   cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
 
@@ -1046,7 +1056,8 @@ button,
 }
 
 button:hover,
-.table-action:hover {
+.table-action:hover,
+.ghost-button:hover {
   background: var(--surface-2);
   border-color: var(--line);
 }
@@ -1077,6 +1088,7 @@ button:hover,
 
 .ghost-button {
   background: var(--surface-2);
+  border-color: var(--line);
 }
 
 .full {
@@ -1869,6 +1881,40 @@ label > .field-hint {
   margin-top: var(--space-3);
   color: var(--text);
 }
+
+  .twofa-method {
+    padding: var(--space-4) 0;
+  }
+
+  .twofa-method-border {
+    border-top: 1px solid var(--line);
+    margin-top: var(--space-4);
+  }
+
+  .totp-setup {
+    display: flex;
+    gap: var(--space-5);
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin: var(--space-4) 0;
+  }
+
+  .totp-qr img {
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+
+  .totp-key-block {
+    flex: 1;
+    min-width: 220px;
+  }
+
+  .totp-key {
+    font-family: var(--font-mono, monospace);
+    letter-spacing: 0.06em;
+    cursor: pointer;
+  }
 
 .auth-main {
   min-height: 100vh;

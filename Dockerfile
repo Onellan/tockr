@@ -25,9 +25,10 @@ COPY --from=build /out/tockr /app/tockr
 COPY --from=build /out/tockr-demo-seed /app/tockr-demo-seed
 COPY web/static /app/web/static
 COPY entrypoint.sh /app/entrypoint.sh
-RUN apk add --no-cache su-exec && chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 COPY --from=build --chown=65532:65532 /out/data /app/data
 EXPOSE 8080
 ENV TOCKR_ADDR=:8080 TOCKR_DB_PATH=/app/data/tockr.db TOCKR_DATA_DIR=/app/data
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+USER 65532:65532
 ENTRYPOINT ["/app/entrypoint.sh"]

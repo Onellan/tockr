@@ -214,6 +214,15 @@ func Login(notice Notice) templ.Component {
 	}))
 }
 
+func LoginOTPChallenge(notice Notice) templ.Component {
+	return Layout("Sign-in code", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Check your email for a 6-digit sign-in code.</p></div><form method="post" action="/login/otp" class="login-card"><div><h2>Check your email</h2><p>Enter the code we sent to your email address. It expires in 10 minutes.</p></div>`)
+		renderNotice(w, notice)
+		_, _ = fmt.Fprint(w, `<label>Sign-in code<input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" required autofocus></label><button class="primary full">Verify code</button><a class="auth-link" href="/login">Back to login</a></form></section>`)
+		return nil
+	}))
+}
+
 func ForgotPassword(notice Notice) templ.Component {
 	return Layout("Forgot password", nil, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		_, _ = fmt.Fprint(w, `<section class="login-shell"><div class="login-copy"><span class="brand-mark large">T</span><h1>Tockr</h1><p>Reset access with a time-limited email link.</p></div><form method="post" action="/forgot-password" class="login-card"><div><h2>Forgot password</h2><p>Enter your account email and check your inbox.</p></div>`)
@@ -415,6 +424,19 @@ func ProjectForm(user *NavUser, selectors *SelectorData, project *domain.Project
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="primary">Save project</button></div></div></form>`)
 		return nil
 	})
+}
+
+func EditProject(user *NavUser, selectors *SelectorData, project domain.Project) templ.Component {
+	return Layout("Edit Project", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Edit project", "Projects / Delivery", "Update the project configuration and return to its delivery dashboard.")
+		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project dashboard</a></div>`, project.ID)
+		_, _ = fmt.Fprint(w, `<section class="panel form-panel">`)
+		if err := ProjectForm(user, selectors, &project).Render(ctx, w); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprint(w, `</section>`)
+		return nil
+	}))
 }
 
 func ActivityForm(user *NavUser, selectors *SelectorData, activity *domain.Activity) templ.Component {
@@ -695,6 +717,15 @@ func Reports(user *NavUser, filter domain.ReportFilter, rows []map[string]any, s
 func ProjectDashboard(user *NavUser, d domain.ProjectDashboard, selectors *SelectorData) templ.Component {
 	return Layout("Project dashboard", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, d.Project.Name, "Project dashboard", "Monitor delivery burn, invoice readiness, and who is doing the work.")
+		_, _ = fmt.Fprint(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects">Back to projects</a>`)
+		if user.Permissions["manage_master_data"] {
+			_, _ = fmt.Fprintf(w, `<a class="ghost-button" href="/projects/%d/edit">Edit project</a>`, d.Project.ID)
+		}
+		_, _ = fmt.Fprintf(w, `<a class="ghost-button" href="/projects/%d/members">Edit members</a>`, d.Project.ID)
+		if user.Permissions["manage_projects"] {
+			_, _ = fmt.Fprintf(w, `<a class="ghost-button" href="/projects/%d/workstreams">Edit workstreams</a>`, d.Project.ID)
+		}
+		_, _ = fmt.Fprint(w, `</div>`)
 		renderProjectDashboardBody(w, d, selectors, fmt.Sprintf("/projects/%d/dashboard", d.Project.ID))
 		return nil
 	}))
@@ -949,7 +980,7 @@ func Calendar(user *NavUser, weekStart time.Time, entries []domain.Timesheet, se
 	}))
 }
 
-func Account(user *NavUser, account domain.User, totpMode string, setupSecret, setupURI string, recoveryCodes []string, notice Notice) templ.Component {
+func Account(user *NavUser, account domain.User, notice Notice) templ.Component {
 	return Layout("Account", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Account", "Profile and security", "Keep your local profile, timezone, password, and workspace context up to date.")
 		renderNotice(w, notice)
@@ -964,13 +995,44 @@ func Account(user *NavUser, account domain.User, totpMode string, setupSecret, s
 		}
 		_, _ = fmt.Fprint(w, `</div></div>`)
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Password</h2><p>Change your password for local authentication.</p></div></div><form method="post" action="/account/password" class="form-grid"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="username" autocomplete="username" value="%s"><label>Current password<input name="current_password" type="password" autocomplete="current-password" required></label><label>New password<input name="password" type="password" minlength="8" autocomplete="new-password" required></label><label>Confirm password<input name="confirm" type="password" minlength="8" autocomplete="new-password" required></label><div class="form-actions"><button class="primary">Update password</button></div></form></div></section>`, esc(user.CSRF), esc(account.Email))
-		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Two-factor authentication</h2><p>Optional unless deployment policy requires it.</p></div></div>`)
+		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Two-factor authentication</h2><p>Two-factor settings are managed from the admin security page.</p></div></div><div class="form-actions"><a class="ghost-button" href="/admin/two-factor">Open two-factor settings</a></div></section>`)
+		return nil
+	}))
+}
+
+func AdminTwoFactor(user *NavUser, account domain.User, totpMode string, emailConfigured bool, setupSecret, setupURI, qrDataURI string, recoveryCodes []string, notice Notice) templ.Component {
+	return Layout("Two-factor authentication", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Two-factor authentication", "Administration", "Manage second-factor sign-in methods for your account.")
+		renderNotice(w, notice)
+		_, _ = fmt.Fprint(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/account">Back to account settings</a></div>`)
+		_, _ = fmt.Fprint(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Two-factor authentication</h2><p>Add a second layer of security at login. Choose one method below.</p></div></div>`)
 		if totpMode == "disabled" {
 			_, _ = fmt.Fprint(w, `<p>Two-factor authentication is disabled for this deployment.</p>`)
-		} else if account.TOTPEnabled {
-			_, _ = fmt.Fprintf(w, `<p><span class="badge success">Enabled</span></p><form method="post" action="/account/totp/disable" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Disable TOTP</button></form>`, esc(user.CSRF))
 		} else {
-			_, _ = fmt.Fprintf(w, `<p><span class="badge muted">Not enabled</span></p><form method="post" action="/account/totp/enable" class="form-grid"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="secret" value="%s"><label class="wide">Authenticator URI<input readonly value="%s"></label><label>Verification code<input name="code" inputmode="numeric" autocomplete="one-time-code" required></label><div class="form-actions"><button class="primary">Enable TOTP</button></div></form>`, esc(user.CSRF), esc(setupSecret), esc(setupURI))
+			_, _ = fmt.Fprint(w, `<div class="twofa-method"><div class="panel-head"><div><h3>Authenticator app</h3><p>Scan a QR code or enter the setup key in your authenticator app.</p></div></div>`)
+			if account.TOTPEnabled {
+				_, _ = fmt.Fprintf(w, `<p><span class="badge success">Enabled</span></p><form method="post" action="/account/totp/disable" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Disable authenticator app</button></form>`, esc(user.CSRF))
+			} else {
+				_, _ = fmt.Fprintf(w, `<p><span class="badge muted">Not enabled</span></p>`)
+				if setupSecret != "" {
+					_, _ = fmt.Fprint(w, `<div class="totp-setup">`)
+					if qrDataURI != "" {
+						_, _ = fmt.Fprintf(w, `<div class="totp-qr"><img src="%s" alt="Scan with your authenticator app" width="200" height="200"></div>`, esc(qrDataURI))
+					}
+					_, _ = fmt.Fprintf(w, `<div class="totp-key-block"><label>Setup key <span class="field-hint">Type this into your app if you cannot scan</span><input class="totp-key" readonly value="%s" onclick="this.select()"></label></div></div>`, esc(setupSecret))
+				}
+				_, _ = fmt.Fprintf(w, `<form method="post" action="/account/totp/enable" class="form-grid"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="secret" value="%s"><label>Verification code <span class="field-hint">Enter the 6-digit code from your app to confirm</span><input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" required></label><div class="form-actions"><button class="primary">Enable authenticator app</button></div></form>`, esc(user.CSRF), esc(setupSecret))
+			}
+			_, _ = fmt.Fprint(w, `</div>`)
+			if emailConfigured {
+				_, _ = fmt.Fprint(w, `<div class="twofa-method twofa-method-border"><div class="panel-head"><div><h3>Email sign-in code</h3><p>Receive a one-time code by email each time you sign in.</p></div></div>`)
+				if account.EmailOTPEnabled {
+					_, _ = fmt.Fprintf(w, `<p><span class="badge success">Enabled</span></p><form method="post" action="/account/email-otp/disable" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="danger">Disable email codes</button></form>`, esc(user.CSRF))
+				} else {
+					_, _ = fmt.Fprintf(w, `<p><span class="badge muted">Not enabled</span></p><form method="post" action="/account/email-otp/enable" class="actions-row"><input type="hidden" name="csrf" value="%s"><button class="primary">Enable email codes</button></form>`, esc(user.CSRF))
+				}
+				_, _ = fmt.Fprint(w, `</div>`)
+			}
 		}
 		if len(recoveryCodes) > 0 {
 			_, _ = fmt.Fprint(w, `<div class="recovery-box"><strong>Recovery codes</strong><p>Save these now. They are shown once.</p><code>`)
@@ -1007,6 +1069,7 @@ func AdminHome(user *NavUser) templ.Component {
 			return nil
 		}
 		_, _ = fmt.Fprint(w, `<section class="table-card"><div class="table-scroll"><table><thead><tr><th>Area</th><th>Purpose</th><th></th></tr></thead><tbody>`)
+		_, _ = fmt.Fprint(w, `<tr><td class="muted-cell">Account settings</td><td>Update your personal profile, password, and account preferences.</td><td><a class="table-action" href="/account">Open</a></td></tr>`)
 		for _, item := range links {
 			_, _ = fmt.Fprintf(w, `<tr><td class="muted-cell">%s</td><td>%s</td><td><a class="table-action" href="%s">Open</a></td></tr>`,
 				esc(item.Label), esc(adminDescription(item.Path)), esc(item.Path))
@@ -1024,7 +1087,7 @@ func AdminDemoData(user *NavUser, workspaceName string, notice Notice) templ.Com
 		if strings.TrimSpace(targetWorkspace) == "" {
 			targetWorkspace = "Not found"
 		}
-		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Default workspace target</h2><p>These controls only affect the default workspace for your organization.</p></div></div><p class="field-hint">Current target: <strong>%s</strong></p><div class="actions-row"><form method="post" action="/admin/demo-data/add"><input type="hidden" name="csrf" value="%s"><button class="primary">Show demo data</button></form><form method="post" action="/admin/demo-data/remove" onsubmit="return confirm('Hide demo data from the default workspace?')"><input type="hidden" name="csrf" value="%s"><button class="danger">Hide demo data</button></form></div><p class="field-hint">Showing demo data is repeatable and will refresh the seeded evaluation dataset for that workspace.</p></section>`, esc(targetWorkspace), esc(user.CSRF), esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<section class="panel form-panel"><div class="panel-head"><div><h2>Default workspace target</h2><p>These controls only affect the default workspace for your organization.</p></div></div><p class="field-hint">Current target: <strong>%s</strong></p><div class="actions-row"><form method="post" action="/admin/demo-data/add"><input type="hidden" name="csrf" value="%s"><button class="primary">Show demo data</button></form><form method="post" action="/admin/demo-data/remove" data-confirm="Hide demo data from the default workspace?"><input type="hidden" name="csrf" value="%s"><button class="danger">Hide demo data</button></form></div><p class="field-hint">Showing demo data is repeatable and will refresh the seeded evaluation dataset for that workspace.</p></section>`, esc(targetWorkspace), esc(user.CSRF), esc(user.CSRF))
 		return nil
 	}))
 }
@@ -1034,6 +1097,7 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 		userLabels := userLabelMap(users)
 		groupLabels := groupLabelMap(groups)
 		pageHeader(w, project.Name, "Project access", "Control who can log time to this project and who can manage project setup.")
+		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project</a></div>`, project.ID)
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Add members</h2><p>Managers can administer this project; members can track time.</p></div></div><form method="post" action="/projects/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label class="wide">Users<select name="user_id" multiple size="8">`, project.ID, esc(user.CSRF))
 		for _, u := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, u.ID, esc(userLabel(u)))
@@ -1047,7 +1111,7 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 		for _, member := range members {
 			memberRows = append(memberRows, []string{fmt.Sprintf(`<label class="check-inline"><input type="checkbox" name="user_id" value="%d"> %s</label>`, member.UserID, esc(label(userLabels, member.UserID))), string(member.Role)})
 		}
-		_, _ = fmt.Fprintf(w, `<form method="post" action="/projects/%d/members/remove" onsubmit="return confirm('Remove selected project members?')"><input type="hidden" name="csrf" value="%s">`, project.ID, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form method="post" action="/projects/%d/members/remove" data-confirm="Remove selected project members?"><input type="hidden" name="csrf" value="%s">`, project.ID, esc(user.CSRF))
 		dataTableRaw(w, []string{"User", "Role"}, memberRows)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="danger">Remove selected members</button></div></form>`)
 		groupRows := [][]string{}
@@ -1055,10 +1119,9 @@ func ProjectMembers(user *NavUser, project domain.Project, members []domain.Proj
 			groupRows = append(groupRows, []string{fmt.Sprintf(`<label class="check-inline"><input type="checkbox" name="group_id" value="%d"> %s</label>`, group.ID, esc(label(groupLabels, group.ID)))})
 		}
 		_, _ = fmt.Fprint(w, `<div class="section-spacer"></div>`)
-		_, _ = fmt.Fprintf(w, `<form method="post" action="/projects/%d/groups/remove" onsubmit="return confirm('Remove selected project groups?')"><input type="hidden" name="csrf" value="%s">`, project.ID, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form method="post" action="/projects/%d/groups/remove" data-confirm="Remove selected project groups?"><input type="hidden" name="csrf" value="%s">`, project.ID, esc(user.CSRF))
 		dataTableRaw(w, []string{"Group"}, groupRows)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="danger">Remove selected groups</button></div></form>`)
-		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project</a></div>`, project.ID)
 		return nil
 	}))
 }
@@ -1105,7 +1168,7 @@ func WorkspaceDetail(user *NavUser, workspace domain.Workspace, members []domain
 			if !member.Enabled {
 				status = "Disabled"
 			}
-			rows = append(rows, []string{member.DisplayName, member.Email, string(member.Role), status, fmt.Sprint(member.GroupCount), fmt.Sprint(member.ProjectMemberCount), fmt.Sprintf(`<form method="post" action="/admin/workspaces/%d/members/remove" onsubmit="return confirm('Remove this workspace member?')"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="user_id" value="%d"><button class="table-action">Remove</button></form>`, workspace.ID, esc(user.CSRF), member.UserID)})
+			rows = append(rows, []string{member.DisplayName, member.Email, string(member.Role), status, fmt.Sprint(member.GroupCount), fmt.Sprint(member.ProjectMemberCount), fmt.Sprintf(`<form method="post" action="/admin/workspaces/%d/members/remove" data-confirm="Remove this workspace member?"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="user_id" value="%d"><button class="table-action">Remove</button></form>`, workspace.ID, esc(user.CSRF), member.UserID)})
 		}
 		dataTableRaw(w, []string{"Name", "Email", "Role", "Status", "Groups", "Projects", "Action"}, rows)
 		return nil
@@ -1125,7 +1188,7 @@ func GroupMembers(user *NavUser, group domain.Group, members []domain.User, user
 		for _, member := range members {
 			rows = append(rows, []string{fmt.Sprintf(`<label class="check-inline"><input type="checkbox" name="user_id" value="%d"> %s</label>`, member.ID, esc(label(memberLabels, member.ID))), member.Email})
 		}
-		_, _ = fmt.Fprintf(w, `<form method="post" action="/groups/%d/members/remove" onsubmit="return confirm('Remove selected group members?')"><input type="hidden" name="csrf" value="%s">`, group.ID, esc(user.CSRF))
+		_, _ = fmt.Fprintf(w, `<form method="post" action="/groups/%d/members/remove" data-confirm="Remove selected group members?"><input type="hidden" name="csrf" value="%s">`, group.ID, esc(user.CSRF))
 		dataTableRaw(w, []string{"Member", "Email"}, rows)
 		_, _ = fmt.Fprint(w, `<div class="form-actions"><button class="danger">Remove selected</button></div></form>`)
 		return nil
@@ -1147,7 +1210,7 @@ func ProjectTemplates(user *NavUser, templates []domain.ProjectTemplate, selecto
 			}
 			var editForm strings.Builder
 			renderProjectTemplateForm(&editForm, user, template, fmt.Sprintf("/project-templates/%d", template.ID))
-			actions := `<details class="inline-edit"><summary class="table-action">Edit</summary><div class="inline-edit-form inline-edit-generic">` + editForm.String() + `<div class="inline-edit-actions"><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></details>`
+			actions := `<details class="inline-edit"><summary class="table-action">Edit</summary><div class="inline-edit-form inline-edit-generic">` + editForm.String() + `<div class="inline-edit-actions"><button class="ghost-button small" type="button" data-close-details>Cancel</button></div></div></details>`
 			rows = append(rows, []string{
 				template.Name,
 				template.ProjectName,
@@ -1553,7 +1616,7 @@ func adminLinksFor(user *NavUser) []navItem {
 	if len(links) == 0 {
 		return nil
 	}
-	return append([]navItem{{Label: "Admin Home", Path: "/admin", Group: "Administration"}}, links...)
+	return append([]navItem{{Label: "Admin Home", Path: "/admin", Group: "Administration"}}, append(links, navItem{Label: "Two-factor authentication", Path: "/admin/two-factor", Group: "Administration"})...)
 }
 
 func adminSidebarNav(user *NavUser) []navItem {
@@ -1576,6 +1639,10 @@ func adminDescription(path string) string {
 	switch path {
 	case "/admin":
 		return "Open the administration hub and choose the control area you need."
+	case "/account":
+		return "Open account settings for profile details, timezone, and password management."
+	case "/admin/two-factor":
+		return "Configure sign-in two-factor methods including authenticator app and email OTP."
 	case "/admin/workspaces":
 		return "Create workspaces, update workspace settings, and manage workspace membership."
 	case "/admin/email":
@@ -1635,7 +1702,7 @@ func renderSavedReportsDropdown(w io.Writer, user *NavUser, saved []domain.Saved
 				shareInfo = fmt.Sprintf(` <a class="table-action small" href="%s" target="_blank">Share link</a>`, esc(shareURL))
 			}
 		}
-		_, _ = fmt.Fprintf(w, `<div role="menuitem" class="saved-report-item"><a href="%s" class="saved-report-link"><span>%s</span><small>%s</small></a><div class="saved-report-actions">%s<form method="post" action="/reports/saved/%d/delete" onsubmit="return confirm('Delete this saved report?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Delete</button></form><form method="post" action="/reports/saved/%d/share"><input type="hidden" name="csrf" value="%s"><input type="number" name="days" value="30" min="1" max="365" style="width:50px"><button class="table-action small">Share</button></form></div></div>`,
+		_, _ = fmt.Fprintf(w, `<div role="menuitem" class="saved-report-item"><a href="%s" class="saved-report-link"><span>%s</span><small>%s</small></a><div class="saved-report-actions">%s<form method="post" action="/reports/saved/%d/delete" data-confirm="Delete this saved report?"><input type="hidden" name="csrf" value="%s"><button class="danger small">Delete</button></form><form method="post" action="/reports/saved/%d/share"><input type="hidden" name="csrf" value="%s"><input type="number" name="days" value="30" min="1" max="365" style="width:50px"><button class="table-action small">Share</button></form></div></div>`,
 			esc(savedReportHref(report)), esc(report.Name), esc(report.GroupBy),
 			shareInfo,
 			report.ID, esc(user.CSRF),
@@ -1752,6 +1819,14 @@ func dataTable(w io.Writer, headers []string, rows [][]string) {
 }
 
 func dataTableRaw(w io.Writer, headers []string, rows [][]string) {
+	actionIndexes := map[int]bool{}
+	for index, header := range headers {
+		normalized := strings.ToLower(strings.TrimSpace(header))
+		if normalized == "action" || normalized == "actions" {
+			actionIndexes[index] = true
+		}
+	}
+
 	_, _ = fmt.Fprint(w, `<section class="table-card"><div class="table-scroll"><table><thead><tr>`)
 	for _, header := range headers {
 		_, _ = fmt.Fprintf(w, `<th>%s</th>`, esc(header))
@@ -1764,7 +1839,9 @@ func dataTableRaw(w io.Writer, headers []string, rows [][]string) {
 		_, _ = fmt.Fprint(w, `<tr>`)
 		for index, cell := range row {
 			class := ""
-			if index == 0 {
+			if actionIndexes[index] {
+				class = ` class="actions-cell"`
+			} else if index == 0 {
 				class = ` class="muted-cell"`
 			}
 			_, _ = fmt.Fprintf(w, `<td%s>%s</td>`, class, cell)
@@ -2136,7 +2213,7 @@ func Tasks(user *NavUser, tasks []domain.Task, selectors *SelectorData, canManag
 					yesNo(task.Visible), yesNo(task.Billable),
 					task.EstimateSeconds/3600)
 				if canManage {
-					_, _ = fmt.Fprintf(w, `<td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/tasks/%d"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="project_id" value="%d"><div class="inline-edit-col"><label>Number<input name="number" value="%s"></label><label>Estimate hours<input name="estimate_hours" type="number" value="%d"></label><label class="check"><input type="checkbox" name="visible" value="1"%s> Visible</label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label></div><div class="inline-edit-col"><label>Name<input name="name" value="%s" required></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></form></details><form method="post" action="/tasks/%d/archive" onsubmit="return confirm('Archive this task?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Archive</button></form></td>`,
+					_, _ = fmt.Fprintf(w, `<td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/tasks/%d"><input type="hidden" name="csrf" value="%s"><input type="hidden" name="project_id" value="%d"><div class="inline-edit-col"><label>Number<input name="number" value="%s"></label><label>Estimate hours<input name="estimate_hours" type="number" value="%d"></label><label class="check"><input type="checkbox" name="visible" value="1"%s> Visible</label><label class="check"><input type="checkbox" name="billable" value="1"%s> Billable</label></div><div class="inline-edit-col"><label>Name<input name="name" value="%s" required></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" data-close-details>Cancel</button></div></div></form></details><form method="post" action="/tasks/%d/archive" data-confirm="Archive this task?"><input type="hidden" name="csrf" value="%s"><button class="danger small">Archive</button></form></td>`,
 						task.ID, esc(user.CSRF),
 						task.ProjectID,
 						esc(task.Number),
@@ -2265,7 +2342,7 @@ func Workstreams(user *NavUser, items []domain.Workstream) templ.Component {
 		}
 		_, _ = fmt.Fprint(w, `<section class="table-card"><div class="table-scroll"><table><thead><tr><th>Name</th><th>ID</th><th>Description</th><th>Visible</th><th>Actions</th></tr></thead><tbody>`)
 		for _, ws := range items {
-			_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td class="muted-cell">%s</td><td>%s</td><td>%s</td><td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/workstreams/%d"><input type="hidden" name="csrf" value="%s"><div class="inline-edit-col"><label>ID<input name="code" value="%s"></label><label>Name<input name="name" value="%s" required></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label></div><div class="inline-edit-col"><label>Description<textarea name="description">%s</textarea></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" onclick="this.closest('details').removeAttribute('open')">Cancel</button></div></div></form></details><form method="post" action="/workstreams/%d/delete" onsubmit="return confirm('Delete workstream?')"><input type="hidden" name="csrf" value="%s"><button class="danger small">Delete</button></form></td></tr>`,
+			_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td class="muted-cell">%s</td><td>%s</td><td>%s</td><td class="actions-cell"><details class="inline-edit"><summary class="table-action">Edit</summary><form class="compact-form inline-edit-form" method="post" action="/workstreams/%d"><input type="hidden" name="csrf" value="%s"><div class="inline-edit-col"><label>ID<input name="code" value="%s"></label><label>Name<input name="name" value="%s" required></label><label class="check"><input type="checkbox" name="visible"%s> Visible</label></div><div class="inline-edit-col"><label>Description<textarea name="description">%s</textarea></label><div class="inline-edit-actions"><button class="primary small">Save</button><button class="ghost-button small" type="button" data-close-details>Cancel</button></div></div></form></details><form method="post" action="/workstreams/%d/delete" data-confirm="Delete workstream?"><input type="hidden" name="csrf" value="%s"><button class="danger small">Delete</button></form></td></tr>`,
 				esc(ws.Name), esc(ws.Code), esc(ws.Description), yesNo(ws.Visible), ws.ID, esc(user.CSRF), esc(ws.Code), esc(ws.Name), checkedIf(ws.Visible), esc(ws.Description), ws.ID, esc(user.CSRF))
 		}
 		_, _ = fmt.Fprint(w, `</tbody></table></div></section>`)
@@ -2276,6 +2353,7 @@ func Workstreams(user *NavUser, items []domain.Workstream) templ.Component {
 func ProjectWorkstreams(user *NavUser, project *domain.Project, assigned []domain.ProjectWorkstream, all []domain.Workstream) templ.Component {
 	return Layout("Project Workstreams", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		pageHeader(w, "Workstreams — "+project.Name, "Projects / Delivery", "Assign workstreams to this project and optionally allocate a budget per discipline.")
+		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project</a></div>`, project.ID)
 		assignedIDs := map[int64]bool{}
 		for _, pw := range assigned {
 			assignedIDs[pw.WorkstreamID] = true
@@ -2295,11 +2373,10 @@ func ProjectWorkstreams(user *NavUser, project *domain.Project, assigned []domai
 		}
 		_, _ = fmt.Fprint(w, `<section class="table-card"><div class="table-scroll"><table><thead><tr><th>Workstream</th><th>Budget</th><th>Active</th><th></th></tr></thead><tbody>`)
 		for _, pw := range assigned {
-			_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td>%s</td><td>%s</td><td><form method="post" action="/projects/%d/workstreams/%d/remove" onsubmit="return confirm('Remove workstream?')"><input type="hidden" name="csrf" value="%s"><button class="table-action danger-action">Remove</button></form></td></tr>`,
+			_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td>%s</td><td>%s</td><td><form method="post" action="/projects/%d/workstreams/%d/remove" data-confirm="Remove workstream?"><input type="hidden" name="csrf" value="%s"><button class="table-action danger-action">Remove</button></form></td></tr>`,
 				esc(pw.WorkstreamName), money(pw.BudgetCents), yesNo(pw.Active), project.ID, pw.WorkstreamID, esc(user.CSRF))
 		}
 		_, _ = fmt.Fprint(w, `</tbody></table></div></section>`)
-		_, _ = fmt.Fprintf(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/projects/%d/dashboard">Back to project</a></div>`, project.ID)
 		return nil
 	}))
 }

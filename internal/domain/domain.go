@@ -117,19 +117,20 @@ func (a AccessContext) CanAccessProject(projectID int64) bool {
 }
 
 type User struct {
-	ID             int64
-	OrganizationID int64
-	Email          string
-	Username       string
-	DisplayName    string
-	PasswordHash   string
-	Timezone       string
-	Enabled        bool
-	TOTPSecret     string
-	TOTPEnabled    bool
-	Roles          []Role
-	CreatedAt      time.Time
-	LastLoginAt    *time.Time
+	ID              int64
+	OrganizationID  int64
+	Email           string
+	Username        string
+	DisplayName     string
+	PasswordHash    string
+	Timezone        string
+	Enabled         bool
+	TOTPSecret      string
+	TOTPEnabled     bool
+	EmailOTPEnabled bool
+	Roles           []Role
+	CreatedAt       time.Time
+	LastLoginAt     *time.Time
 }
 
 type Customer struct {

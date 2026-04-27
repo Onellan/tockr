@@ -11,6 +11,10 @@ services:
   tockr:
     build: .
     image: tockr:local
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - 8029:8080
     environment:
@@ -23,7 +27,7 @@ services:
       TOCKR_DEFAULT_TIMEZONE: UTC
       TOCKR_DEFAULT_CURRENCY: ZAR
       TOCKR_FUTURE_TIME_POLICY: end_of_day
-      TOCKR_TOTP_MODE: disabled
+      TOCKR_TOTP_MODE: optional
       TOCKR_PUBLIC_URL: http://localhost:8029
       TOCKR_SMTP_HOST: mailpit
       TOCKR_SMTP_PORT: 1025
@@ -37,6 +41,10 @@ services:
 
   mailpit:
     image: axllent/mailpit:latest
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - 1025:1025
       - 8025:8025

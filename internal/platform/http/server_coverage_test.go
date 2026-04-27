@@ -335,7 +335,7 @@ func TestAdminDemoDataPageAndActions(t *testing.T) {
 		t.Fatalf("GET /admin/demo-data returned %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, snippet := range []string{"Add demo data", "Remove demo data", "Default workspace target"} {
+	for _, snippet := range []string{"Show demo data", "Hide demo data", "Default workspace target"} {
 		if !strings.Contains(body, snippet) {
 			t.Fatalf("demo data page missing %q", snippet)
 		}
@@ -347,7 +347,7 @@ func TestAdminDemoDataPageAndActions(t *testing.T) {
 		t.Fatalf("POST /admin/demo-data/add returned %d", rec.Code)
 	}
 	var customerCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND name LIKE ?`, workspaceID, "[Demo] %").Scan(&customerCount); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND lower(name) IN (lower('Northwind Mining'), lower('GreenLine Foods'), lower('MetroGrid Estates'))`, workspaceID).Scan(&customerCount); err != nil {
 		t.Fatal(err)
 	}
 	if customerCount == 0 {
@@ -360,7 +360,7 @@ func TestAdminDemoDataPageAndActions(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST /admin/demo-data/remove returned %d", rec.Code)
 	}
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND name LIKE ?`, workspaceID, "[Demo] %").Scan(&customerCount); err != nil {
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM customers WHERE workspace_id=? AND lower(name) IN (lower('Northwind Mining'), lower('GreenLine Foods'), lower('MetroGrid Estates'))`, workspaceID).Scan(&customerCount); err != nil {
 		t.Fatal(err)
 	}
 	if customerCount != 0 {
@@ -1355,6 +1355,41 @@ func TestCreateProjectWithAutoNumber(t *testing.T) {
 	}
 	if !strings.HasPrefix(number, "PR-") {
 		t.Fatalf("project number = %q, want PR- prefix", number)
+	}
+
+	var projectID int64
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT id FROM projects WHERE name='Create Test Project'`).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	workstreamsPage := getWithCookie(app, "/projects/"+strconv.FormatInt(projectID, 10)+"/workstreams", cookie)
+	if workstreamsPage.Code != http.StatusOK {
+		t.Fatalf("project workstreams returned %d", workstreamsPage.Code)
+	}
+	if !strings.Contains(workstreamsPage.Body.String(), "Project management") {
+		t.Fatal("new project should include default Project management workstream")
+	}
+
+	var defaultWorkstreamID int64
+	if err := store.DB().QueryRowContext(context.Background(), `
+		SELECT pw.workstream_id
+		FROM project_workstreams pw
+		JOIN workstreams w ON w.id = pw.workstream_id
+		WHERE pw.project_id = ? AND lower(w.name) = lower(?)
+	`, projectID, "Project management").Scan(&defaultWorkstreamID); err != nil {
+		t.Fatal(err)
+	}
+	removeRec := postFormWithCookie(app, "/projects/"+strconv.FormatInt(projectID, 10)+"/workstreams/"+strconv.FormatInt(defaultWorkstreamID, 10)+"/remove", cookie, url.Values{
+		"csrf": {csrfFromBody(t, workstreamsPage.Body.String())},
+	})
+	if removeRec.Code != http.StatusSeeOther {
+		t.Fatalf("remove default workstream returned %d: %s", removeRec.Code, removeRec.Body.String())
+	}
+	var remaining int
+	if err := store.DB().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM project_workstreams WHERE project_id=? AND workstream_id=?`, projectID, defaultWorkstreamID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("default workstream should be removable, remaining assignments=%d", remaining)
 	}
 }
 

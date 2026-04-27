@@ -14,22 +14,26 @@
 services:
   tockr:
     image: ghcr.io/onellan/tockr:latest
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
-      - "8029:8080"
+      - 8029:8080
     environment:
-      TOCKR_ADDR: ":8080"
-      TOCKR_DB_PATH: "/app/data/tockr.db"
-      TOCKR_DATA_DIR: "/app/data"
+      TOCKR_ADDR: :8080
+      TOCKR_DB_PATH: /app/data/tockr.db
+      TOCKR_DATA_DIR: /app/data
       # Session secret and admin bootstrap password are auto-generated on first
       # start and persisted in the data volume. You can override them here if
       # you have existing values.
       # TOCKR_SESSION_SECRET: ""
       # TOCKR_ADMIN_PASSWORD: ""
-      TOCKR_ADMIN_EMAIL: "admin@example.com"
-      TOCKR_DEFAULT_TIMEZONE: "Africa/Johannesburg"
-      TOCKR_DEFAULT_CURRENCY: "ZAR"
-      TOCKR_FUTURE_TIME_POLICY: "end_of_day"
-      TOCKR_TOTP_MODE: "disabled"
+      TOCKR_ADMIN_EMAIL: admin@example.com
+      TOCKR_DEFAULT_TIMEZONE: Africa/Johannesburg
+      TOCKR_DEFAULT_CURRENCY: ZAR
+      TOCKR_FUTURE_TIME_POLICY: end_of_day
+      TOCKR_TOTP_MODE: optional
       # Set TOCKR_COOKIE_SECURE=true when running behind HTTPS.
       # TOCKR_COOKIE_SECURE: "true"
       # Email/password reset delivery. Keep credentials in your deployment
