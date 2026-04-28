@@ -19,13 +19,43 @@ type Message struct {
 }
 
 type SMTPConfig struct {
-	Host      string
-	Port      int
-	Username  string
-	Password  string
-	FromEmail string
-	FromName  string
-	TLS       bool
+	Host       string
+	Port       int
+	Encryption string
+	Username   string
+	Password   string
+	FromEmail  string
+	FromName   string
+	TLS        bool
+}
+
+const (
+	EncryptionNone     = "none"
+	EncryptionSTARTTLS = "starttls"
+	EncryptionSSLTLS   = "ssl_tls"
+)
+
+func normalizeEncryption(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", EncryptionSTARTTLS:
+		return EncryptionSTARTTLS
+	case EncryptionNone:
+		return EncryptionNone
+	case EncryptionSSLTLS:
+		return EncryptionSSLTLS
+	default:
+		return ""
+	}
+}
+
+func (c SMTPConfig) encryptionMode() string {
+	if mode := normalizeEncryption(c.Encryption); mode != "" {
+		return mode
+	}
+	if c.TLS {
+		return EncryptionSTARTTLS
+	}
+	return EncryptionNone
 }
 
 func (c SMTPConfig) FromAddress() string {
@@ -62,6 +92,9 @@ func (s Sender) Validate() error {
 	if s.cfg.Port <= 0 {
 		return errors.New("SMTP port must be positive")
 	}
+	if s.cfg.encryptionMode() == "" {
+		return errors.New("SMTP encryption must be one of none, starttls, or ssl_tls")
+	}
 	if _, err := mail.ParseAddress(s.cfg.FromAddress()); err != nil {
 		return errors.New("SMTP from address must be valid")
 	}
@@ -83,20 +116,36 @@ func (s Sender) Send(message Message) error {
 	if err != nil {
 		return err
 	}
+	encryption := s.cfg.encryptionMode()
 	addr := net.JoinHostPort(s.cfg.Host, fmt.Sprint(s.cfg.Port))
-	c, err := smtp.Dial(addr)
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-	if s.cfg.TLS {
-		if ok, _ := c.Extension("STARTTLS"); !ok {
-			return errors.New("SMTP server does not support STARTTLS")
-		}
-		if err := c.StartTLS(&tls.Config{ServerName: s.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
+	var c *smtp.Client
+	if encryption == EncryptionSSLTLS {
+		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: s.cfg.Host, MinVersion: tls.VersionTLS12})
+		if err != nil {
 			return err
 		}
+		c, err = smtp.NewClient(conn, s.cfg.Host)
+		if err != nil {
+			_ = conn.Close()
+			return err
+		}
+	} else {
+		c, err = smtp.Dial(addr)
+		if err != nil {
+			return err
+		}
+		if encryption == EncryptionSTARTTLS {
+			if ok, _ := c.Extension("STARTTLS"); !ok {
+				_ = c.Close()
+				return errors.New("SMTP server does not support STARTTLS")
+			}
+			if err := c.StartTLS(&tls.Config{ServerName: s.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
+				_ = c.Close()
+				return err
+			}
+		}
 	}
+	defer c.Close()
 	if s.cfg.Username != "" {
 		auth := smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
 		if err := c.Auth(auth); err != nil {

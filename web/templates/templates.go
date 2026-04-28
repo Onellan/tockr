@@ -1167,17 +1167,35 @@ func WorkspaceDetail(user *NavUser, workspace domain.Workspace, smtp domain.Work
 		if workspace.Archived {
 			checked = " checked"
 		}
-		smtpTLSChecked := ""
-		if smtp.TLS {
-			smtpTLSChecked = " checked"
-		}
-		hasSMTPPassword := ""
+		smtpPasswordHint := " No password saved"
 		if smtp.PasswordSet {
-			hasSMTPPassword = " configured"
+			smtpPasswordHint = " Saved: ******"
+		}
+		encryption := smtp.Encryption
+		if encryption == "" {
+			if smtp.TLS {
+				encryption = domain.SMTPEncryptionSTARTTLS
+			} else {
+				encryption = domain.SMTPEncryptionNone
+			}
+		}
+		encryptionNoneSelected := ""
+		encryptionSTARTTLSSelected := ""
+		encryptionSSLTLSSelected := ""
+		smtpPortHint := "Suggested default for STARTTLS: 587. Existing value is preserved unless you edit it."
+		switch encryption {
+		case domain.SMTPEncryptionNone:
+			encryptionNoneSelected = " selected"
+			smtpPortHint = "Suggested default for None: 25. Existing value is preserved unless you edit it."
+		case domain.SMTPEncryptionSSLTLS:
+			encryptionSSLTLSSelected = " selected"
+			smtpPortHint = "Suggested default for SSL/TLS: 465. Existing value is preserved unless you edit it."
+		default:
+			encryptionSTARTTLSSelected = " selected"
 		}
 		_, _ = fmt.Fprintf(w, `<section class="two-col"><div class="panel form-panel"><div class="panel-head"><div><h2>Settings</h2><p>Changes apply only inside this organization.</p></div></div><form method="post" action="/admin/workspaces/%d" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>Name<input name="name" value="%s" required></label><label>Slug <span class="field-hint">URL-safe ID</span><input name="slug" value="%s" required></label><label>Billing unit <span class="field-hint">ISO 4217 code — e.g. ZAR (rand·cent), USD (dollar·cent), EUR (euro·cent)</span><input name="default_currency" value="%s" placeholder="ZAR" maxlength="3"></label>`, workspace.ID, esc(user.CSRF), esc(workspace.Name), esc(workspace.Slug), esc(workspace.DefaultCurrency))
 		renderTimezoneSelect(w, "Timezone", "timezone", workspace.Timezone, true)
-		_, _ = fmt.Fprintf(w, `<label class="wide">Description<textarea name="description">%s</textarea></label><label>SMTP host<input name="smtp_host" value="%s" placeholder="smtp.example.com"></label><label>SMTP port<input name="smtp_port" type="number" min="1" value="%d"></label><label>SMTP username<input name="smtp_username" value="%s" autocomplete="username"></label><label>SMTP password <span class="field-hint%s">Leave blank to keep existing</span><input name="smtp_password" type="password" autocomplete="new-password"></label><label>From email<input name="smtp_from_email" type="email" value="%s" placeholder="noreply@example.com"></label><label>From name<input name="smtp_from_name" value="%s" placeholder="Tockr"></label><label class="check"><input type="checkbox" name="smtp_tls"%s> Require STARTTLS</label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, esc(workspace.Description), esc(smtp.Host), smtp.Port, esc(smtp.Username), hasSMTPPassword, esc(smtp.FromEmail), esc(smtp.FromName), smtpTLSChecked, checked)
+		_, _ = fmt.Fprintf(w, `<label class="wide">Description<textarea name="description">%s</textarea></label><label>SMTP host<input name="smtp_host" value="%s" placeholder="smtp.example.com"></label><label>Encryption type<select name="smtp_encryption" data-smtp-encryption-select><option value="none"%s>None</option><option value="starttls"%s>STARTTLS</option><option value="ssl_tls"%s>SSL/TLS</option></select><span class="field-hint">Common defaults: STARTTLS = 587, SSL/TLS = 465, None = 25.</span></label><label>SMTP port <span class="field-hint" data-smtp-port-help>%s</span><input name="smtp_port" data-smtp-port-input type="text" inputmode="numeric" value="%d" placeholder="587"></label><label>SMTP username<input name="smtp_username" value="%s" autocomplete="username"></label><label>SMTP password <span class="field-hint">%s Leave blank to keep existing</span><input name="smtp_password" type="password" autocomplete="new-password"></label><label>From email<input name="smtp_from_email" type="email" value="%s" placeholder="noreply@example.com"></label><label>From name<input name="smtp_from_name" value="%s" placeholder="Tockr"></label><label class="check"><input type="checkbox" name="archived"%s> Archived</label><div class="form-actions"><button class="primary">Save workspace</button></div></form></div>`, esc(workspace.Description), esc(smtp.Host), encryptionNoneSelected, encryptionSTARTTLSSelected, encryptionSSLTLSSelected, esc(smtpPortHint), smtp.Port, esc(smtp.Username), esc(smtpPasswordHint), esc(smtp.FromEmail), esc(smtp.FromName), checked)
 		_, _ = fmt.Fprintf(w, `<div class="panel form-panel"><div class="panel-head"><div><h2>Add or update member</h2><p>Member: track time · Analyst: track time + view reports · Admin: full workspace management</p></div></div><form method="post" action="/admin/workspaces/%d/members" class="form-grid"><input type="hidden" name="csrf" value="%s"><label>User<select name="user_id">`, workspace.ID, esc(user.CSRF))
 		for _, user := range users {
 			_, _ = fmt.Fprintf(w, `<option value="%d">%s</option>`, user.ID, esc(userLabel(user)))

@@ -48,10 +48,23 @@ On Windows PowerShell:
 .\scripts\test.ps1
 ```
 
+Run local tests plus CI security checks (gosec, go vet, go mod tidy check,
+govulncheck, gitleaks):
+
+```powershell
+.\scripts\test.ps1 -Security
+```
+
 On macOS/Linux:
 
 ```sh
 sh ./scripts/test.sh
+```
+
+Run local tests plus CI security checks:
+
+```sh
+sh ./scripts/test.sh --security
 ```
 
 The test service uses the `test-runner` Dockerfile target and does not start

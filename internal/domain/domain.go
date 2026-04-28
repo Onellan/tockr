@@ -56,6 +56,7 @@ type Workspace struct {
 type WorkspaceSMTPSettings struct {
 	Host              string
 	Port              int
+	Encryption        string
 	Username          string
 	Password          string
 	PasswordEncrypted string
@@ -64,6 +65,12 @@ type WorkspaceSMTPSettings struct {
 	FromName          string
 	TLS               bool
 }
+
+const (
+	SMTPEncryptionNone     = "none"
+	SMTPEncryptionSTARTTLS = "starttls"
+	SMTPEncryptionSSLTLS   = "ssl_tls"
+)
 
 type WorkspaceMember struct {
 	WorkspaceID         int64

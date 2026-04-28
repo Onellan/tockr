@@ -173,6 +173,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{"workspaces", "smtp_from_email", "TEXT NOT NULL DEFAULT ''"},
 		{"workspaces", "smtp_from_name", "TEXT NOT NULL DEFAULT ''"},
 		{"workspaces", "smtp_tls", "INTEGER NOT NULL DEFAULT 1"},
+		{"workspaces", "smtp_encryption", "TEXT NOT NULL DEFAULT 'starttls'"},
 	}
 	for _, a := range alterations {
 		if err := s.ensureColumn(ctx, a.table, a.column, a.def); err != nil {
@@ -704,11 +705,12 @@ func (s *Store) UpsertEmailSettings(ctx context.Context, settings domain.EmailSe
 }
 
 func (s *Store) WorkspaceSMTPSettings(ctx context.Context, workspaceID int64) (domain.WorkspaceSMTPSettings, error) {
-	settings := domain.WorkspaceSMTPSettings{Port: 587, TLS: true}
+	settings := domain.WorkspaceSMTPSettings{Port: 587, TLS: true, Encryption: domain.SMTPEncryptionSTARTTLS}
 	var encryptedPassword string
 	var tlsEnabled int
-	err := s.db.QueryRowContext(ctx, `SELECT smtp_host, smtp_port, smtp_username, smtp_password_enc, smtp_from_email, smtp_from_name, smtp_tls FROM workspaces WHERE id=?`, workspaceID).
-		Scan(&settings.Host, &settings.Port, &settings.Username, &encryptedPassword, &settings.FromEmail, &settings.FromName, &tlsEnabled)
+	var encryption string
+	err := s.db.QueryRowContext(ctx, `SELECT smtp_host, smtp_port, smtp_username, smtp_password_enc, smtp_from_email, smtp_from_name, smtp_tls, smtp_encryption FROM workspaces WHERE id=?`, workspaceID).
+		Scan(&settings.Host, &settings.Port, &settings.Username, &encryptedPassword, &settings.FromEmail, &settings.FromName, &tlsEnabled, &encryption)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return settings, nil
@@ -717,6 +719,15 @@ func (s *Store) WorkspaceSMTPSettings(ctx context.Context, workspaceID int64) (d
 	}
 	settings.PasswordEncrypted = encryptedPassword
 	settings.TLS = tlsEnabled != 0
+	settings.Encryption = normalizeSMTPEncryption(encryption)
+	if settings.Encryption == "" {
+		if settings.TLS {
+			settings.Encryption = domain.SMTPEncryptionSTARTTLS
+		} else {
+			settings.Encryption = domain.SMTPEncryptionNone
+		}
+	}
+	settings.TLS = settings.Encryption == domain.SMTPEncryptionSTARTTLS
 	settings.PasswordSet = strings.TrimSpace(encryptedPassword) != ""
 	if settings.PasswordSet {
 		decrypted, err := s.decryptWorkspaceSecret(ctx, encryptedPassword)
@@ -729,6 +740,15 @@ func (s *Store) WorkspaceSMTPSettings(ctx context.Context, workspaceID int64) (d
 }
 
 func (s *Store) UpsertWorkspaceSMTPSettings(ctx context.Context, workspaceID int64, settings domain.WorkspaceSMTPSettings) error {
+	settings.Encryption = normalizeSMTPEncryption(settings.Encryption)
+	if settings.Encryption == "" {
+		if settings.TLS {
+			settings.Encryption = domain.SMTPEncryptionSTARTTLS
+		} else {
+			settings.Encryption = domain.SMTPEncryptionNone
+		}
+	}
+	settings.TLS = settings.Encryption == domain.SMTPEncryptionSTARTTLS
 	stored := strings.TrimSpace(settings.PasswordEncrypted)
 	if strings.TrimSpace(settings.Password) != "" {
 		encrypted, err := s.encryptWorkspaceSecret(ctx, settings.Password)
@@ -740,9 +760,22 @@ func (s *Store) UpsertWorkspaceSMTPSettings(ctx context.Context, workspaceID int
 	if stored == "" {
 		_ = s.db.QueryRowContext(ctx, `SELECT smtp_password_enc FROM workspaces WHERE id=?`, workspaceID).Scan(&stored)
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE workspaces SET smtp_host=?, smtp_port=?, smtp_username=?, smtp_password_enc=?, smtp_from_email=?, smtp_from_name=?, smtp_tls=? WHERE id=?`,
-		strings.TrimSpace(settings.Host), settings.Port, strings.TrimSpace(settings.Username), stored, strings.TrimSpace(settings.FromEmail), strings.TrimSpace(settings.FromName), boolInt(settings.TLS), workspaceID)
+	_, err := s.db.ExecContext(ctx, `UPDATE workspaces SET smtp_host=?, smtp_port=?, smtp_username=?, smtp_password_enc=?, smtp_from_email=?, smtp_from_name=?, smtp_tls=?, smtp_encryption=? WHERE id=?`,
+		strings.TrimSpace(settings.Host), settings.Port, strings.TrimSpace(settings.Username), stored, strings.TrimSpace(settings.FromEmail), strings.TrimSpace(settings.FromName), boolInt(settings.TLS), settings.Encryption, workspaceID)
 	return err
+}
+
+func normalizeSMTPEncryption(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case domain.SMTPEncryptionNone:
+		return domain.SMTPEncryptionNone
+	case domain.SMTPEncryptionSTARTTLS:
+		return domain.SMTPEncryptionSTARTTLS
+	case domain.SMTPEncryptionSSLTLS:
+		return domain.SMTPEncryptionSSLTLS
+	default:
+		return ""
+	}
 }
 
 func (s *Store) EnableTOTP(ctx context.Context, userID int64, secret string, recoveryCodes []string) error {
@@ -4307,7 +4340,7 @@ CREATE TABLE IF NOT EXISTS roles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT
 INSERT OR IGNORE INTO roles(name) VALUES('user'),('teamlead'),('admin'),('superadmin');
 CREATE TABLE IF NOT EXISTS role_permissions(role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, permission TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(role_id, permission));
 CREATE TABLE IF NOT EXISTS organizations(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS workspaces(id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', default_currency TEXT NOT NULL DEFAULT 'USD', timezone TEXT NOT NULL DEFAULT 'UTC', smtp_host TEXT NOT NULL DEFAULT '', smtp_port INTEGER NOT NULL DEFAULT 587, smtp_username TEXT NOT NULL DEFAULT '', smtp_password_enc TEXT NOT NULL DEFAULT '', smtp_from_email TEXT NOT NULL DEFAULT '', smtp_from_name TEXT NOT NULL DEFAULT '', smtp_tls INTEGER NOT NULL DEFAULT 1, archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(organization_id, slug));
+CREATE TABLE IF NOT EXISTS workspaces(id INTEGER PRIMARY KEY AUTOINCREMENT, organization_id INTEGER NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, name TEXT NOT NULL, slug TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', default_currency TEXT NOT NULL DEFAULT 'USD', timezone TEXT NOT NULL DEFAULT 'UTC', smtp_host TEXT NOT NULL DEFAULT '', smtp_port INTEGER NOT NULL DEFAULT 587, smtp_username TEXT NOT NULL DEFAULT '', smtp_password_enc TEXT NOT NULL DEFAULT '', smtp_from_email TEXT NOT NULL DEFAULT '', smtp_from_name TEXT NOT NULL DEFAULT '', smtp_tls INTEGER NOT NULL DEFAULT 1, smtp_encryption TEXT NOT NULL DEFAULT 'starttls', archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE(organization_id, slug));
 CREATE TABLE IF NOT EXISTS users(
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	organization_id INTEGER NOT NULL DEFAULT 1 REFERENCES organizations(id) ON DELETE RESTRICT,

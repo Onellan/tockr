@@ -162,6 +162,61 @@
 
   setupTimesheetEntryModes();
 
+  function setupSMTPPortSuggestion() {
+    var defaultsByEncryption = {
+      none: "25",
+      starttls: "587",
+      ssl_tls: "465"
+    };
+
+    document.querySelectorAll("[data-smtp-encryption-select]").forEach(function (select) {
+      var form = select.closest("form") || document;
+      var portInput = form.querySelector("[data-smtp-port-input]");
+      var helpText = form.querySelector("[data-smtp-port-help]");
+      if (!portInput) return;
+
+      var userEditedPort = false;
+      var updatingPortProgrammatically = false;
+
+      function encryptionKey() {
+        return String(select.value || "").trim().toLowerCase();
+      }
+
+      function suggestedPort() {
+        return defaultsByEncryption[encryptionKey()] || "";
+      }
+
+      function setHelpText(port) {
+        if (!helpText) return;
+        if (!port) {
+          helpText.textContent = "Enter provider port manually to match the selected encryption type.";
+          return;
+        }
+        helpText.textContent = "Suggested default for " + String(select.options[select.selectedIndex].text || select.value) + ": " + port + ". Existing value is preserved unless you edit it.";
+      }
+
+      function refreshSuggestion() {
+        var suggested = suggestedPort();
+        setHelpText(suggested);
+        if (!suggested) return;
+        if (userEditedPort && portInput.value.trim() !== "") return;
+        updatingPortProgrammatically = true;
+        portInput.value = suggested;
+        updatingPortProgrammatically = false;
+      }
+
+      portInput.addEventListener("input", function () {
+        if (updatingPortProgrammatically) return;
+        userEditedPort = portInput.value.trim() !== "";
+      });
+
+      select.addEventListener("change", refreshSuggestion);
+      refreshSuggestion();
+    });
+  }
+
+  setupSMTPPortSuggestion();
+
   function setupMobileNav() {
     var shell = document.querySelector("[data-app-shell]");
     var sidebar = document.getElementById("app-sidebar");

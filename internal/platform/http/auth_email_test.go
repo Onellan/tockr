@@ -35,6 +35,9 @@ func TestEmailSettingsPageAndTestDelivery(t *testing.T) {
 			t.Fatalf("email settings page missing %q", expected)
 		}
 	}
+	if !strings.Contains(body, "No password saved") {
+		t.Fatal("workspace smtp page should show no-password indicator when no password is stored")
+	}
 	csrf := csrfFromBody(t, body)
 	rec := postFormWithCookie(app, "/admin/email", cookie, url.Values{
 		"csrf":             {csrf},
@@ -282,8 +285,60 @@ func TestWorkspaceSMTPSettingsIsolationAndNoPasswordLeakage(t *testing.T) {
 	if strings.Contains(workspaceBody, "super-secret") {
 		t.Fatal("workspace smtp password leaked in UI")
 	}
-	if !strings.Contains(workspaceBody, "Leave blank to keep existing") {
-		t.Fatal("workspace smtp password masking hint missing")
+	if !strings.Contains(workspaceBody, "Saved: ******") {
+		t.Fatal("workspace smtp page should show masked password indicator when password is stored")
+	}
+}
+
+func TestWorkspaceSMTPRequiresPasswordWhenHostOrUsernameChanges(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.UpsertWorkspaceSMTPSettings(ctx, 1, domain.WorkspaceSMTPSettings{
+		Host:      "smtp.initial.example.com",
+		Port:      587,
+		Username:  "initial-user",
+		Password:  "initial-password",
+		FromEmail: "noreply@example.com",
+		FromName:  "Tockr",
+		TLS:       true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var workspaceName, workspaceSlug string
+	if err := store.DB().QueryRowContext(ctx, `SELECT name, slug FROM workspaces WHERE id=1`).Scan(&workspaceName, &workspaceSlug); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/admin/workspaces/1", cookie).Body.String()
+	csrf := csrfFromBody(t, body)
+	rec := postFormWithCookie(app, "/admin/workspaces/1", cookie, url.Values{
+		"csrf":             {csrf},
+		"name":             {workspaceName},
+		"slug":             {workspaceSlug},
+		"default_currency": {"USD"},
+		"timezone":         {"UTC"},
+		"smtp_host":        {"smtp.changed.example.com"},
+		"smtp_encryption":  {"starttls"},
+		"smtp_port":        {"587"},
+		"smtp_username":    {"changed-user"},
+		"smtp_password":    {""},
+		"smtp_from_email":  {"noreply@example.com"},
+		"smtp_from_name":   {"Tockr"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("workspace smtp update returned %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	updated, err := store.WorkspaceSMTPSettings(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Host != "smtp.initial.example.com" || updated.Username != "initial-user" {
+		t.Fatalf("smtp settings changed on rejected update: host=%q username=%q", updated.Host, updated.Username)
 	}
 }
 

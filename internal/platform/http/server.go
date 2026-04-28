@@ -1928,19 +1928,32 @@ func (s *Server) saveWorkspace(w http.ResponseWriter, r *http.Request) {
 			smtpPort = parsed
 		}
 		smtpSettings := domain.WorkspaceSMTPSettings{
-			Host:      strings.TrimSpace(r.FormValue("smtp_host")),
-			Port:      smtpPort,
-			Username:  strings.TrimSpace(r.FormValue("smtp_username")),
-			Password:  r.FormValue("smtp_password"),
-			FromEmail: strings.TrimSpace(r.FormValue("smtp_from_email")),
-			FromName:  strings.TrimSpace(r.FormValue("smtp_from_name")),
-			TLS:       checkbox(r, "smtp_tls"),
+			Host:       strings.TrimSpace(r.FormValue("smtp_host")),
+			Port:       smtpPort,
+			Encryption: normalizeSMTPEncryptionForm(r.FormValue("smtp_encryption"), checkbox(r, "smtp_tls")),
+			Username:   strings.TrimSpace(r.FormValue("smtp_username")),
+			Password:   r.FormValue("smtp_password"),
+			FromEmail:  strings.TrimSpace(r.FormValue("smtp_from_email")),
+			FromName:   strings.TrimSpace(r.FormValue("smtp_from_name")),
+		}
+		if smtpSettings.Encryption == "" {
+			s.badRequest(w, r, errors.New("SMTP encryption type is invalid"))
+			return
+		}
+		smtpSettings.TLS = smtpSettings.Encryption == domain.SMTPEncryptionSTARTTLS
+		hostChanged := strings.TrimSpace(existingSMTP.Host) != smtpSettings.Host
+		usernameChanged := strings.TrimSpace(existingSMTP.Username) != smtpSettings.Username
+		if smtpSettings.Password == "" && existingSMTP.PasswordSet && smtpSettings.Username != "" && (hostChanged || usernameChanged) {
+			s.badRequest(w, r, errors.New("SMTP password is required when SMTP host or username changes"))
+			return
 		}
 		if smtpSettings.Password == "" {
-			smtpSettings.PasswordEncrypted = existingSMTP.PasswordEncrypted
+			if smtpSettings.Username != "" {
+				smtpSettings.PasswordEncrypted = existingSMTP.PasswordEncrypted
+			}
 		}
 		if smtpSettings.Host != "" || smtpSettings.Username != "" || smtpSettings.Password != "" || smtpSettings.FromEmail != "" || smtpSettings.FromName != "" {
-			if err := emailer.NewSender(emailer.SMTPConfig{Host: smtpSettings.Host, Port: smtpSettings.Port, Username: smtpSettings.Username, Password: smtpSettings.Password, FromEmail: smtpSettings.FromEmail, FromName: smtpSettings.FromName, TLS: smtpSettings.TLS}).Validate(); err != nil {
+			if err := emailer.NewSender(emailer.SMTPConfig{Host: smtpSettings.Host, Port: smtpSettings.Port, Encryption: smtpSettings.Encryption, Username: smtpSettings.Username, Password: smtpSettings.Password, FromEmail: smtpSettings.FromEmail, FromName: smtpSettings.FromName, TLS: smtpSettings.TLS}).Validate(); err != nil {
 				s.badRequest(w, r, err)
 				return
 			}
@@ -3000,13 +3013,14 @@ func (s *Server) bootstrapWorkspaceSMTPFromGlobal(ctx context.Context) error {
 		return nil
 	}
 	seed := domain.WorkspaceSMTPSettings{
-		Host:      legacy.Host,
-		Port:      legacy.Port,
-		Username:  legacy.Username,
-		Password:  legacy.Password,
-		FromEmail: legacy.FromEmail,
-		FromName:  legacy.FromName,
-		TLS:       legacy.TLS,
+		Host:       legacy.Host,
+		Port:       legacy.Port,
+		Encryption: legacy.Encryption,
+		Username:   legacy.Username,
+		Password:   legacy.Password,
+		FromEmail:  legacy.FromEmail,
+		FromName:   legacy.FromName,
+		TLS:        legacy.TLS,
 	}
 	return s.store.UpsertWorkspaceSMTPSettings(ctx, workspaceID, seed)
 }
@@ -3021,13 +3035,14 @@ func (s *Server) legacyGlobalSMTPConfig() emailer.SMTPConfig {
 		fromEmail = strings.TrimSpace(s.cfg.SMTPFrom)
 	}
 	return emailer.SMTPConfig{
-		Host:      strings.TrimSpace(s.cfg.SMTPHost),
-		Port:      s.cfg.SMTPPort,
-		Username:  strings.TrimSpace(s.cfg.SMTPUsername),
-		Password:  s.cfg.SMTPPassword,
-		FromEmail: strings.TrimSpace(fromEmail),
-		FromName:  strings.TrimSpace(fromName),
-		TLS:       s.cfg.SMTPStartTLS,
+		Host:       strings.TrimSpace(s.cfg.SMTPHost),
+		Port:       s.cfg.SMTPPort,
+		Encryption: legacySMTPEncryption(s.cfg.SMTPStartTLS),
+		Username:   strings.TrimSpace(s.cfg.SMTPUsername),
+		Password:   s.cfg.SMTPPassword,
+		FromEmail:  strings.TrimSpace(fromEmail),
+		FromName:   strings.TrimSpace(fromName),
+		TLS:        s.cfg.SMTPStartTLS,
 	}
 }
 
@@ -3037,13 +3052,14 @@ func (s *Server) smtpConfigForWorkspace(ctx context.Context, workspaceID int64) 
 		return emailer.SMTPConfig{}, err
 	}
 	cfg := emailer.SMTPConfig{
-		Host:      strings.TrimSpace(settings.Host),
-		Port:      settings.Port,
-		Username:  strings.TrimSpace(settings.Username),
-		Password:  settings.Password,
-		FromEmail: strings.TrimSpace(settings.FromEmail),
-		FromName:  strings.TrimSpace(settings.FromName),
-		TLS:       settings.TLS,
+		Host:       strings.TrimSpace(settings.Host),
+		Port:       settings.Port,
+		Encryption: settings.Encryption,
+		Username:   strings.TrimSpace(settings.Username),
+		Password:   settings.Password,
+		FromEmail:  strings.TrimSpace(settings.FromEmail),
+		FromName:   strings.TrimSpace(settings.FromName),
+		TLS:        settings.TLS,
 	}
 	if emailer.NewSender(cfg).Configured() {
 		return cfg, nil
@@ -3060,6 +3076,31 @@ func (s *Server) senderForWorkspace(ctx context.Context, workspaceID int64) (ema
 		return emailer.Sender{}, err
 	}
 	return emailer.NewSender(cfg), nil
+}
+
+func normalizeSMTPEncryptionForm(raw string, tlsChecked bool) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case domain.SMTPEncryptionNone:
+		return domain.SMTPEncryptionNone
+	case domain.SMTPEncryptionSTARTTLS:
+		return domain.SMTPEncryptionSTARTTLS
+	case domain.SMTPEncryptionSSLTLS:
+		return domain.SMTPEncryptionSSLTLS
+	case "":
+		if tlsChecked {
+			return domain.SMTPEncryptionSTARTTLS
+		}
+		return domain.SMTPEncryptionNone
+	default:
+		return ""
+	}
+}
+
+func legacySMTPEncryption(startTLS bool) string {
+	if startTLS {
+		return domain.SMTPEncryptionSTARTTLS
+	}
+	return domain.SMTPEncryptionNone
 }
 
 func (s *Server) senderForUser(ctx context.Context, userID int64) (emailer.Sender, error) {
