@@ -1317,6 +1317,18 @@ func Webhooks(user *NavUser, hooks []domain.WebhookEndpoint) templ.Component {
 	}))
 }
 
+func EditUser(user *NavUser, target domain.User) templ.Component {
+	return Layout("Edit user", user, templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		pageHeader(w, "Edit user", "Administration", "Update user profile and access settings, then save or go back to users.")
+		_, _ = fmt.Fprint(w, `<div class="form-actions section-spacer"><a class="ghost-button" href="/admin/users">Cancel and return to users</a></div><section class="panel form-panel">`)
+		if err := UserForm(user, &target).Render(ctx, w); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprint(w, `</section>`)
+		return nil
+	}))
+}
+
 func UserForm(user *NavUser, target *domain.User) templ.Component {
 	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
 		action := "/admin/users"
@@ -1343,7 +1355,8 @@ func UserForm(user *NavUser, target *domain.User) templ.Component {
 		}
 		_, _ = fmt.Fprintf(w, `<form class="form-grid" method="post" action="%s"><input type="hidden" name="csrf" value="%s"><label>Email<input name="email" type="email" value="%s" required></label><label>Username <span class="field-hint">used for login</span><input name="username" value="%s" required></label><label>Display name<input name="display_name" value="%s" required></label><label>%s<input name="password" type="password"%s></label>`, esc(action), esc(user.CSRF), esc(email), esc(username), esc(displayName), passwordLabel, passwordRequired)
 		renderTimezoneSelect(w, "Timezone", "timezone", timezone, true)
-		_, _ = fmt.Fprintf(w, `<label>Role<select name="role"><option value="user"%s>User</option><option value="teamlead"%s>Team lead</option><option value="admin"%s>Admin</option><option value="superadmin"%s>Super admin</option></select></label><label class="check"><input type="checkbox" name="enabled" value="1"%s> Enabled</label><div class="form-actions"><button class="primary">%s</button></div></form>`, selectedAttr(selectedRoleName == string(domain.RoleUser)), selectedAttr(selectedRoleName == string(domain.RoleTeamLead)), selectedAttr(selectedRoleName == string(domain.RoleAdmin)), selectedAttr(selectedRoleName == string(domain.RoleSuperAdmin)), enabledChecked, buttonLabel)
+		_, _ = fmt.Fprintf(w, `<label>Role<select name="role"><option value="user"%s>User</option><option value="teamlead"%s>Team lead</option><option value="admin"%s>Admin</option><option value="superadmin"%s>Super admin</option></select></label><label class="check"><input type="checkbox" name="enabled" value="1"%s> Enabled</label><div class="form-actions">`, selectedAttr(selectedRoleName == string(domain.RoleUser)), selectedAttr(selectedRoleName == string(domain.RoleTeamLead)), selectedAttr(selectedRoleName == string(domain.RoleAdmin)), selectedAttr(selectedRoleName == string(domain.RoleSuperAdmin)), enabledChecked)
+		_, _ = fmt.Fprintf(w, `<button class="primary">%s</button></div></form>`, buttonLabel)
 		if user.Permissions["manage_users"] {
 			_, _ = fmt.Fprint(w,
 				`<div class="role-guide">`+

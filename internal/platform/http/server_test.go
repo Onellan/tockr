@@ -86,6 +86,48 @@ func TestAdminNavigationLinksLoadAndMarkActiveState(t *testing.T) {
 	}
 }
 
+func TestAdminUsersEditUsesDedicatedPage(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, domain.User{
+		Email:       "editor@example.com",
+		Username:    "editor",
+		DisplayName: "Editor User",
+		Timezone:    "UTC",
+		Enabled:     true,
+	}, "editor12345", []domain.Role{domain.RoleUser}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.FindUserByEmail(ctx, "editor@example.com")
+	if err != nil || target == nil {
+		t.Fatal("expected created user")
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	body := getWithCookie(app, "/admin/users", cookie).Body.String()
+	if !strings.Contains(body, `href="/admin/users/`+strconv.FormatInt(target.ID, 10)+`/edit"`) {
+		t.Fatal("users table should link to a dedicated edit page")
+	}
+	if strings.Contains(body, `class="inline-edit"`) {
+		t.Fatal("users table should not render inline edit controls")
+	}
+
+	edit := getWithCookie(app, "/admin/users/"+strconv.FormatInt(target.ID, 10)+"/edit", cookie)
+	if edit.Code != http.StatusOK {
+		t.Fatalf("edit user page returned %d", edit.Code)
+	}
+	editBody := edit.Body.String()
+	for _, expected := range []string{`<h1>Edit user</h1>`, `href="/admin/users">Cancel and return to users</a>`, `>Save user</button>`} {
+		if !strings.Contains(editBody, expected) {
+			t.Fatalf("edit user page missing %q", expected)
+		}
+	}
+	if strings.Contains(editBody, `href="/admin/users">Cancel</a>`) {
+		t.Fatal("edit user page should not render a form-level cancel button")
+	}
+}
+
 func TestAdminDemoDataCanShowAndHideSeededWorkspaceData(t *testing.T) {
 	app, store := testApp(t)
 	defer store.Close()
@@ -341,6 +383,148 @@ func TestWorkspaceSwitcherChangesSessionScope(t *testing.T) {
 	}
 	if body := getWithCookie(app, "/", cookie).Body.String(); strings.Contains(body, `class="workspace-switcher"`) || strings.Contains(body, "Alt Workspace</option>") {
 		t.Fatal("workspace switcher should not render in the shared topbar")
+	}
+}
+
+func TestFinancialAndScheduleAdminScreensAreWorkspaceScoped(t *testing.T) {
+	app, store := testApp(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	admin, err := store.FindUserByEmail(ctx, "admin@example.com")
+	if err != nil || admin == nil {
+		t.Fatal("missing admin")
+	}
+
+	_, err = store.DB().ExecContext(ctx, `INSERT INTO workspaces(organization_id, name, slug, default_currency, timezone, created_at) VALUES(1,'Alt Workspace','alt-scope','USD','UTC',?)`, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defaultWorkspaceID, altWorkspaceID int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT id FROM workspaces ORDER BY id LIMIT 1`).Scan(&defaultWorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT id FROM workspaces WHERE slug='alt-scope'`).Scan(&altWorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT OR IGNORE INTO workspace_members(workspace_id, user_id, role, created_at) VALUES(?,?,?,?)`, altWorkspaceID, admin.ID, "admin", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	ws1Customer := &domain.Customer{WorkspaceID: defaultWorkspaceID, Name: "WS1 Scoped Customer", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, ws1Customer); err != nil {
+		t.Fatal(err)
+	}
+	ws1Project := &domain.Project{WorkspaceID: defaultWorkspaceID, CustomerID: ws1Customer.ID, Name: "WS1 Scoped Project", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, ws1Project); err != nil {
+		t.Fatal(err)
+	}
+	ws2Customer := &domain.Customer{WorkspaceID: altWorkspaceID, Name: "WS2 Scoped Customer", Currency: "USD", Timezone: "UTC", Visible: true, Billable: true}
+	if err := store.UpsertCustomer(ctx, ws2Customer); err != nil {
+		t.Fatal(err)
+	}
+	ws2Project := &domain.Project{WorkspaceID: altWorkspaceID, CustomerID: ws2Customer.ID, Name: "WS2 Scoped Project", Visible: true, Billable: true}
+	if err := store.UpsertProject(ctx, ws2Project); err != nil {
+		t.Fatal(err)
+	}
+
+	effective := time.Now().UTC().AddDate(0, 0, -1)
+	if err := store.UpsertRate(ctx, &domain.Rate{WorkspaceID: defaultWorkspaceID, ProjectID: &ws1Project.ID, AmountCents: 11100, EffectiveFrom: effective}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRate(ctx, &domain.Rate{WorkspaceID: altWorkspaceID, ProjectID: &ws2Project.ID, AmountCents: 22200, EffectiveFrom: effective}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertExchangeRate(ctx, &domain.ExchangeRate{WorkspaceID: defaultWorkspaceID, FromCurrency: "ZAR", ToCurrency: "USD", RateThousandths: 85, EffectiveFrom: effective}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertExchangeRate(ctx, &domain.ExchangeRate{WorkspaceID: altWorkspaceID, FromCurrency: "EUR", ToCurrency: "USD", RateThousandths: 1100, EffectiveFrom: effective}); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := loginCookie(t, app, "admin@example.com", "admin12345")
+	switchWorkspace := func(targetID int64) {
+		body := getWithCookie(app, "/account", cookie).Body.String()
+		csrf := csrfFromBody(t, body)
+		rec := postFormWithCookie(app, "/workspace", cookie, url.Values{
+			"csrf":         {csrf},
+			"workspace_id": {strconv.FormatInt(targetID, 10)},
+		})
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("workspace switch returned %d", rec.Code)
+		}
+	}
+
+	ws1ScheduleBody := getWithCookie(app, "/admin/schedule", cookie).Body.String()
+	ws1CSRF := csrfFromBody(t, ws1ScheduleBody)
+	rec := postFormWithCookie(app, "/admin/schedule", cookie, url.Values{
+		"csrf":          {ws1CSRF},
+		"hours_per_day": {"6"},
+		"day_mon":       {"1"},
+		"day_tue":       {"1"},
+		"day_wed":       {"1"},
+		"day_thu":       {"1"},
+		"day_fri":       {"1"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("save schedule in workspace 1 returned %d", rec.Code)
+	}
+
+	ws1Rates := getWithCookie(app, "/rates", cookie).Body.String()
+	if !strings.Contains(ws1Rates, "WS1 Scoped Project") || strings.Contains(ws1Rates, "WS2 Scoped Project") {
+		t.Fatal("rates page should be scoped to the active workspace")
+	}
+	ws1Exchange := getWithCookie(app, "/admin/exchange-rates", cookie).Body.String()
+	if !strings.Contains(ws1Exchange, ">ZAR<") || strings.Contains(ws1Exchange, ">EUR<") {
+		t.Fatal("exchange rates page should be scoped to the active workspace")
+	}
+	ws1Recalc := getWithCookie(app, "/admin/recalculate", cookie).Body.String()
+	if !strings.Contains(ws1Recalc, "WS1 Scoped Project") || strings.Contains(ws1Recalc, "WS2 Scoped Project") {
+		t.Fatal("recalculate page project selector should be scoped to the active workspace")
+	}
+	if !strings.Contains(getWithCookie(app, "/admin/schedule", cookie).Body.String(), `name="hours_per_day" value="6.0"`) {
+		t.Fatal("workspace 1 schedule should reflect saved value")
+	}
+
+	switchWorkspace(altWorkspaceID)
+
+	ws2Rates := getWithCookie(app, "/rates", cookie).Body.String()
+	if !strings.Contains(ws2Rates, "WS2 Scoped Project") || strings.Contains(ws2Rates, "WS1 Scoped Project") {
+		t.Fatal("rates page should switch data with workspace")
+	}
+	ws2Exchange := getWithCookie(app, "/admin/exchange-rates", cookie).Body.String()
+	if !strings.Contains(ws2Exchange, ">EUR<") || strings.Contains(ws2Exchange, ">ZAR<") {
+		t.Fatal("exchange rates page should switch data with workspace")
+	}
+	ws2Recalc := getWithCookie(app, "/admin/recalculate", cookie).Body.String()
+	if !strings.Contains(ws2Recalc, "WS2 Scoped Project") || strings.Contains(ws2Recalc, "WS1 Scoped Project") {
+		t.Fatal("recalculate page should switch project options with workspace")
+	}
+	ws2Schedule := getWithCookie(app, "/admin/schedule", cookie).Body.String()
+	if !strings.Contains(ws2Schedule, `name="hours_per_day" value="8.0"`) {
+		t.Fatal("new workspace should use default schedule before save")
+	}
+
+	ws2CSRF := csrfFromBody(t, ws2Schedule)
+	rec = postFormWithCookie(app, "/admin/schedule", cookie, url.Values{
+		"csrf":          {ws2CSRF},
+		"hours_per_day": {"7"},
+		"day_mon":       {"1"},
+		"day_tue":       {"1"},
+		"day_wed":       {"1"},
+		"day_thu":       {"1"},
+		"day_fri":       {"1"},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("save schedule in workspace 2 returned %d", rec.Code)
+	}
+	if !strings.Contains(getWithCookie(app, "/admin/schedule", cookie).Body.String(), `name="hours_per_day" value="7.0"`) {
+		t.Fatal("workspace 2 schedule should reflect saved value")
+	}
+
+	switchWorkspace(defaultWorkspaceID)
+	if !strings.Contains(getWithCookie(app, "/admin/schedule", cookie).Body.String(), `name="hours_per_day" value="6.0"`) {
+		t.Fatal("workspace 1 schedule should remain unchanged after editing workspace 2")
 	}
 }
 

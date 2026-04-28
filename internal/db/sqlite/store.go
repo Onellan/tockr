@@ -2630,7 +2630,7 @@ func (s *Store) Dashboard(ctx context.Context, access domain.AccessContext) (dom
 		access.WorkspaceID, access.UserID, formatTime(weekStart)).Scan(&summary.WeekTracked); err != nil {
 		return summary, err
 	}
-	schedule := s.workSchedule(ctx)
+	schedule := s.workSchedule(ctx, access.WorkspaceID)
 	summary.ExpectedWeekSeconds = expectedSecondsToDateWithSchedule(time.Now().UTC(), schedule)
 	expectedWeekSeconds := summary.ExpectedWeekSeconds
 	if expectedWeekSeconds > summary.WeekTracked {
@@ -3515,16 +3515,20 @@ func generateEntityIDTx(ctx context.Context, tx *sql.Tx, table, prefix string, w
 	return fmt.Sprintf("%s-%06d", prefix, n+1), nil
 }
 
-// workSchedule reads working schedule settings from the settings table.
+// workSchedule reads working schedule settings for a workspace.
 // Returns default Mon-Fri 8h/day if not configured.
-func (s *Store) workSchedule(ctx context.Context) domain.WorkSchedule {
+func (s *Store) workSchedule(ctx context.Context, workspaceID int64) domain.WorkSchedule {
 	schedule := domain.WorkSchedule{
 		WorkingDaysOfWeek:  []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday},
 		WorkingHoursPerDay: 8.0,
 	}
 	var daysStr, hoursStr string
-	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='working_days'`).Scan(&daysStr)
-	_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='working_hours_per_day'`).Scan(&hoursStr)
+	_ = s.db.QueryRowContext(ctx, `SELECT working_days, working_hours_per_day FROM workspace_work_schedules WHERE workspace_id=?`, workspaceID).Scan(&daysStr, &hoursStr)
+	if daysStr == "" && hoursStr == "" {
+		// Backward-compat fallback for older databases that still use global settings keys.
+		_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='working_days'`).Scan(&daysStr)
+		_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE name='working_hours_per_day'`).Scan(&hoursStr)
+	}
 	if daysStr != "" {
 		var days []time.Weekday
 		for _, part := range strings.Split(daysStr, ",") {
@@ -3579,26 +3583,29 @@ func expectedSecondsForDateRangeWithSchedule(begin, end time.Time, schedule doma
 	return int64(float64(days) * schedule.WorkingHoursPerDay * 3600)
 }
 
-// UpsertWorkSchedule saves working schedule settings.
-func (s *Store) UpsertWorkSchedule(ctx context.Context, schedule domain.WorkSchedule) error {
+// UpsertWorkSchedule saves working schedule settings for a workspace.
+func (s *Store) UpsertWorkSchedule(ctx context.Context, workspaceID int64, schedule domain.WorkSchedule) error {
 	days := make([]string, len(schedule.WorkingDaysOfWeek))
 	for i, d := range schedule.WorkingDaysOfWeek {
 		days[i] = strconv.Itoa(int(d))
 	}
 	daysStr := strings.Join(days, ",")
 	hoursStr := strconv.FormatFloat(schedule.WorkingHoursPerDay, 'f', -1, 64)
-	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('working_days',?)`, daysStr); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO settings(name, value) VALUES('working_hours_per_day',?)`, hoursStr); err != nil {
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO workspace_work_schedules(workspace_id, working_days, working_hours_per_day, updated_at)
+VALUES(?,?,?,?)
+ON CONFLICT(workspace_id) DO UPDATE SET
+	working_days=excluded.working_days,
+	working_hours_per_day=excluded.working_hours_per_day,
+	updated_at=excluded.updated_at`, workspaceID, daysStr, hoursStr, utcNow()); err != nil {
 		return err
 	}
 	return nil
 }
 
 // WorkSchedulePublic returns the current work schedule settings as a domain.WorkSchedule.
-func (s *Store) WorkSchedulePublic(ctx context.Context) domain.WorkSchedule {
-	return s.workSchedule(ctx)
+func (s *Store) WorkSchedulePublic(ctx context.Context, workspaceID int64) domain.WorkSchedule {
+	return s.workSchedule(ctx, workspaceID)
 }
 
 func formatTime(t time.Time) string {
@@ -4086,7 +4093,7 @@ func (s *Store) RemoveProjectWorkstream(ctx context.Context, projectID, workstre
 func (s *Store) UtilizationReport(ctx context.Context, access domain.AccessContext, begin, end *time.Time) ([]domain.UtilizationRow, error) {
 	// Fetch schedule BEFORE opening the result set — MaxOpenConns=1 means any
 	// query issued while rows is open would deadlock.
-	schedule := s.workSchedule(ctx)
+	schedule := s.workSchedule(ctx, access.WorkspaceID)
 	var expectedSeconds int64
 	if begin != nil && end != nil {
 		expectedSeconds = expectedSecondsForDateRangeWithSchedule(*begin, *end, schedule)
@@ -4290,6 +4297,12 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS workspace_work_schedules(
+	workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+	working_days TEXT NOT NULL,
+	working_hours_per_day TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS roles(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
 INSERT OR IGNORE INTO roles(name) VALUES('user'),('teamlead'),('admin'),('superadmin');
 CREATE TABLE IF NOT EXISTS role_permissions(role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE, permission TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(role_id, permission));

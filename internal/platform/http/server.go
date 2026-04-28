@@ -207,6 +207,7 @@ func New(cfg config.Config, store *sqlite.Store, log *slog.Logger) *Server {
 		r.Post("/admin/workspaces/{id}/members", s.requirePermission(auth.PermManageOrg, s.workspaceMemberSave))
 		r.Post("/admin/workspaces/{id}/members/remove", s.requirePermission(auth.PermManageOrg, s.workspaceMemberRemove))
 		r.Get("/admin/users", s.requirePermission(auth.PermManageUsers, s.users))
+		r.Get("/admin/users/{id}/edit", s.requirePermission(auth.PermManageUsers, s.editUser))
 		r.Post("/admin/users", s.requirePermission(auth.PermManageUsers, s.createUser))
 		r.Post("/admin/users/{id}", s.requirePermission(auth.PermManageUsers, s.createUser))
 	})
@@ -2048,14 +2049,23 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 		for _, role := range u.Roles {
 			roles = append(roles, string(role))
 		}
-		actions, err := inlineEditAction(r.Context(), templates.UserForm(s.nav(r), &u))
-		if err != nil {
-			s.serverError(w, r, err)
-			return
-		}
+		actions := fmt.Sprintf(`<a class="table-action" href="/admin/users/%d/edit">Edit</a>`, u.ID)
 		rows = append(rows, []string{html.EscapeString(u.Email), html.EscapeString(u.DisplayName), html.EscapeString(strings.Join(roles, ",")), html.EscapeString(boolText(u.Enabled)), actions})
 	}
 	s.render(w, r, templates.EntityListRaw("Users", s.nav(r), []string{"Email", "Name", "Roles", "Enabled", "Actions"}, rows, templates.UserForm(s.nav(r), nil)))
+}
+
+func (s *Server) editUser(w http.ResponseWriter, r *http.Request) {
+	user, err := s.store.FindUserByID(r.Context(), pathID(r))
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	if user == nil || user.OrganizationID != s.access(r).OrganizationID {
+		http.NotFound(w, r)
+		return
+	}
+	s.render(w, r, templates.EditUser(s.nav(r), *user))
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -3275,7 +3285,7 @@ func (s *Server) removeProjectWorkstream(w http.ResponseWriter, r *http.Request)
 // ─── Work schedule settings ────────────────────────────────────────────────────
 
 func (s *Server) workScheduleSettings(w http.ResponseWriter, r *http.Request) {
-	schedule := s.store.WorkSchedulePublic(r.Context())
+	schedule := s.store.WorkSchedulePublic(r.Context(), s.access(r).WorkspaceID)
 	s.render(w, r, templates.WorkScheduleSettings(s.nav(r), schedule))
 }
 
@@ -3301,7 +3311,7 @@ func (s *Server) saveWorkScheduleSettings(w http.ResponseWriter, r *http.Request
 		days = []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday}
 	}
 	schedule := domain.WorkSchedule{WorkingDaysOfWeek: days, WorkingHoursPerDay: hoursPerDay}
-	if err := s.store.UpsertWorkSchedule(r.Context(), schedule); err != nil {
+	if err := s.store.UpsertWorkSchedule(r.Context(), s.access(r).WorkspaceID, schedule); err != nil {
 		s.serverError(w, r, err)
 		return
 	}
