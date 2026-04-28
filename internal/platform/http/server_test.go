@@ -935,7 +935,7 @@ func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing
 
 	dashboard := getWithCookie(app, "/", cookie).Body.String()
 	for _, expected := range []string{
-		"Engineering operations",
+		"Project operations",
 		"Continue recent work",
 		"Project watchlist",
 		"Pump sizing review",
@@ -947,7 +947,7 @@ func TestEngineeringWorkflowSurfacesRenderRecentWorkAndBillingContext(t *testing
 
 	timesheets := getWithCookie(app, "/timesheets?customer_id="+strconv.FormatInt(customer.ID, 10)+"&project_id="+strconv.FormatInt(project.ID, 10)+"&activity_id="+strconv.FormatInt(activity.ID, 10)+"&task_id="+strconv.FormatInt(task.ID, 10)+"&date=2026-04-23&description=Pump+sizing+review", cookie).Body.String()
 	for _, expected := range []string{
-		`<h2>Log engineering time</h2>`,
+		`<h2>Log project time</h2>`,
 		`name="customer_id"`,
 		`name="activity_id"`,
 		`Pump sizing review`,

@@ -262,10 +262,10 @@ func readProjectDraftDetails(r *http.Request, current domain.Project, workspaceI
 
 func validateProjectDraftDetails(project domain.Project, selectors *templates.SelectorData) error {
 	if project.CustomerID == 0 {
-		return errors.New("Select a customer before continuing")
+		return errors.New("Select a client before continuing")
 	}
 	if selectors == nil || selectors.CustomerLabels[project.CustomerID] == "" {
-		return errors.New("Selected customer is not available in this workspace")
+		return errors.New("Selected client is not available in this workspace")
 	}
 	if strings.TrimSpace(project.Name) == "" {
 		return errors.New("Enter a project name before continuing")
@@ -402,7 +402,7 @@ func addExistingDraftActivity(draft *domain.ProjectCreateDraft, selectors *templ
 		}
 	}
 	if !valid {
-		return errors.New("Only global work types can be reused during project setup")
+		return errors.New("Only global deliverables can be reused during project setup")
 	}
 	for _, item := range draft.Activities {
 		if item.ExistingActivityID == activityID {
