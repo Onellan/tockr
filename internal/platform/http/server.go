@@ -236,10 +236,7 @@ func (s *Server) Handler() http.Handler {
 
 func redirectCanonical(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		target := path
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
+		target := (&url.URL{Path: path, RawQuery: r.URL.Query().Encode()}).String()
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	}
 }
