@@ -147,7 +147,14 @@ func (s Sender) Send(message Message) error {
 	}
 	defer c.Close()
 	if s.cfg.Username != "" {
-		auth := smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
+		var auth smtp.Auth
+		if encryption == EncryptionSSLTLS {
+			// Connection is already TLS at the transport layer (tls.Dial);
+			// smtp.PlainAuth rejects this because smtp.Client.tls is not set.
+			auth = tlsPlainAuth{username: s.cfg.Username, password: s.cfg.Password}
+		} else {
+			auth = smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
+		}
 		if err := c.Auth(auth); err != nil {
 			return err
 		}
@@ -170,6 +177,24 @@ func (s Sender) Send(message Message) error {
 		return err
 	}
 	return c.Quit()
+}
+
+// tlsPlainAuth is smtp.PlainAuth without the TLS check, for use on connections
+// that are already TLS at the transport level (i.e. SSL/TLS via tls.Dial).
+type tlsPlainAuth struct {
+	username, password string
+}
+
+func (a tlsPlainAuth) Start(_ *smtp.ServerInfo) (string, []byte, error) {
+	resp := []byte("\x00" + a.username + "\x00" + a.password)
+	return "PLAIN", resp, nil
+}
+
+func (a tlsPlainAuth) Next(_ []byte, more bool) ([]byte, error) {
+	if more {
+		return nil, errors.New("unexpected server challenge")
+	}
+	return nil, nil
 }
 
 func formatMessage(from, to, subject, text string) []byte {
