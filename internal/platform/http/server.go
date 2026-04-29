@@ -1985,12 +1985,14 @@ func (s *Server) workspaceSMTPTest(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = r.ParseForm()
 	to := strings.TrimSpace(r.FormValue("to"))
+	workspaceID := workspace.ID
 	if _, err := mail.ParseAddress(to); err != nil {
 		s.redirectWithFlash(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), "error", "Enter a valid test recipient")
 		return
 	}
 	sender, err := s.senderForWorkspace(r.Context(), workspace.ID)
 	if err != nil {
+		s.log.Error("smtp test sender setup failed", "workspace_id", workspaceID, "to", to, "err", err)
 		s.serverError(w, r, err)
 		return
 	}
@@ -1999,9 +2001,11 @@ func (s *Server) workspaceSMTPTest(w http.ResponseWriter, r *http.Request) {
 		Subject: "Tockr SMTP test",
 		Text:    "This is a Tockr SMTP test email. If you received it, email sending is working.",
 	}); err != nil {
+		s.log.Warn("smtp test send failed", "workspace_id", workspaceID, "to", to, "err", err)
 		s.redirectWithFlash(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), "error", "SMTP test failed: "+err.Error())
 		return
 	}
+	s.log.Info("smtp test email sent", "workspace_id", workspaceID, "to", to)
 	s.redirectWithFlash(w, r, fmt.Sprintf("/admin/workspaces/%d", workspace.ID), "success", "SMTP test email sent")
 }
 
@@ -3375,12 +3379,14 @@ func (s *Server) saveEmailSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	to := strings.TrimSpace(r.FormValue("to"))
+	workspaceID := s.access(r).WorkspaceID
 	if _, err := mail.ParseAddress(to); err != nil {
 		s.redirectWithFlash(w, r, "/admin/email", "error", "Enter a valid test recipient")
 		return
 	}
-	sender, err := s.senderForWorkspace(r.Context(), s.access(r).WorkspaceID)
+	sender, err := s.senderForWorkspace(r.Context(), workspaceID)
 	if err != nil {
+		s.log.Error("smtp test sender setup failed", "workspace_id", workspaceID, "to", to, "err", err)
 		s.serverError(w, r, err)
 		return
 	}
@@ -3389,9 +3395,11 @@ func (s *Server) testEmailSettings(w http.ResponseWriter, r *http.Request) {
 		Subject: "Tockr SMTP test",
 		Text:    "This is a Tockr SMTP test email. If you received it, email sending is working.",
 	}); err != nil {
+		s.log.Warn("smtp test send failed", "workspace_id", workspaceID, "to", to, "err", err)
 		s.redirectWithFlash(w, r, "/admin/email", "error", "SMTP test failed: "+err.Error())
 		return
 	}
+	s.log.Info("smtp test email sent", "workspace_id", workspaceID, "to", to)
 	s.redirectWithFlash(w, r, "/admin/email", "success", "SMTP test email sent")
 }
 
